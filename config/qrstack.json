@@ -1,8 +1,8 @@
 {
-  "environment": "sandbox",
+  "environment": "production-preview",
   "spreadsheetId": "1v4dr2zVOuvcPJJ02Ah6V-AXsK0d8I6DVGIpMcSe8NmU",
   "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/1v4dr2zVOuvcPJJ02Ah6V-AXsK0d8I6DVGIpMcSe8NmU/edit",
   "appsScriptWebAppUrl": "https://script.google.com/macros/s/AKfycbxb7McfZcNZ1FwpJ1WXKS1NURWjE8AQdK5X7CYAL0zNQIH2UQdtnKCKQjlzmyyuQwrcuQ/exec",
-  "activeRestaurantSlug": "amaro-testes",
-  "adminToken": "sandbox-amaro-2026"
+  "activeRestaurantSlug": "amaro",
+  "adminToken": "qrstack-amaro-2026"
 }

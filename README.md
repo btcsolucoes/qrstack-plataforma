@@ -1,6 +1,6 @@
-# QrStack System Prototype
+# QrStack Plataforma
 
-Protótipo isolado para evoluir a QrStack de cardápios estáticos para uma plataforma multi-restaurante.
+Plataforma QrStack para gerenciar clientes, formulários, cardápios dinâmicos, Stories e insights.
 
 ## Rotas do MVP
 
@@ -9,12 +9,13 @@ Protótipo isolado para evoluir a QrStack de cardápios estáticos para uma plat
 - `#/hq/respostas` - respostas dos formulários.
 - `#/hq/stories` - Stories gerados.
 - `#/hq/insights` - insights internos.
-- `#/admin/restaurante-demo` - acesso simplificado do restaurante.
-- `#/r/restaurante-demo?src=qr` - cardápio público com tracking de origem.
+- `#/cliente/amaro?token=qrstack-amaro-2026` - acesso simplificado do restaurante.
+- `#/r/amaro?src=qr` - cardápio público com tracking de origem.
 
 ## Escopo atual
 
-- Dados simulados em `localStorage`.
+- Cliente real Amaro cadastrado como base inicial.
+- Dados persistidos em `localStorage` enquanto a camada definitiva de banco/API evolui.
 - Formulário próprio para cardápio do dia.
 - Publicação automática do cardápio público.
 - Geração de Story 1080x1920 em canvas.
@@ -38,21 +39,21 @@ No produto QrStack, o Google Forms sai do fluxo:
 5. Story é gerado a partir da mesma publicação.
 6. Insights ficam na central QrStack.
 
-## Sandbox Google Sheets
+## Google Sheets
 
-Planilha nativa de testes:
+Planilha nativa usada pela base atual:
 
 `https://docs.google.com/spreadsheets/d/1v4dr2zVOuvcPJJ02Ah6V-AXsK0d8I6DVGIpMcSe8NmU/edit`
 
 O arquivo enviado pelo usuário estava como Excel no Drive, então foi criada uma versão nativa Google Sheets para permitir leitura/escrita via API.
 
-## Apps Script Sandbox
+## Apps Script
 
 O código do Web App fica em `apps-script/Code.gs`.
 
 Passos para publicar:
 
-1. Abrir a planilha nativa de testes.
+1. Abrir a planilha nativa da base atual.
 2. Ir em `Extensões > Apps Script`.
 3. Colar o conteúdo de `apps-script/Code.gs`.
 4. Clicar em `Implantar > Nova implantação`.
@@ -60,7 +61,7 @@ Passos para publicar:
 6. Executar como: `Eu`.
 7. Quem tem acesso: `Qualquer pessoa`.
 8. Copiar a URL do Web App.
-9. Colar a URL em `config/sandbox.json` no campo `appsScriptWebAppUrl`.
+9. Colar a URL em `config/qrstack.json` no campo `appsScriptWebAppUrl`.
 
 ## Próxima fase
 

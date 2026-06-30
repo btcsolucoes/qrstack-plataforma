@@ -5,64 +5,44 @@ const ASSETS = {
 
 const QRSTACK_API_URL =
   "https://script.google.com/macros/s/AKfycbxb7McfZcNZ1FwpJ1WXKS1NURWjE8AQdK5X7CYAL0zNQIH2UQdtnKCKQjlzmyyuQwrcuQ/exec";
-const ACTIVE_SANDBOX_SLUG = "amaro-testes";
-const ACTIVE_SANDBOX_TOKEN = "sandbox-amaro-2026";
+const ACTIVE_CLIENT_SLUG = "amaro";
+const ACTIVE_CLIENT_TOKEN = "qrstack-amaro-2026";
 const OWNER_ACCESS_TOKEN = "qrstack-berna-2026";
 
 const DEFAULT_STATE = {
   restaurants: [
     {
-      id: "rest_amaro_testes",
-      name: "Amaro Testes",
-      slug: "amaro-testes",
+      id: "rest_amaro",
+      name: "Amaro Cafe",
+      slug: "amaro",
       logoUrl: ASSETS.qrstackWordmark,
       symbolUrl: ASSETS.qrstackMark,
       primaryColor: "#4a1f16",
       secondaryColor: "#d59b52",
-      whatsappNumber: "81999999999",
-      instagramUrl: "https://instagram.com/amarotestes",
-      mapsUrl: "https://maps.google.com/?q=Amaro%20Testes",
-      address: "Ambiente sandbox",
+      whatsappNumber: "5581999999999",
+      instagramUrl: "https://instagram.com/amarocafe",
+      mapsUrl: "https://maps.google.com/?q=R.%20do%20Apolo%2C%20182%20-%20Recife%20Antigo%2C%20Recife%20-%20PE",
+      address: "R. do Apolo, 182 - Recife Antigo, Recife - PE",
       githubRepo: "btcsolucoes/carda-pio",
       githubPagesUrl: "https://btcsolucoes.github.io/carda-pio/",
       assetsBaseUrl: "https://btcsolucoes.github.io/carda-pio/",
-      adminToken: ACTIVE_SANDBOX_TOKEN,
+      adminToken: ACTIVE_CLIENT_TOKEN,
       reminderTime: "09:00",
       reminderEnabled: false,
       messageTemplate:
         "Bom dia! Segue o link do painel QrStack para publicar o cardápio e gerar o Story de hoje: {link}",
     },
-    {
-      id: "rest-cafe-demo",
-      name: "Café Modelo",
-      slug: "cafe-modelo",
-      logoUrl: ASSETS.qrstackWordmark,
-      symbolUrl: ASSETS.qrstackMark,
-      primaryColor: "#203b46",
-      secondaryColor: "#d9843b",
-      whatsappNumber: "81988888888",
-      instagramUrl: "https://instagram.com/cafemodelo",
-      mapsUrl: "https://maps.google.com/?q=Caf%C3%A9%20Modelo",
-      address: "Av. Modelo, 250",
-      githubRepo: "",
-      githubPagesUrl: "",
-      assetsBaseUrl: "",
-      adminToken: "demo-cafe",
-      reminderTime: "08:30",
-      reminderEnabled: true,
-      messageTemplate: "Olá! Atualize o cardápio do dia pelo painel: {link}",
-    },
   ],
   menuDays: [
     {
-      id: "menu_amaro_testes_today",
-      restaurantId: "rest_amaro_testes",
+      id: "menu_amaro_today",
+      restaurantId: "rest_amaro",
       date: todayIso(),
       title: "Almoço de Hoje",
       price: "",
       serviceHours: "11h às 15h",
       storyLink: "",
-      notes: "Importado do fluxo atual do Amaro para o sandbox QrStack.",
+      notes: "Importado do fluxo real do Amaro para a plataforma QrStack.",
       isPublished: true,
       publishedAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
@@ -70,19 +50,19 @@ const DEFAULT_STATE = {
     },
   ],
   menuItems: [
-    item("menu_amaro_testes_today", "Carne de Sol Desarrumada", "Executivo", true, 1, "Carne de sol em cubos montada sobre feijão verde com molho de queijos, farofa crocante, cebola crocante e pipoca de queijo coalho", "R$ 36,00"),
-    item("menu_amaro_testes_today", "Camarão Imperador", "Executivo", true, 2, "Camarões empanados e gratinados, com molho pomodoro, sobre purê de batatas e arroz de brócolis", "R$ 37,00"),
-    item("menu_amaro_testes_today", "Charque Brejeira", "Executivo", true, 3, "Charque desfiada e crocante, arroz cremoso de queijo coalho, farofa tropeira com cuscuz e feijão verde", "R$ 37,00"),
-    item("menu_amaro_testes_today", "Frango à Parmegiana", "Executivo", true, 4, "Frango empanado e gratinado, linguine ao tomate, fritas ou purê de batatas", "R$ 32,00"),
-    item("menu_amaro_testes_today", "Galinhada Amaro", "Executivo", true, 5, "Baião de arroz com fava cozido no caldo de cozimento do frango e coxa com sobrecoxa desossada frita", "R$ 36,00"),
-    item("menu_amaro_testes_today", "Maminha do Apolo", "Executivo", true, 6, "Maminha grelhada ao chimichurri, purê de batata, arroz de alho, picles de maxixe e crispy de cebola", "R$ 36,00"),
-    item("menu_amaro_testes_today", "Picadinho Carioca", "Executivo", true, 7, "Contra filé ao molho, arroz de couve e cenoura, feijão carioca, farofa panko e ovo frito", "R$ 35,00"),
+    item("menu_amaro_today", "Carne de Sol Desarrumada", "Executivo", true, 1, "Carne de sol em cubos montada sobre feijão verde com molho de queijos, farofa crocante, cebola crocante e pipoca de queijo coalho", "R$ 36,00"),
+    item("menu_amaro_today", "Camarão Imperador", "Executivo", true, 2, "Camarões empanados e gratinados, com molho pomodoro, sobre purê de batatas e arroz de brócolis", "R$ 37,00"),
+    item("menu_amaro_today", "Charque Brejeira", "Executivo", true, 3, "Charque desfiada e crocante, arroz cremoso de queijo coalho, farofa tropeira com cuscuz e feijão verde", "R$ 37,00"),
+    item("menu_amaro_today", "Frango à Parmegiana", "Executivo", true, 4, "Frango empanado e gratinado, linguine ao tomate, fritas ou purê de batatas", "R$ 32,00"),
+    item("menu_amaro_today", "Galinhada Amaro", "Executivo", true, 5, "Baião de arroz com fava cozido no caldo de cozimento do frango e coxa com sobrecoxa desossada frita", "R$ 36,00"),
+    item("menu_amaro_today", "Maminha do Apolo", "Executivo", true, 6, "Maminha grelhada ao chimichurri, purê de batata, arroz de alho, picles de maxixe e crispy de cebola", "R$ 36,00"),
+    item("menu_amaro_today", "Picadinho Carioca", "Executivo", true, 7, "Contra filé ao molho, arroz de couve e cenoura, feijão carioca, farofa panko e ovo frito", "R$ 35,00"),
   ],
   storyAssets: [],
   events: seedEvents(),
 };
 
-const STORE_KEY = "qrstack-system-prototype-v3-amaro";
+const STORE_KEY = "qrstack-platform-v1-amaro";
 const app = document.getElementById("app");
 let state = loadState();
 let lastStoryDataUrl = "";
@@ -107,8 +87,8 @@ function seedEvents() {
   const type = ["page_view", "page_view", "page_view", "whatsapp_click", "maps_click"];
   return Array.from({ length: 38 }, (_, index) => ({
     id: `event-${index}`,
-    restaurantId: "rest_amaro_testes",
-    menuDayId: "menu_amaro_testes_today",
+    restaurantId: "rest_amaro",
+    menuDayId: "menu_amaro_today",
     eventType: type[index % type.length],
     source: source[index % source.length],
     userAgent: "seed",
@@ -193,7 +173,7 @@ async function syncRestaurantFromApi(slug) {
       return restaurant;
     }
   } catch (error) {
-    console.warn("QrStack sandbox API unavailable:", error.message);
+    console.warn("QrStack API unavailable:", error.message);
   }
   return getRestaurant(slug);
 }
@@ -240,7 +220,7 @@ function fromSheetRestaurant(row) {
     githubRepo: row.github_repo || "",
     githubPagesUrl: row.github_pages_url || "",
     assetsBaseUrl: row.assets_base_url || "",
-    adminToken: row.admin_token || ACTIVE_SANDBOX_TOKEN,
+    adminToken: row.admin_token || ACTIVE_CLIENT_TOKEN,
     reminderTime: row.reminder_time || "",
     reminderEnabled: String(row.reminder_enabled).toUpperCase() === "TRUE",
     messageTemplate: row.message_template || "",
@@ -287,8 +267,8 @@ async function router() {
 
   if (!hash || parts[0] === "home") return renderHome();
   if (parts[0] === "hq" || parts[0] === "central") return renderOwnerRoute(parts[1] || "overview", params);
-  if (parts[0] === "cliente" || parts[0] === "admin") return renderClientRoute(parts[1] || ACTIVE_SANDBOX_SLUG, params);
-  if (parts[0] === "r") return renderPublicMenu(parts[1] || ACTIVE_SANDBOX_SLUG, source);
+  if (parts[0] === "cliente" || parts[0] === "admin") return renderClientRoute(parts[1] || ACTIVE_CLIENT_SLUG, params);
+  if (parts[0] === "r") return renderPublicMenu(parts[1] || ACTIVE_CLIENT_SLUG, source);
   renderHome();
 }
 
@@ -309,7 +289,7 @@ function hasOwnerAccess(params) {
 
 function hasClientAccess(restaurant, params) {
   const token = params.get("token");
-  const expectedToken = restaurant.adminToken || ACTIVE_SANDBOX_TOKEN;
+  const expectedToken = restaurant.adminToken || ACTIVE_CLIENT_TOKEN;
   return token === expectedToken;
 }
 
@@ -318,7 +298,7 @@ function ownerLink(tab = "overview") {
 }
 
 function clientPortalLink(restaurant) {
-  return `#/cliente/${restaurant.slug}?token=${encodeURIComponent(restaurant.adminToken || ACTIVE_SANDBOX_TOKEN)}`;
+  return `#/cliente/${restaurant.slug}?token=${encodeURIComponent(restaurant.adminToken || ACTIVE_CLIENT_TOKEN)}`;
 }
 
 function publicMenuHash(restaurant, source = "qr") {
@@ -512,7 +492,7 @@ function renderHome() {
     <section class="hero">
       <div class="hero__inner">
         <img class="hero__logo" src="${ASSETS.qrstackWordmark}" alt="QrStack" />
-        <p class="eyebrow">Protótipo de plataforma</p>
+        <p class="eyebrow">Plataforma QrStack</p>
         <h1>Cardápio, Story e Insights em um fluxo só</h1>
         <div class="hero__meta">
           <span class="pill">Central do dono</span>
@@ -521,8 +501,8 @@ function renderHome() {
         </div>
         <div class="actions">
           <a class="button" href="#/hq">Central QrStack</a>
-          <a class="button secondary" href="#/cliente/${ACTIVE_SANDBOX_SLUG}">Portal do restaurante</a>
-          <a class="button ghost" href="${publicMenuHash(getRestaurant(ACTIVE_SANDBOX_SLUG))}">Cardápio público</a>
+          <a class="button secondary" href="#/cliente/${ACTIVE_CLIENT_SLUG}">Portal do restaurante</a>
+          <a class="button ghost" href="${publicMenuHash(getRestaurant(ACTIVE_CLIENT_SLUG))}">Cardápio público</a>
         </div>
       </div>
     </section>
@@ -657,7 +637,7 @@ function renderHqOverview() {
       </div>
       <div class="card">
         <h3>Cardápios publicados</h3>
-        <p class="muted">${menus} publicação cadastrada no protótipo local.</p>
+        <p class="muted">${menus} publicação cadastrada na plataforma.</p>
       </div>
     </section>
   `;
@@ -719,8 +699,8 @@ function renderHqResponses() {
           </div>
           ${menu.notes ? `<p class="muted">${menu.notes}</p>` : ""}
           <div class="actions">
-            <a class="button secondary" href="${clientPortalLink(restaurant || getRestaurant(ACTIVE_SANDBOX_SLUG))}">Abrir formulário</a>
-            <a class="button ghost" href="${publicMenuHash(restaurant || getRestaurant(ACTIVE_SANDBOX_SLUG), "hq")}">Ver cardápio</a>
+            <a class="button secondary" href="${clientPortalLink(restaurant || getRestaurant(ACTIVE_CLIENT_SLUG))}">Abrir formulário</a>
+            <a class="button ghost" href="${publicMenuHash(restaurant || getRestaurant(ACTIVE_CLIENT_SLUG), "hq")}">Ver cardápio</a>
           </div>
         </article>
       `;
@@ -1015,7 +995,7 @@ async function renderClientPortal(slug) {
             <input type="hidden" name="date" value="${escapeAttr(todayIso())}" />
             <input type="hidden" name="price" value="${escapeAttr(menu.price || "")}" />
             <input type="hidden" name="serviceHours" value="${escapeAttr(menu.serviceHours || "")}" />
-            ${restaurant.slug === "amaro-testes" ? renderAmaroOriginalForm(menuItems) : renderGenericItemsTextarea(menuItems)}
+            ${restaurant.slug === "amaro" ? renderAmaroOriginalForm(menuItems) : renderGenericItemsTextarea(menuItems)}
             <div class="field field--full">
               <label for="notes">Observações</label>
               <textarea id="notes" name="notes" placeholder="Observações do dia">${menu.notes || ""}</textarea>
@@ -1173,7 +1153,7 @@ function saveStoryPreview(restaurant, menu) {
   apiPost({
     action: "saveStoryAsset",
     slug: restaurant.slug,
-    token: restaurant.adminToken || ACTIVE_SANDBOX_TOKEN,
+    token: restaurant.adminToken || ACTIVE_CLIENT_TOKEN,
     menu_day_id: menu.id,
     image_url: "local-canvas-preview",
     template_name: "daily-menu-v1",
@@ -1196,7 +1176,7 @@ async function saveMenuForm(restaurant, menuId, formData) {
 
   state.menuItems = state.menuItems.filter((menuItem) => menuItem.menuDayId !== menuId);
   const selectedRows =
-    restaurant.slug === "amaro-testes" ? selectedAmaroRows(formData) : selectedGenericRows(formData);
+    restaurant.slug === "amaro" ? selectedAmaroRows(formData) : selectedGenericRows(formData);
   selectedRows.forEach((parsed, index) => {
     state.menuItems.push(item(menuId, parsed.name, parsed.category, parsed.isHighlight, index + 1, parsed.description, parsed.price));
   });
@@ -1207,7 +1187,7 @@ async function saveMenuForm(restaurant, menuId, formData) {
     await apiPost({
       action: "saveMenuDay",
       slug: restaurant.slug,
-      token: restaurant.adminToken || ACTIVE_SANDBOX_TOKEN,
+      token: restaurant.adminToken || ACTIVE_CLIENT_TOKEN,
       date: menu.date,
       title: menu.title,
       price: menu.price,
@@ -1308,7 +1288,7 @@ function renderFullCatalog(restaurant) {
   const catalog = getCatalogForRestaurant(restaurant);
   if (!catalog.length) return "";
   const bySection = groupBy(catalog, "section_id");
-  const sections = restaurant.slug === "amaro-testes" && getAmaroSections().length
+  const sections = restaurant.slug === "amaro" && getAmaroSections().length
     ? getAmaroSections()
     : Object.keys(bySection).map((sectionId) => ({ id: sectionId, title: bySection[sectionId][0]?.section_title || sectionId }));
   return `
