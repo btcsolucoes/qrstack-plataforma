@@ -13,7 +13,7 @@ const DEFAULT_STATE = {
   restaurants: [
     {
       id: "rest_amaro",
-      name: "Amaro Cafe",
+      name: "Amaro Café",
       slug: "amaro",
       logoUrl: ASSETS.qrstackWordmark,
       symbolUrl: ASSETS.qrstackMark,
