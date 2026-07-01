@@ -471,6 +471,55 @@ function catalogByName() {
   }, {});
 }
 
+function normalizeMenuDate(value) {
+  if (!value) return "";
+  const raw = String(value).trim();
+  const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+  const brMatch = raw.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})/);
+  if (brMatch) {
+    const year = brMatch[3].length === 2 ? `20${brMatch[3]}` : brMatch[3];
+    return `${year}-${brMatch[2].padStart(2, "0")}-${brMatch[1].padStart(2, "0")}`;
+  }
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().slice(0, 10);
+}
+
+function formatCurrencyValue(value) {
+  const number = Number(String(value || "").replace(/[^\d,.-]/g, "").replace(",", "."));
+  if (!Number.isFinite(number) || number <= 0) return "";
+  return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(number);
+}
+
+async function fetchLiveLunchItems(restaurant) {
+  if (!restaurant.liveMenuEndpoint) return [];
+  try {
+    const response = await fetch(restaurant.liveMenuEndpoint, { cache: "no-store" });
+    if (!response.ok) throw new Error("live_lunch_request_failed");
+    const data = await response.json();
+    const rows = Array.isArray(data) ? data : data?.ok === true && Array.isArray(data.pratos) ? data.pratos : [];
+    const catalog = catalogByName();
+    return rows
+      .filter((row) => row?.prato && normalizeMenuDate(row.data) === todayIso())
+      .map((row, index) => {
+        const catalogItem = catalog[normalizeKey(row.prato)];
+        return {
+          id: `live-lunch-${index + 1}`,
+          name: row.prato,
+          category: "Almoço de Hoje",
+          description: row.descricao || catalogItem?.description || "Prato informado pelo formulário atual do Amaro.",
+          price: formatCurrencyValue(row.preco) || catalogItem?.price || "",
+          image_url: catalogItem?.image_url || "",
+          isHighlight: true,
+          sortOrder: index + 1,
+        };
+      });
+  } catch (error) {
+    console.warn("QrStack live lunch API unavailable:", error.message);
+    return [];
+  }
+}
+
 function normalizeKey(value) {
   return String(value || "")
     .normalize("NFD")
@@ -1366,6 +1415,7 @@ async function renderPublicMenu(slug, source = "direct") {
   const menuItems = remote.items;
   const groups = groupBy(menuItems, "category");
   const useCanonicalCatalog = restaurant.slug === "amaro";
+  const liveLunchItems = useCanonicalCatalog ? await fetchLiveLunchItems(restaurant) : [];
   setTheme(restaurant);
   if (menu) trackEvent(restaurant, "page_view", source, menu.id);
   app.innerHTML = `
@@ -1381,12 +1431,25 @@ async function renderPublicMenu(slug, source = "direct") {
       </div>
     </section>
     ${renderTopbar([
-      ["#menu", "Cardápio", true],
+      ...(liveLunchItems.length ? [["#almoco-hoje", "Almoço", true]] : []),
+      ["#menu", "Cardápio", !liveLunchItems.length],
       ...(useCanonicalCatalog ? [] : [["#catalogo", "Completo", false]]),
       ["#contato", "Contato", false],
     ], restaurant)}
     <main class="page">
       ${useCanonicalCatalog ? `
+        ${liveLunchItems.length ? `
+          <section id="almoco-hoje" class="section">
+            <div class="section__head">
+              <p class="eyebrow">Atualizado pelo Google Forms</p>
+              <h2>Almoço de Hoje</h2>
+              <p>Itens puxados do mesmo endpoint usado pelo cardápio real do Amaro.</p>
+            </div>
+            <div class="rail">
+              ${liveLunchItems.map((menuItem) => renderMenuItemCard(menuItem, Boolean(menuItem.image_url), restaurant)).join("")}
+            </div>
+          </section>
+        ` : ""}
         <section id="menu" class="section">
           <div class="section__head">
             <p class="eyebrow">Cardápio verdadeiro</p>

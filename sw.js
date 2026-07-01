@@ -1,9 +1,9 @@
-const CACHE_NAME = "qrstack-platform-20260630b";
+const CACHE_NAME = "qrstack-platform-20260630c";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=qrstack-platform-20260630b",
-  "./script.js?v=qrstack-platform-20260630b",
+  "./styles.css?v=qrstack-platform-20260630c",
+  "./script.js?v=qrstack-platform-20260630c",
   "./data/amaro-catalog.js?v=amaro-full-import-20260608",
   "./assets/qrstack-mark.png",
   "./assets/qrstack-wordmark.png"
