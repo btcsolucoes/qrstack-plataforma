@@ -4,13 +4,13 @@ Plataforma QrStack para gerenciar clientes, formulários, cardápios dinâmicos,
 
 ## Rotas do MVP
 
-- `#/hq` - central interna QrStack.
+- `#/hq/overview?key=qrstack-berna-2026` - central interna QrStack.
 - `#/hq/clientes` - clientes cadastrados.
 - `#/hq/respostas` - respostas dos formulários.
 - `#/hq/stories` - Stories gerados.
 - `#/hq/insights` - insights internos.
-- `#/cliente/amaro?token=qrstack-amaro-2026` - acesso simplificado do restaurante.
-- `#/r/amaro?src=qr` - cardápio público com tracking de origem.
+- `#/cliente/amaro?token=qrstack-amaro-2026` - formulário simplificado do restaurante.
+- `#/r/amaro?src=qr` - cardápio público com tracking de origem. Para o Amaro, a rota carrega o cardápio original do repositório `carda-pio`.
 
 ## Escopo atual
 
@@ -21,7 +21,7 @@ Plataforma QrStack para gerenciar clientes, formulários, cardápios dinâmicos,
 - Geração de Story 1080x1920 em canvas.
 - Download e compartilhamento nativo do Story.
 - Tentativa de abertura do Instagram após compartilhamento.
-- Eventos e insights internos para a central QrStack.
+- Eventos e insights internos para a central QrStack, sem dados de demonstração.
 - Schema Supabase em `supabase/schema.sql`.
 - Central QrStack com identidade própria do sistema.
 - Portal do cliente com tema herdado do restaurante.
@@ -38,6 +38,10 @@ No produto QrStack, o Google Forms sai do fluxo:
 4. Página pública busca por `slug` e data.
 5. Story é gerado a partir da mesma publicação.
 6. Insights ficam na central QrStack.
+
+## Analytics
+
+O front registra eventos reais de navegação local e tenta gravar na aba `events` via Apps Script. Se o Web App do Google responder com login/HTML ou não estiver publicado para acesso público, a plataforma exibe essa limitação em vez de inventar métricas.
 
 ## Google Sheets
 

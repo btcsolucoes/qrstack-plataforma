@@ -9,6 +9,7 @@ const ACTIVE_CLIENT_SLUG = "amaro";
 const ACTIVE_CLIENT_TOKEN = "qrstack-amaro-2026";
 const OWNER_ACCESS_TOKEN = "qrstack-berna-2026";
 const AMARO_ASSETS_BASE_URL = "https://btcsolucoes.github.io/carda-pio/";
+const AMARO_STORY_LINK = "https://tinyurl.com/amaromenu";
 
 const DEFAULT_STATE = {
   restaurants: [
@@ -46,7 +47,7 @@ const DEFAULT_STATE = {
       title: "Almoço de Hoje",
       price: "",
       serviceHours: "11h às 15h",
-      storyLink: "",
+      storyLink: AMARO_STORY_LINK,
       notes: "Importado do fluxo real do Amaro para a plataforma QrStack.",
       isPublished: true,
       publishedAt: new Date().toISOString(),
@@ -64,13 +65,14 @@ const DEFAULT_STATE = {
     item("menu_amaro_today", "Picadinho Carioca", "Executivo", true, 7, "Contra filé ao molho, arroz de couve e cenoura, feijão carioca, farofa panko e ovo frito", "R$ 35,00"),
   ],
   storyAssets: [],
-  events: seedEvents(),
+  events: [],
 };
 
-const STORE_KEY = "qrstack-platform-v3-amaro";
+const STORE_KEY = "qrstack-platform-v4-amaro";
 const app = document.getElementById("app");
 let state = loadState();
 let lastStoryDataUrl = "";
+let routeVersion = 0;
 
 function item(menuDayId, name, category, isHighlight, sortOrder, description = "", price = "") {
   return {
@@ -84,23 +86,6 @@ function item(menuDayId, name, category, isHighlight, sortOrder, description = "
     sortOrder,
     createdAt: new Date().toISOString(),
   };
-}
-
-function seedEvents() {
-  const now = Date.now();
-  const source = ["qr", "instagram", "whatsapp", "bio", "direct"];
-  const type = ["page_view", "page_view", "page_view", "whatsapp_click", "maps_click"];
-  return Array.from({ length: 38 }, (_, index) => ({
-    id: `event-${index}`,
-    restaurantId: "rest_amaro",
-    menuDayId: "menu_amaro_today",
-    eventType: type[index % type.length],
-    source: source[index % source.length],
-    userAgent: "seed",
-    referrer: "",
-    ipHash: "",
-    createdAt: new Date(now - index * 1000 * 60 * 60 * 5).toISOString(),
-  }));
 }
 
 function todayIso() {
@@ -151,7 +136,7 @@ async function apiGet(action, params = {}) {
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   });
-  const response = await fetch(url.toString(), { cache: "no-store" });
+  const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, 1600);
   const text = await response.text();
   if (!text.trim().startsWith("{")) throw new Error("api_not_public_or_not_json");
   const data = JSON.parse(text);
@@ -161,15 +146,25 @@ async function apiGet(action, params = {}) {
 
 async function apiPost(payload) {
   if (!QRSTACK_API_URL) throw new Error("missing_api_url");
-  const response = await fetch(QRSTACK_API_URL, {
+  const response = await fetchWithTimeout(QRSTACK_API_URL, {
     method: "POST",
     body: JSON.stringify(payload),
-  });
+  }, 2200);
   const text = await response.text();
   if (!text.trim().startsWith("{")) throw new Error("api_not_public_or_not_json");
   const data = JSON.parse(text);
   if (!response.ok || data.ok === false) throw new Error(data.error || "api_request_failed");
   return data;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 1800) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function syncRestaurantFromApi(slug) {
@@ -273,6 +268,8 @@ function fromSheetItem(row) {
 }
 
 async function router() {
+  const currentRouteVersion = routeVersion + 1;
+  routeVersion = currentRouteVersion;
   const hash = window.location.hash.replace(/^#\/?/, "");
   const [path, hashQuery = ""] = hash.split("?");
   const parts = path.split("/").filter(Boolean);
@@ -281,9 +278,13 @@ async function router() {
 
   if (!hash || parts[0] === "home") return renderHome();
   if (parts[0] === "hq" || parts[0] === "central") return renderOwnerRoute(parts[1] || "overview", params);
-  if (parts[0] === "cliente" || parts[0] === "admin") return renderClientRoute(parts[1] || ACTIVE_CLIENT_SLUG, params);
-  if (parts[0] === "r") return renderPublicMenu(parts[1] || ACTIVE_CLIENT_SLUG, source);
+  if (parts[0] === "cliente" || parts[0] === "admin") return renderClientRoute(parts[1] || ACTIVE_CLIENT_SLUG, params, currentRouteVersion);
+  if (parts[0] === "r") return renderPublicMenu(parts[1] || ACTIVE_CLIENT_SLUG, source, currentRouteVersion);
   renderHome();
+}
+
+function isCurrentRoute(version) {
+  return version === routeVersion;
 }
 
 function renderOwnerRoute(tab, params) {
@@ -291,10 +292,13 @@ function renderOwnerRoute(tab, params) {
   return renderHq(tab);
 }
 
-async function renderClientRoute(slug, params) {
+async function renderClientRoute(slug, params, version) {
+  const localRestaurant = getRestaurant(slug);
+  if (hasClientAccess(localRestaurant, params)) return renderClientPortal(slug, version);
   const restaurant = await syncRestaurantFromApi(slug);
+  if (!isCurrentRoute(version)) return;
   if (!hasClientAccess(restaurant, params)) return renderClientGate(restaurant);
-  return renderClientPortal(slug);
+  return renderClientPortal(slug, version);
 }
 
 function hasOwnerAccess(params) {
@@ -329,6 +333,21 @@ function restaurantAccessUrl(restaurant) {
 
 function restaurantPublicUrl(restaurant, source = "qr") {
   return absoluteAppUrl(publicMenuHash(restaurant, source));
+}
+
+function restaurantOriginalMenuUrl(restaurant, source = "platform") {
+  const base = restaurant.githubPagesUrl || restaurant.pagesUrl || restaurant.assetsBaseUrl || restaurantPublicUrl(restaurant, source);
+  try {
+    const url = new URL(base);
+    url.searchParams.set("src", source);
+    return url.toString();
+  } catch {
+    return base;
+  }
+}
+
+function restaurantStoryLink(restaurant) {
+  return restaurant.slug === "amaro" ? AMARO_STORY_LINK : restaurantPublicUrl(restaurant);
 }
 
 function setTheme(restaurant) {
@@ -555,6 +574,7 @@ function trackEvent(restaurant, eventType, source = "direct", menuDayId = null) 
 
 function renderHome() {
   setSystemTheme();
+  const restaurant = getRestaurant(ACTIVE_CLIENT_SLUG);
   app.innerHTML = `
     <section class="hero">
       <div class="hero__inner">
@@ -568,8 +588,8 @@ function renderHome() {
         </div>
         <div class="actions">
           <a class="button" href="#/hq">Central QrStack</a>
-          <a class="button secondary" href="#/cliente/${ACTIVE_CLIENT_SLUG}">Portal do restaurante</a>
-          <a class="button ghost" href="${publicMenuHash(getRestaurant(ACTIVE_CLIENT_SLUG))}">Cardápio público</a>
+          <a class="button secondary" href="#/cliente/${restaurant.slug}">Acesso do restaurante</a>
+          <a class="button ghost" href="${publicMenuHash(restaurant)}">Cardápio público</a>
         </div>
       </div>
     </section>
@@ -636,6 +656,7 @@ function renderHq(tab = "overview") {
       </main>
     </div>
   `;
+  if (tab === "insights") hydrateInsights(restaurants[0]);
 }
 
 function renderAdminHero(title, subtitle, logoUrl) {
@@ -1008,7 +1029,22 @@ function renderHqInsights() {
       <div class="section__head">
         <p class="eyebrow">Insights internos</p>
         <h2>Acesso e conversão</h2>
-        <p>Essa área fica só para você na QrStack, não aparece no acesso simplificado do restaurante.</p>
+        <p>Essa área fica só para você na QrStack. Os números abaixo não incluem dados de demonstração.</p>
+      </div>
+      <div id="insights-live" class="grid">
+        <div class="card">
+          <p class="eyebrow">Fonte dos dados</p>
+          <h3>Buscando analytics reais</h3>
+          <p class="muted">A plataforma está tentando carregar o consolidado salvo na planilha via Apps Script. Enquanto isso, aparecem apenas eventos reais capturados neste navegador.</p>
+        </div>
+        <div class="card">
+          <h3>Eventos locais</h3>
+          <div class="table">
+            <div class="table-row"><span>Eventos locais desta sessão</span><strong>${state.events.length}</strong></div>
+            <div class="table-row"><span>WhatsApp</span><strong>${clicksWhats}</strong></div>
+            <div class="table-row"><span>Como chegar</span><strong>${clicksMaps}</strong></div>
+          </div>
+        </div>
       </div>
       <div class="grid grid--three">
         ${metric("Últimos 7 dias", lastDaysEvents(7).length)}
@@ -1017,11 +1053,13 @@ function renderHqInsights() {
       </div>
       <div class="grid">
         <div class="card">
-          <h3>Origem dos acessos</h3>
+          <h3>Origem dos acessos locais</h3>
           <div class="table">
-            ${Object.entries(grouped)
-              .map(([source, events]) => `<div class="table-row"><span>${source}</span><strong>${events.length}</strong></div>`)
-              .join("")}
+            ${Object.entries(grouped).length
+              ? Object.entries(grouped)
+                  .map(([source, events]) => `<div class="table-row"><span>${source}</span><strong>${events.length}</strong></div>`)
+                  .join("")
+              : `<p class="muted">Sem eventos locais registrados ainda.</p>`}
           </div>
         </div>
         <div class="card">
@@ -1033,14 +1071,15 @@ function renderHqInsights() {
   `;
 }
 
-async function renderClientPortal(slug) {
+async function renderClientPortal(slug, version) {
   const remote = await syncMenuFromApi(slug);
+  if (!isCurrentRoute(version)) return;
   const currentHash = window.location.hash.replace(/^#\/?/, "");
   if (!currentHash.startsWith(`cliente/${slug}`) && !currentHash.startsWith(`admin/${slug}`)) return;
   const restaurant = remote.restaurant || (await syncRestaurantFromApi(slug));
   const menu = remote.menu || createBlankMenu(restaurant.id);
   const menuItems = remote.items.length ? remote.items : getMenuItems(menu.id);
-  const storyLink = menu.storyLink || restaurantPublicUrl(restaurant);
+  const storyLink = menu.storyLink || restaurantStoryLink(restaurant);
   setTheme(restaurant);
   app.innerHTML = `
     <div class="client-form-shell">
@@ -1052,8 +1091,13 @@ async function renderClientPortal(slug) {
           <p>Atualize o cardápio do dia e gere o Story.</p>
         </div>
       </header>
+      ${renderTopbar([
+        ["#formulario", "Formulário", true],
+        ["#story-panel", "Story", false],
+        [publicMenuHash(restaurant, "cliente"), "Cardápio público", false],
+      ], restaurant)}
       <main class="client-form-page">
-        <section class="section client-step">
+        <section class="section client-step" id="formulario">
           <div class="section__head">
             <p class="eyebrow">Formulário</p>
             <h2>Cardápio de hoje</h2>
@@ -1070,7 +1114,7 @@ async function renderClientPortal(slug) {
               <textarea id="notes" name="notes" placeholder="Observações do dia">${menu.notes || ""}</textarea>
             </div>
             <div class="actions field--full">
-              <button type="submit">Enviar</button>
+              <button type="submit">Enviar e gerar Story</button>
             </div>
           </form>
         </section>
@@ -1181,7 +1225,7 @@ function attachClientHandlers(restaurant, menu) {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
     const storyLinkInput = document.querySelector('[name="storyLink"]');
-    formData.set("storyLink", storyLinkInput?.value || restaurantPublicUrl(restaurant));
+    formData.set("storyLink", storyLinkInput?.value || restaurantStoryLink(restaurant));
     await saveMenuForm(restaurant, menu.id, formData);
     const updatedMenu = getLatestMenu(restaurant.id);
     drawStory(restaurant, updatedMenu, getMenuItems(updatedMenu.id));
@@ -1394,6 +1438,52 @@ function renderFullCatalog(restaurant) {
   `;
 }
 
+async function hydrateInsights(restaurant) {
+  const target = document.getElementById("insights-live");
+  if (!target || !restaurant) return;
+  try {
+    const data = await apiGet("getInsights", { slug: restaurant.slug, key: OWNER_ACCESS_TOKEN });
+    const insights = data.insights || {};
+    const sourceCounts = insights.source_counts || {};
+    const eventTypeCounts = insights.event_type_counts || {};
+    target.innerHTML = `
+      ${metric("Acessos hoje", insights.accesses_today || 0)}
+      ${metric("Acessos 7 dias", insights.accesses_7_days || 0)}
+      ${metric("Eventos totais", insights.total_events || 0)}
+      <article class="card">
+        <p class="eyebrow">Analytics reais</p>
+        <h3>Planilha conectada</h3>
+        <p class="muted">Dados carregados da aba <strong>events</strong> pelo Apps Script da QrStack.</p>
+      </article>
+      <article class="card">
+        <h3>Origem</h3>
+        <div class="table">
+          ${Object.entries(sourceCounts).length
+            ? Object.entries(sourceCounts).map(([source, count]) => `<div class="table-row"><span>${source}</span><strong>${count}</strong></div>`).join("")
+            : `<p class="muted">Sem origem registrada.</p>`}
+        </div>
+      </article>
+      <article class="card">
+        <h3>Eventos</h3>
+        <div class="table">
+          ${Object.entries(eventTypeCounts).length
+            ? Object.entries(eventTypeCounts).map(([type, count]) => `<div class="table-row"><span>${type}</span><strong>${count}</strong></div>`).join("")
+            : `<p class="muted">Sem eventos registrados.</p>`}
+        </div>
+      </article>
+    `;
+  } catch (error) {
+    target.innerHTML = `
+      <article class="card">
+        <p class="eyebrow">Analytics reais</p>
+        <h3>Apps Script não está público</h3>
+        <p class="muted">A tela não vai inventar número. O endpoint de insights respondeu com login/erro, então os dados consolidados ainda não podem ser considerados ativos na plataforma publicada.</p>
+      </article>
+      ${metric("Eventos locais", state.events.length)}
+    `;
+  }
+}
+
 function catalogImageUrl(imageUrl, restaurant = null) {
   if (!imageUrl) return "";
   if (/^(https?:|data:|assets\/)/.test(imageUrl)) return imageUrl;
@@ -1407,17 +1497,30 @@ function catalogImageUrl(imageUrl, restaurant = null) {
   return `assets/amaro/${imageUrl}`;
 }
 
-async function renderPublicMenu(slug, source = "direct") {
+async function renderPublicMenu(slug, source = "direct", version = routeVersion) {
+  const localRestaurant = getRestaurant(slug);
+  if (localRestaurant?.slug === "amaro") {
+    if (!window.location.hash.replace(/^#\/?/, "").startsWith(`r/${slug}`)) return;
+    setTheme(localRestaurant);
+    trackEvent(localRestaurant, "page_view", source, getLatestMenu(localRestaurant.id)?.id);
+    app.innerHTML = renderOriginalPublicMenu(localRestaurant, source);
+    return;
+  }
   const remote = await syncMenuFromApi(slug);
+  if (!isCurrentRoute(version)) return;
   if (!window.location.hash.replace(/^#\/?/, "").startsWith(`r/${slug}`)) return;
   const restaurant = remote.restaurant;
   const menu = remote.menu;
   const menuItems = remote.items;
   const groups = groupBy(menuItems, "category");
   const useCanonicalCatalog = restaurant.slug === "amaro";
-  const liveLunchItems = useCanonicalCatalog ? await fetchLiveLunchItems(restaurant) : [];
   setTheme(restaurant);
-  if (menu) trackEvent(restaurant, "page_view", source, menu.id);
+  trackEvent(restaurant, "page_view", source, menu?.id);
+  if (useCanonicalCatalog) {
+    app.innerHTML = renderOriginalPublicMenu(restaurant, source);
+    return;
+  }
+  const liveLunchItems = [];
   app.innerHTML = `
     <section class="hero">
       <div class="hero__inner">
@@ -1492,6 +1595,30 @@ async function renderPublicMenu(slug, source = "direct") {
   });
 }
 
+function renderOriginalPublicMenu(restaurant, source) {
+  const originalUrl = restaurantOriginalMenuUrl(restaurant, source);
+  const showReturnBar = source === "hq" || source === "cliente";
+  return `
+    <div class="original-menu-shell">
+      ${showReturnBar ? `
+        <nav class="topbar">
+          <div class="topbar__inner">
+            <span class="brand-chip"><img src="${restaurant.logoUrl}" alt="" /><span>${restaurant.name}</span></span>
+            <button type="button" class="nav-link" data-history-back>Voltar</button>
+            <a class="nav-link active" href="${restaurantOriginalMenuUrl(restaurant, source)}" target="_blank" rel="noreferrer">Abrir original</a>
+          </div>
+        </nav>
+      ` : ""}
+      <iframe
+        class="original-menu-frame"
+        title="Cardápio original ${restaurant.name}"
+        src="${originalUrl}"
+        loading="eager"
+      ></iframe>
+    </div>
+  `;
+}
+
 function drawStory(restaurant, menu, menuItems) {
   const canvas = document.getElementById("story-canvas");
   if (!canvas) return;
@@ -1499,13 +1626,17 @@ function drawStory(restaurant, menu, menuItems) {
   const w = canvas.width;
   const h = canvas.height;
   const highlights = menuItems.filter((menuItem) => menuItem.isHighlight).slice(0, 6);
-  const storyLink = menu.storyLink || restaurantPublicUrl(restaurant);
+  const storyLink = menu.storyLink || restaurantStoryLink(restaurant);
   const storyLinkLabel = formatStoryLink(storyLink);
   Promise.all([loadCanvasImage(restaurant.logoUrl), loadCanvasImage(restaurant.symbolUrl)]).then(([logo, mark]) => {
+    const primary = restaurant.primaryColor || "#0b3422";
+    const secondary = restaurant.secondaryColor || "#bd8732";
+    const cream = restaurant.slug === "amaro" ? "#f5f0e6" : "rgba(255,255,255,0.9)";
+    const ink = colorMix(primary, "#000000", 0.18);
     const gradient = ctx.createLinearGradient(0, 0, 0, h);
-    gradient.addColorStop(0, restaurant.primaryColor);
-    gradient.addColorStop(0.58, colorMix(restaurant.secondaryColor, "#ffffff", 0.72));
-    gradient.addColorStop(1, colorMix(restaurant.secondaryColor, "#ffffff", 0.45));
+    gradient.addColorStop(0, colorMix(primary, "#000000", 0.18));
+    gradient.addColorStop(0.52, primary);
+    gradient.addColorStop(1, colorMix(secondary, "#000000", 0.16));
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, w, h);
 
@@ -1519,7 +1650,7 @@ function drawStory(restaurant, menu, menuItems) {
     }
     ctx.globalAlpha = 1;
 
-    ctx.fillStyle = "rgba(255,255,255,0.88)";
+    ctx.fillStyle = cream;
     roundRect(ctx, 84, 110, w - 168, h - 220, 28);
     ctx.fill();
 
@@ -1529,45 +1660,45 @@ function drawStory(restaurant, menu, menuItems) {
       drawImageContain(ctx, mark, w / 2 - 110, 180, 220, 220);
     }
     ctx.textAlign = "center";
-    ctx.fillStyle = restaurant.secondaryColor;
+    ctx.fillStyle = secondary;
     ctx.font = "800 42px Manrope";
     ctx.fillText("CARDÁPIO DO DIA", w / 2, 495);
 
-    ctx.fillStyle = restaurant.primaryColor;
+    ctx.fillStyle = primary;
     ctx.font = "800 94px Sora";
     wrapCanvasText(ctx, menu.title || "Buffet de hoje", w / 2, 630, w - 220, 104, 2);
 
-    ctx.fillStyle = "#6f416c";
+    ctx.fillStyle = colorMix(primary, secondary, 0.45);
     ctx.font = "700 38px Manrope";
     ctx.fillText(formatDate(menu.date), w / 2, 820);
 
     ctx.textAlign = "left";
     let y = 940;
     highlights.forEach((entry) => {
-      ctx.fillStyle = restaurant.primaryColor;
+      ctx.fillStyle = secondary;
       ctx.font = "800 44px Manrope";
       ctx.fillText("•", 178, y);
-      ctx.fillStyle = "#42213e";
+      ctx.fillStyle = ink;
       ctx.font = "800 44px Manrope";
       wrapCanvasText(ctx, entry.name, 222, y, w - 350, 52, 1);
       y += 92;
     });
 
     ctx.textAlign = "center";
-    ctx.fillStyle = restaurant.primaryColor;
+    ctx.fillStyle = primary;
     roundRect(ctx, 210, 1430, w - 420, 118, 22);
     ctx.fill();
     ctx.fillStyle = "white";
     ctx.font = "900 48px Manrope";
     ctx.fillText(priceSummary(menu, menuItems), w / 2, 1504);
 
-    ctx.fillStyle = "#6f416c";
+    ctx.fillStyle = colorMix(primary, secondary, 0.4);
     ctx.font = "700 34px Manrope";
     ctx.fillText(menu.serviceHours || "Confira o horário no cardápio", w / 2, 1618);
-    ctx.fillStyle = restaurant.primaryColor;
+    ctx.fillStyle = primary;
     ctx.font = "900 38px Manrope";
     ctx.fillText("TOQUE NO LINK DO STORY", w / 2, 1718);
-    ctx.fillStyle = "#42213e";
+    ctx.fillStyle = ink;
     ctx.font = "700 28px Manrope";
     wrapCanvasText(ctx, storyLinkLabel, w / 2, 1772, w - 220, 34, 2);
     lastStoryDataUrl = canvas.toDataURL("image/png");
@@ -1644,7 +1775,7 @@ function priceSummary(menu, menuItems = []) {
 }
 
 async function shareStory(restaurant, menu = null) {
-  const storyLink = menu?.storyLink || document.querySelector('[name="storyLink"]')?.value || restaurantPublicUrl(restaurant);
+  const storyLink = menu?.storyLink || document.querySelector('[name="storyLink"]')?.value || restaurantStoryLink(restaurant);
   await copyToClipboard(storyLink);
   toast("Link copiado. Cole no sticker do Instagram.");
   const canvas = document.getElementById("story-canvas");
@@ -1772,6 +1903,13 @@ function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight, maxLines = 3) {
 
 window.addEventListener("hashchange", router);
 document.addEventListener("click", async (event) => {
+  const backButton = event.target.closest("[data-history-back]");
+  if (backButton) {
+    event.preventDefault();
+    if (history.length > 1) history.back();
+    else window.location.hash = "#/home";
+    return;
+  }
   const copyButton = event.target.closest("[data-copy], [data-copy-input]");
   if (!copyButton) return;
   const inputName = copyButton.dataset.copyInput;
