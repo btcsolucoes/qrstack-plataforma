@@ -16,10 +16,10 @@ const DEFAULT_STATE = {
       id: "rest_amaro",
       name: "Amaro Café",
       slug: "amaro",
-      logoUrl: `${AMARO_ASSETS_BASE_URL}assets/amaro/amaro-logo.svg`,
-      symbolUrl: `${AMARO_ASSETS_BASE_URL}assets/amaro/amaro-mark.svg`,
-      primaryColor: "#1a2118",
-      secondaryColor: "#b8973a",
+      logoUrl: `${AMARO_ASSETS_BASE_URL}assets/amaro/amaro-logo-transparent.png`,
+      symbolUrl: "",
+      primaryColor: "#0b3422",
+      secondaryColor: "#bd8732",
       whatsappNumber: "5581999999999",
       instagramUrl: "https://instagram.com/amarocafe",
       mapsUrl: "https://maps.google.com/?q=R.%20do%20Apolo%2C%20182%20-%20Recife%20Antigo%2C%20Recife%20-%20PE",
@@ -67,7 +67,7 @@ const DEFAULT_STATE = {
   events: seedEvents(),
 };
 
-const STORE_KEY = "qrstack-platform-v2-amaro";
+const STORE_KEY = "qrstack-platform-v3-amaro";
 const app = document.getElementById("app");
 let state = loadState();
 let lastStoryDataUrl = "";
@@ -220,7 +220,7 @@ function fromSheetRestaurant(row) {
     name: row.name || defaults.name,
     slug: row.slug || defaults.slug,
     logoUrl: row.logo_url || defaults.logoUrl || ASSETS.qrstackWordmark,
-    symbolUrl: row.symbol_url || defaults.symbolUrl || ASSETS.qrstackMark,
+    symbolUrl: row.symbol_url || defaults.symbolUrl || "",
     primaryColor: row.primary_color || defaults.primaryColor || "#4a1f16",
     secondaryColor: row.secondary_color || defaults.secondaryColor || "#d59b52",
     whatsappNumber: row.whatsapp_number || defaults.whatsappNumber || "",
@@ -335,8 +335,8 @@ function setTheme(restaurant) {
   document.documentElement.style.setProperty("--primary", restaurant.primaryColor);
   document.documentElement.style.setProperty("--secondary", restaurant.secondaryColor);
   document.documentElement.style.setProperty("--accent", "#f4b740");
-  document.documentElement.style.setProperty("--hero-mark", `url("${restaurant.symbolUrl}")`);
-  document.documentElement.style.setProperty("--brand-pattern", `url("${restaurant.symbolUrl}")`);
+  document.documentElement.style.setProperty("--hero-mark", restaurant.symbolUrl ? `url("${restaurant.symbolUrl}")` : "none");
+  document.documentElement.style.setProperty("--brand-pattern", restaurant.symbolUrl ? `url("${restaurant.symbolUrl}")` : "none");
 }
 
 function setSystemTheme() {
@@ -657,7 +657,7 @@ function renderAdminHero(title, subtitle, logoUrl) {
 
 function renderTopbar(links, restaurant = null) {
   const chip = restaurant
-    ? `<a class="brand-chip" href="#/r/${restaurant.slug}"><img src="${restaurant.symbolUrl}" alt="" /><span>${restaurant.name}</span></a>`
+    ? `<a class="brand-chip" href="#/r/${restaurant.slug}"><img src="${restaurant.symbolUrl || restaurant.logoUrl}" alt="" /><span>${restaurant.name}</span></a>`
     : `<a class="brand-chip" href="#/home"><img src="${ASSETS.qrstackMark}" alt="" /><span>QrStack</span></a>`;
   return `
     <nav class="topbar">
