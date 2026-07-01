@@ -8,6 +8,7 @@ const QRSTACK_API_URL =
 const ACTIVE_CLIENT_SLUG = "amaro";
 const ACTIVE_CLIENT_TOKEN = "qrstack-amaro-2026";
 const OWNER_ACCESS_TOKEN = "qrstack-berna-2026";
+const AMARO_ASSETS_BASE_URL = "https://btcsolucoes.github.io/carda-pio/";
 
 const DEFAULT_STATE = {
   restaurants: [
@@ -15,17 +16,21 @@ const DEFAULT_STATE = {
       id: "rest_amaro",
       name: "Amaro Café",
       slug: "amaro",
-      logoUrl: ASSETS.qrstackWordmark,
-      symbolUrl: ASSETS.qrstackMark,
-      primaryColor: "#4a1f16",
-      secondaryColor: "#d59b52",
+      logoUrl: `${AMARO_ASSETS_BASE_URL}assets/amaro/amaro-logo.svg`,
+      symbolUrl: `${AMARO_ASSETS_BASE_URL}assets/amaro/amaro-mark.svg`,
+      primaryColor: "#1a2118",
+      secondaryColor: "#b8973a",
       whatsappNumber: "5581999999999",
       instagramUrl: "https://instagram.com/amarocafe",
       mapsUrl: "https://maps.google.com/?q=R.%20do%20Apolo%2C%20182%20-%20Recife%20Antigo%2C%20Recife%20-%20PE",
       address: "R. do Apolo, 182 - Recife Antigo, Recife - PE",
       githubRepo: "btcsolucoes/carda-pio",
-      githubPagesUrl: "https://btcsolucoes.github.io/carda-pio/",
-      assetsBaseUrl: "https://btcsolucoes.github.io/carda-pio/",
+      githubPagesUrl: AMARO_ASSETS_BASE_URL,
+      assetsBaseUrl: AMARO_ASSETS_BASE_URL,
+      manifestUrl: `${AMARO_ASSETS_BASE_URL}qrstack/amaro-manifest.json`,
+      catalogUrl: `${AMARO_ASSETS_BASE_URL}qrstack/amaro-catalog.json`,
+      sectionsUrl: `${AMARO_ASSETS_BASE_URL}qrstack/amaro-sections.json`,
+      liveMenuEndpoint: "https://script.google.com/macros/s/AKfycbyB808ZoNNsP3c4QlTJU_Ny7bF2_8jPjuoLPU2_mgOs1BpXSNyKcIno6AtQgApTGyss/exec",
       adminToken: ACTIVE_CLIENT_TOKEN,
       reminderTime: "09:00",
       reminderEnabled: false,
@@ -62,7 +67,7 @@ const DEFAULT_STATE = {
   events: seedEvents(),
 };
 
-const STORE_KEY = "qrstack-platform-v1-amaro";
+const STORE_KEY = "qrstack-platform-v2-amaro";
 const app = document.getElementById("app");
 let state = loadState();
 let lastStoryDataUrl = "";
@@ -126,6 +131,10 @@ function hydratePersistedState(parsedState) {
       githubRepo: restaurant.githubRepo || defaults.githubRepo || "",
       githubPagesUrl: restaurant.githubPagesUrl || defaults.githubPagesUrl || "",
       assetsBaseUrl: restaurant.assetsBaseUrl || defaults.assetsBaseUrl || "",
+      manifestUrl: restaurant.manifestUrl || defaults.manifestUrl || "",
+      catalogUrl: restaurant.catalogUrl || defaults.catalogUrl || "",
+      sectionsUrl: restaurant.sectionsUrl || defaults.sectionsUrl || "",
+      liveMenuEndpoint: restaurant.liveMenuEndpoint || defaults.liveMenuEndpoint || "",
     };
   });
   return parsedState;
@@ -205,21 +214,26 @@ function upsertById(list, object) {
 }
 
 function fromSheetRestaurant(row) {
+  const defaults = DEFAULT_STATE.restaurants.find((restaurant) => restaurant.slug === row.slug) || {};
   return {
-    id: row.id,
-    name: row.name,
-    slug: row.slug,
-    logoUrl: row.logo_url || ASSETS.qrstackWordmark,
-    symbolUrl: row.symbol_url || ASSETS.qrstackMark,
-    primaryColor: row.primary_color || "#4a1f16",
-    secondaryColor: row.secondary_color || "#d59b52",
-    whatsappNumber: row.whatsapp_number || "",
-    instagramUrl: row.instagram_url || "#",
-    mapsUrl: row.maps_url || "#",
-    address: row.address || "",
-    githubRepo: row.github_repo || "",
-    githubPagesUrl: row.github_pages_url || "",
-    assetsBaseUrl: row.assets_base_url || "",
+    id: row.id || defaults.id,
+    name: row.name || defaults.name,
+    slug: row.slug || defaults.slug,
+    logoUrl: row.logo_url || defaults.logoUrl || ASSETS.qrstackWordmark,
+    symbolUrl: row.symbol_url || defaults.symbolUrl || ASSETS.qrstackMark,
+    primaryColor: row.primary_color || defaults.primaryColor || "#4a1f16",
+    secondaryColor: row.secondary_color || defaults.secondaryColor || "#d59b52",
+    whatsappNumber: row.whatsapp_number || defaults.whatsappNumber || "",
+    instagramUrl: row.instagram_url || defaults.instagramUrl || "#",
+    mapsUrl: row.maps_url || defaults.mapsUrl || "#",
+    address: row.address || defaults.address || "",
+    githubRepo: row.github_repo || defaults.githubRepo || "",
+    githubPagesUrl: row.github_pages_url || defaults.githubPagesUrl || "",
+    assetsBaseUrl: row.assets_base_url || defaults.assetsBaseUrl || "",
+    manifestUrl: row.manifest_url || defaults.manifestUrl || "",
+    catalogUrl: row.catalog_url || defaults.catalogUrl || "",
+    sectionsUrl: row.sections_url || defaults.sectionsUrl || "",
+    liveMenuEndpoint: row.live_menu_endpoint || defaults.liveMenuEndpoint || "",
     adminToken: row.admin_token || ACTIVE_CLIENT_TOKEN,
     reminderTime: row.reminder_time || "",
     reminderEnabled: String(row.reminder_enabled).toUpperCase() === "TRUE",
@@ -425,6 +439,10 @@ function getRestaurantDatabase(restaurant) {
       githubRepo: restaurant.githubRepo || "",
       githubPagesUrl: restaurant.githubPagesUrl || "",
       assetsBaseUrl: restaurant.assetsBaseUrl || "",
+      manifestUrl: restaurant.manifestUrl || "",
+      catalogUrl: restaurant.catalogUrl || "",
+      sectionsUrl: restaurant.sectionsUrl || "",
+      liveMenuEndpoint: restaurant.liveMenuEndpoint || "",
       isConnected: Boolean(restaurant.githubRepo && restaurant.githubPagesUrl),
     },
     dishes,
@@ -840,6 +858,8 @@ function databaseSourceCard(database) {
       <div class="actions">
         ${source.githubPagesUrl ? `<a class="button secondary" href="${source.githubPagesUrl}" target="_blank" rel="noreferrer">Abrir Pages</a>` : ""}
         ${source.githubRepo ? `<a class="button ghost" href="https://github.com/${source.githubRepo}" target="_blank" rel="noreferrer">Abrir repo</a>` : ""}
+        ${source.manifestUrl ? `<a class="button ghost" href="${source.manifestUrl}" target="_blank" rel="noreferrer">Manifesto</a>` : ""}
+        ${source.catalogUrl ? `<a class="button ghost" href="${source.catalogUrl}" target="_blank" rel="noreferrer">Catálogo</a>` : ""}
       </div>
     </article>
   `;
@@ -1284,13 +1304,35 @@ function renderDailyMenuGroups(groups) {
     .join("");
 }
 
-function renderFullCatalog(restaurant) {
+function renderCatalogSectionsHtml(restaurant) {
   const catalog = getCatalogForRestaurant(restaurant);
   if (!catalog.length) return "";
   const bySection = groupBy(catalog, "section_id");
   const sections = restaurant.slug === "amaro" && getAmaroSections().length
     ? getAmaroSections()
     : Object.keys(bySection).map((sectionId) => ({ id: sectionId, title: bySection[sectionId][0]?.section_title || sectionId }));
+  return sections
+    .map((section) => {
+      const items = bySection[section.id] || [];
+      if (!items.length) return "";
+      return `
+        <div class="section catalog-section">
+          <div class="section__head">
+            <p class="eyebrow">${items.length} itens</p>
+            <h3>${section.title}</h3>
+          </div>
+          <div class="rail">
+            ${items.map((menuItem) => renderMenuItemCard(menuItem, true, restaurant)).join("")}
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderFullCatalog(restaurant) {
+  const catalog = getCatalogForRestaurant(restaurant);
+  if (!catalog.length) return "";
   return `
     <section id="catalogo" class="section">
       <div class="section__head">
@@ -1298,23 +1340,7 @@ function renderFullCatalog(restaurant) {
         <h2>Catálogo ${restaurant.name}</h2>
         <p>Itens fixos importados do cardápio publicado, separados pelas categorias originais.</p>
       </div>
-      ${sections
-        .map((section) => {
-          const items = bySection[section.id] || [];
-          if (!items.length) return "";
-          return `
-            <div class="section catalog-section">
-              <div class="section__head">
-                <p class="eyebrow">${items.length} itens</p>
-                <h3>${section.title}</h3>
-              </div>
-              <div class="rail">
-                ${items.map((menuItem) => renderMenuItemCard(menuItem, true, restaurant)).join("")}
-              </div>
-            </div>
-          `;
-        })
-        .join("")}
+      ${renderCatalogSectionsHtml(restaurant)}
     </section>
   `;
 }
@@ -1339,6 +1365,7 @@ async function renderPublicMenu(slug, source = "direct") {
   const menu = remote.menu;
   const menuItems = remote.items;
   const groups = groupBy(menuItems, "category");
+  const useCanonicalCatalog = restaurant.slug === "amaro";
   setTheme(restaurant);
   if (menu) trackEvent(restaurant, "page_view", source, menu.id);
   app.innerHTML = `
@@ -1355,24 +1382,35 @@ async function renderPublicMenu(slug, source = "direct") {
     </section>
     ${renderTopbar([
       ["#menu", "Cardápio", true],
-      ["#catalogo", "Completo", false],
+      ...(useCanonicalCatalog ? [] : [["#catalogo", "Completo", false]]),
       ["#contato", "Contato", false],
     ], restaurant)}
     <main class="page">
-      <section id="menu" class="section">
-        <div class="section__head">
-          <p class="eyebrow">${menu ? formatDate(menu.date) : "Hoje"}</p>
-          <h2>${menu?.title || "Cardápio do dia"}</h2>
-          <p>${menu?.notes || "Itens publicados pelo restaurante."}</p>
-        </div>
-        <div class="grid grid--three">
-          ${metric("Preço", priceSummary(menu, menuItems))}
-          ${metric("Categorias", Object.keys(groups).length)}
-          ${metric("Destaques", menuItems.filter((entry) => entry.isHighlight).length)}
-        </div>
-        ${renderDailyMenuGroups(groups)}
-      </section>
-      ${renderFullCatalog(restaurant)}
+      ${useCanonicalCatalog ? `
+        <section id="menu" class="section">
+          <div class="section__head">
+            <p class="eyebrow">Cardápio verdadeiro</p>
+            <h2>Cardápio ${restaurant.name}</h2>
+            <p>Catálogo importado do repositório real do Amaro, com fotos, preços e categorias do cardápio publicado.</p>
+          </div>
+          ${renderCatalogSectionsHtml(restaurant)}
+        </section>
+      ` : `
+        <section id="menu" class="section">
+          <div class="section__head">
+            <p class="eyebrow">${menu ? formatDate(menu.date) : "Hoje"}</p>
+            <h2>${menu?.title || "Cardápio do dia"}</h2>
+            <p>${menu?.notes || "Itens publicados pelo restaurante."}</p>
+          </div>
+          <div class="grid grid--three">
+            ${metric("Preço", priceSummary(menu, menuItems))}
+            ${metric("Categorias", Object.keys(groups).length)}
+            ${metric("Destaques", menuItems.filter((entry) => entry.isHighlight).length)}
+          </div>
+          ${renderDailyMenuGroups(groups)}
+        </section>
+        ${renderFullCatalog(restaurant)}
+      `}
       <section id="contato" class="section">
         <div class="section__head">
           <p class="eyebrow">Contato</p>
