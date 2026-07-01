@@ -686,6 +686,27 @@ textarea {
   gap: 0.75rem;
 }
 
+.access-form {
+  width: min(520px, 100%);
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+  text-align: left;
+}
+
+.access-form label {
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.access-form input {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.95);
+}
+
+.access-form .actions {
+  justify-content: center;
+}
+
 .story-workbench {
   display: grid;
   grid-template-columns: minmax(0, 0.74fr) minmax(280px, 420px);

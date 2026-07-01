@@ -8,6 +8,8 @@ const QRSTACK_API_URL =
 const ACTIVE_CLIENT_SLUG = "amaro";
 const ACTIVE_CLIENT_TOKEN = "qrstack-amaro-2026";
 const OWNER_ACCESS_TOKEN = "qrstack-berna-2026";
+const OWNER_SESSION_KEY = "qrstack:owner-access";
+const CLIENT_SESSION_PREFIX = "qrstack:client-access:";
 const AMARO_ASSETS_BASE_URL = "https://btcsolucoes.github.io/carda-pio/";
 const AMARO_STORY_LINK = "https://tinyurl.com/amaromenu";
 
@@ -302,13 +304,41 @@ async function renderClientRoute(slug, params, version) {
 }
 
 function hasOwnerAccess(params) {
-  return params.get("key") === OWNER_ACCESS_TOKEN;
+  if (params.get("key") === OWNER_ACCESS_TOKEN) {
+    rememberAccess(OWNER_SESSION_KEY);
+    return true;
+  }
+  return hasRememberedAccess(OWNER_SESSION_KEY);
 }
 
 function hasClientAccess(restaurant, params) {
   const token = params.get("token");
   const expectedToken = restaurant.adminToken || ACTIVE_CLIENT_TOKEN;
-  return token === expectedToken;
+  if (token === expectedToken) {
+    rememberAccess(clientSessionKey(restaurant));
+    return true;
+  }
+  return hasRememberedAccess(clientSessionKey(restaurant));
+}
+
+function rememberAccess(key) {
+  try {
+    sessionStorage.setItem(key, "1");
+  } catch {
+    // Navegadores com storage bloqueado ainda usam o token da URL.
+  }
+}
+
+function hasRememberedAccess(key) {
+  try {
+    return sessionStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function clientSessionKey(restaurant) {
+  return `${CLIENT_SESSION_PREFIX}${restaurant.slug}`;
 }
 
 function ownerLink(tab = "overview") {
@@ -575,6 +605,8 @@ function trackEvent(restaurant, eventType, source = "direct", menuDayId = null) 
 function renderHome() {
   setSystemTheme();
   const restaurant = getRestaurant(ACTIVE_CLIENT_SLUG);
+  const ownerHasSession = hasRememberedAccess(OWNER_SESSION_KEY);
+  const clientHasSession = hasRememberedAccess(clientSessionKey(restaurant));
   app.innerHTML = `
     <section class="hero">
       <div class="hero__inner">
@@ -587,8 +619,8 @@ function renderHome() {
           <span class="pill">Cardápio público</span>
         </div>
         <div class="actions">
-          <a class="button" href="#/hq">Central QrStack</a>
-          <a class="button secondary" href="#/cliente/${restaurant.slug}">Acesso do restaurante</a>
+          <a class="button" href="${ownerHasSession ? ownerLink("overview") : "#/hq"}">${ownerHasSession ? "Continuar na Central" : "Central QrStack"}</a>
+          <a class="button secondary" href="${clientHasSession ? clientPortalLink(restaurant) : `#/cliente/${restaurant.slug}`}">${clientHasSession ? `Continuar ${restaurant.name}` : "Acesso do restaurante"}</a>
           <a class="button ghost" href="${publicMenuHash(restaurant)}">Cardápio público</a>
         </div>
       </div>
@@ -605,9 +637,14 @@ function renderOwnerGate() {
         <p class="eyebrow">Acesso interno</p>
         <h1>Central QrStack</h1>
         <p class="muted muted--light">Use o link interno com chave de dono para abrir clientes, respostas, banco de pratos, cardápios e insights.</p>
-        <div class="actions">
-          <a class="button ghost" href="#/home">Voltar</a>
-        </div>
+        <form class="access-form" data-owner-access>
+          <label for="owner-access-key">Chave ou link de acesso</label>
+          <input id="owner-access-key" name="ownerAccessKey" autocomplete="off" placeholder="Cole sua chave ou o link da Central" />
+          <div class="actions">
+            <button type="submit">Entrar na Central</button>
+            <a class="button ghost" href="#/home">Voltar</a>
+          </div>
+        </form>
       </div>
     </section>
   `;
@@ -622,9 +659,14 @@ function renderClientGate(restaurant) {
         <p class="eyebrow">Acesso do restaurante</p>
         <h1>${restaurant.name}</h1>
         <p class="muted muted--light">Este portal abre apenas pelo link privado do restaurante. A Central QrStack não fica disponível por aqui.</p>
-        <div class="actions">
-          <a class="button ghost" href="${publicMenuHash(restaurant)}">Ver cardápio público</a>
-        </div>
+        <form class="access-form" data-client-access data-slug="${restaurant.slug}">
+          <label for="client-access-token">Token ou link privado</label>
+          <input id="client-access-token" name="clientAccessToken" autocomplete="off" placeholder="Cole o token ou link do restaurante" />
+          <div class="actions">
+            <button type="submit">Abrir formulário</button>
+            <a class="button ghost" href="${publicMenuHash(restaurant)}">Ver cardápio público</a>
+          </div>
+        </form>
       </div>
     </section>
   `;
@@ -676,10 +718,11 @@ function renderAdminHero(title, subtitle, logoUrl) {
   `;
 }
 
-function renderTopbar(links, restaurant = null) {
+function renderTopbar(links, restaurant = null, brandHref = null) {
+  const chipHref = brandHref || (restaurant ? publicMenuHash(restaurant) : ownerLink("overview"));
   const chip = restaurant
-    ? `<a class="brand-chip" href="#/r/${restaurant.slug}"><img src="${restaurant.symbolUrl || restaurant.logoUrl}" alt="" /><span>${restaurant.name}</span></a>`
-    : `<a class="brand-chip" href="#/home"><img src="${ASSETS.qrstackMark}" alt="" /><span>QrStack</span></a>`;
+    ? `<a class="brand-chip" href="${chipHref}"><img src="${restaurant.symbolUrl || restaurant.logoUrl}" alt="" /><span>${restaurant.name}</span></a>`
+    : `<a class="brand-chip" href="${chipHref}"><img src="${ASSETS.qrstackMark}" alt="" /><span>QrStack</span></a>`;
   return `
     <nav class="topbar">
       <div class="topbar__inner">
@@ -1095,7 +1138,7 @@ async function renderClientPortal(slug, version) {
         ["#formulario", "Formulário", true],
         ["#story-panel", "Story", false],
         [publicMenuHash(restaurant, "cliente"), "Cardápio público", false],
-      ], restaurant)}
+      ], restaurant, clientPortalLink(restaurant))}
       <main class="client-form-page">
         <section class="section client-step" id="formulario">
           <div class="section__head">
@@ -1902,6 +1945,37 @@ function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight, maxLines = 3) {
 }
 
 window.addEventListener("hashchange", router);
+document.addEventListener("submit", (event) => {
+  const ownerAccessForm = event.target.closest("[data-owner-access]");
+  if (ownerAccessForm) {
+    event.preventDefault();
+    const rawAccess = new FormData(ownerAccessForm).get("ownerAccessKey");
+    const key = extractAccessParam(rawAccess, "key");
+    if (key === OWNER_ACCESS_TOKEN) {
+      rememberAccess(OWNER_SESSION_KEY);
+      window.location.hash = ownerLink("overview");
+      return;
+    }
+    toast("Chave da Central inválida.");
+    return;
+  }
+
+  const clientAccessForm = event.target.closest("[data-client-access]");
+  if (clientAccessForm) {
+    event.preventDefault();
+    const restaurant = getRestaurant(clientAccessForm.dataset.slug || ACTIVE_CLIENT_SLUG);
+    const rawAccess = new FormData(clientAccessForm).get("clientAccessToken");
+    const token = extractAccessParam(rawAccess, "token");
+    const expectedToken = restaurant.adminToken || ACTIVE_CLIENT_TOKEN;
+    if (token === expectedToken) {
+      rememberAccess(clientSessionKey(restaurant));
+      window.location.hash = clientPortalLink(restaurant);
+      return;
+    }
+    toast("Token do restaurante inválido.");
+  }
+});
+
 document.addEventListener("click", async (event) => {
   const backButton = event.target.closest("[data-history-back]");
   if (backButton) {
@@ -1920,6 +1994,20 @@ document.addEventListener("click", async (event) => {
   toast("Link copiado.");
 });
 router();
+
+function extractAccessParam(value, paramName) {
+  const rawValue = String(value || "").trim();
+  if (!rawValue) return "";
+  try {
+    const url = new URL(rawValue);
+    const hashQuery = url.hash.includes("?") ? url.hash.split("?")[1] : "";
+    return new URLSearchParams(hashQuery || url.search).get(paramName) || rawValue;
+  } catch {
+    const query = rawValue.includes("?") ? rawValue.split("?").pop() : "";
+    const queryValue = new URLSearchParams(query).get(paramName);
+    return queryValue || rawValue;
+  }
+}
 
 async function copyToClipboard(value) {
   try {
