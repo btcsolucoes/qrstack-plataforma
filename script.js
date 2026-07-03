@@ -34,6 +34,7 @@ const DEFAULT_STATE = {
       catalogUrl: `${AMARO_ASSETS_BASE_URL}qrstack/amaro-catalog.json`,
       sectionsUrl: `${AMARO_ASSETS_BASE_URL}qrstack/amaro-sections.json`,
       liveMenuEndpoint: "https://script.google.com/macros/s/AKfycbyB808ZoNNsP3c4QlTJU_Ny7bF2_8jPjuoLPU2_mgOs1BpXSNyKcIno6AtQgApTGyss/exec",
+      analyticsEndpoint: "https://script.google.com/macros/s/AKfycbyB808ZoNNsP3c4QlTJU_Ny7bF2_8jPjuoLPU2_mgOs1BpXSNyKcIno6AtQgApTGyss/exec",
       adminToken: ACTIVE_CLIENT_TOKEN,
       reminderTime: "09:00",
       reminderEnabled: false,
@@ -122,6 +123,7 @@ function hydratePersistedState(parsedState) {
       catalogUrl: restaurant.catalogUrl || defaults.catalogUrl || "",
       sectionsUrl: restaurant.sectionsUrl || defaults.sectionsUrl || "",
       liveMenuEndpoint: restaurant.liveMenuEndpoint || defaults.liveMenuEndpoint || "",
+      analyticsEndpoint: restaurant.analyticsEndpoint || defaults.analyticsEndpoint || restaurant.liveMenuEndpoint || defaults.liveMenuEndpoint || "",
     };
   });
   return parsedState;
@@ -143,6 +145,21 @@ async function apiGet(action, params = {}) {
   if (!text.trim().startsWith("{")) throw new Error("api_not_public_or_not_json");
   const data = JSON.parse(text);
   if (!response.ok || data.ok === false) throw new Error(data.error || "api_request_failed");
+  return data;
+}
+
+async function endpointGet(endpoint, action, params = {}) {
+  if (!endpoint) throw new Error("missing_endpoint");
+  const url = new URL(endpoint);
+  url.searchParams.set("action", action);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
+  });
+  const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, 2200);
+  const text = await response.text();
+  if (!text.trim().startsWith("{")) throw new Error("endpoint_not_public_or_not_json");
+  const data = JSON.parse(text);
+  if (!response.ok || data.ok === false) throw new Error(data.error || "endpoint_request_failed");
   return data;
 }
 
@@ -1485,7 +1502,8 @@ async function hydrateInsights(restaurant) {
   const target = document.getElementById("insights-live");
   if (!target || !restaurant) return;
   try {
-    const data = await apiGet("getInsights", { slug: restaurant.slug, key: OWNER_ACCESS_TOKEN });
+    const endpoint = restaurant.analyticsEndpoint || restaurant.liveMenuEndpoint || QRSTACK_API_URL;
+    const data = await endpointGet(endpoint, "getInsights", { slug: restaurant.slug, key: OWNER_ACCESS_TOKEN });
     const insights = data.insights || {};
     const sourceCounts = insights.source_counts || {};
     const eventTypeCounts = insights.event_type_counts || {};
@@ -1496,7 +1514,7 @@ async function hydrateInsights(restaurant) {
       <article class="card">
         <p class="eyebrow">Analytics reais</p>
         <h3>Planilha conectada</h3>
-        <p class="muted">Dados carregados da aba <strong>events</strong> pelo Apps Script da QrStack.</p>
+        <p class="muted">Dados carregados da aba <strong>qrstack_events</strong> na planilha real do ${restaurant.name}.</p>
       </article>
       <article class="card">
         <h3>Origem</h3>
@@ -1519,8 +1537,8 @@ async function hydrateInsights(restaurant) {
     target.innerHTML = `
       <article class="card">
         <p class="eyebrow">Analytics reais</p>
-        <h3>Apps Script não está público</h3>
-        <p class="muted">A tela não vai inventar número. O endpoint de insights respondeu com login/erro, então os dados consolidados ainda não podem ser considerados ativos na plataforma publicada.</p>
+        <h3>Analytics do Amaro ainda não ativo</h3>
+        <p class="muted">A tela não vai inventar número. O endpoint real do ${restaurant.name} ainda não retornou JSON de insights. Publique o Apps Script da planilha original com suporte a <strong>getInsights</strong> e <strong>doPost</strong>.</p>
       </article>
       ${metric("Eventos locais", state.events.length)}
     `;
