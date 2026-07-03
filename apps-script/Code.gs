@@ -55,7 +55,14 @@ function doGet(e) {
     if (action === 'getInsights') {
       assertOwner(params.owner_key || params.key);
       const restaurant = getRestaurantBySlug(params.slug);
-      return json({ ok: true, restaurant, insights: getInsights(restaurant.id) });
+      return json({
+        ok: true,
+        restaurant,
+        insights: getInsights(restaurant.id, {
+          startDate: params.startDate || params.start_date || params.start,
+          endDate: params.endDate || params.end_date || params.end,
+        }),
+      }, params.callback);
     }
 
     if (action === 'listRestaurants') {
@@ -259,23 +266,61 @@ function getFormSchemaByRestaurant(restaurantId) {
   }));
 }
 
-function getInsights(restaurantId) {
+function getInsights(restaurantId, filters = {}) {
   const events = readObjects(SHEETS.events).filter((row) => row.restaurant_id === restaurantId);
   const now = new Date();
   const today = todayIso();
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const last7 = events.filter((event) => new Date(event.created_at) >= sevenDaysAgo);
-  const sourceCounts = countBy(events, 'source');
-  const typeCounts = countBy(events, 'event_type');
+  const periodEvents = filterEventsByPeriod(events, filters.startDate, filters.endDate);
+  const sourceCounts = countBy(periodEvents, 'source');
+  const typeCounts = countBy(periodEvents, 'event_type');
+  const allTypeCounts = countBy(events, 'event_type');
 
   return {
     total_events: events.length,
+    total_accesses: events.filter((event) => event.event_type === 'page_view').length,
+    period_events: periodEvents.length,
+    period_accesses: periodEvents.filter((event) => event.event_type === 'page_view').length,
     accesses_today: events.filter((event) => String(event.created_at).slice(0, 10) === today && event.event_type === 'page_view').length,
     accesses_7_days: last7.filter((event) => event.event_type === 'page_view').length,
     source_counts: sourceCounts,
     event_type_counts: typeCounts,
-    peak_hour: peakHour(events),
+    event_type_counts_all: allTypeCounts,
+    period_start: filters.startDate || '',
+    period_end: filters.endDate || '',
+    period_label: periodLabel(filters.startDate, filters.endDate),
+    peak_hour: peakHour(periodEvents),
   };
+}
+
+function filterEventsByPeriod(events, startDate, endDate) {
+  if (!startDate && !endDate) return events;
+  return events.filter((event) => {
+    const eventDate = eventDateOnly(event.created_at);
+    if (!eventDate) return false;
+    if (startDate && eventDate < startDate) return false;
+    if (endDate && eventDate > endDate) return false;
+    return true;
+  });
+}
+
+function eventDateOnly(value) {
+  if (!value) return '';
+  if (Object.prototype.toString.call(value) === '[object Date]' && !Number.isNaN(value.getTime())) {
+    return Utilities.formatDate(value, 'America/Sao_Paulo', 'yyyy-MM-dd');
+  }
+  const raw = String(value);
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return '';
+  return Utilities.formatDate(parsed, 'America/Sao_Paulo', 'yyyy-MM-dd');
+}
+
+function periodLabel(startDate, endDate) {
+  if (!startDate && !endDate) return 'Todos os tempos';
+  if (startDate && endDate && startDate === endDate) return startDate;
+  return `${startDate || 'inicio'} ate ${endDate || todayIso()}`;
 }
 
 function readObjects(sheetName) {
@@ -389,10 +434,11 @@ function assertOwner(token) {
   }
 }
 
-function json(payload) {
+function json(payload, callback) {
+  const body = callback ? `${callback}(${JSON.stringify(payload)});` : JSON.stringify(payload);
   return ContentService
-    .createTextOutput(JSON.stringify(payload))
-    .setMimeType(ContentService.MimeType.JSON);
+    .createTextOutput(body)
+    .setMimeType(callback ? ContentService.MimeType.JAVASCRIPT : ContentService.MimeType.JSON);
 }
 
 function uuid(prefix) {
