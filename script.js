@@ -155,12 +155,57 @@ async function endpointGet(endpoint, action, params = {}) {
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   });
-  const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, 2200);
-  const text = await response.text();
-  if (!text.trim().startsWith("{")) throw new Error("endpoint_not_public_or_not_json");
-  const data = JSON.parse(text);
-  if (!response.ok || data.ok === false) throw new Error(data.error || "endpoint_request_failed");
-  return data;
+  try {
+    const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, 12000);
+    const text = await response.text();
+    if (!text.trim().startsWith("{")) throw new Error("endpoint_not_public_or_not_json");
+    const data = JSON.parse(text);
+    if (!response.ok || data.ok === false) throw new Error(data.error || "endpoint_request_failed");
+    return data;
+  } catch (error) {
+    if (action === "getInsights") return endpointJsonp(url, 12000);
+    throw error;
+  }
+}
+
+function endpointJsonp(url, timeoutMs = 12000) {
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return Promise.reject(new Error("jsonp_not_available"));
+  }
+  const jsonpUrl = new URL(url.toString());
+  const callbackName = `__qrstackJsonp${Date.now()}${Math.random().toString(16).slice(2)}`;
+  jsonpUrl.searchParams.set("callback", callbackName);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const script = document.createElement("script");
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("endpoint_jsonp_timeout"));
+    }, timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timeout);
+      delete window[callbackName];
+      script.remove();
+    };
+    window[callbackName] = (data) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (!data || data.ok === false) reject(new Error(data?.error || "endpoint_jsonp_failed"));
+      else resolve(data);
+    };
+    script.onerror = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("endpoint_jsonp_error"));
+    };
+    script.async = true;
+    script.src = jsonpUrl.toString();
+    document.head.appendChild(script);
+  });
 }
 
 async function apiPost(payload) {
@@ -1091,6 +1136,30 @@ function renderHqInsights() {
         <h2>Acesso e conversão</h2>
         <p>Essa área fica só para você na QrStack. Os números abaixo não incluem dados de demonstração.</p>
       </div>
+      <form class="card insights-filter" data-insights-filter>
+        <div>
+          <p class="eyebrow">Período</p>
+          <h3>Filtrar acessos</h3>
+          <p class="muted">Veja todos os acessos de todos os tempos ou escolha um recorte específico.</p>
+        </div>
+        <div class="insights-filter__presets">
+          <button type="button" class="secondary" data-insights-preset="today">Hoje</button>
+          <button type="button" class="secondary" data-insights-preset="7">7 dias</button>
+          <button type="button" class="secondary" data-insights-preset="30">30 dias</button>
+          <button type="button" class="secondary" data-insights-preset="all">Todos</button>
+        </div>
+        <div class="insights-filter__dates">
+          <label>
+            Início
+            <input type="date" name="startDate" />
+          </label>
+          <label>
+            Fim
+            <input type="date" name="endDate" />
+          </label>
+          <button type="submit">Aplicar</button>
+        </div>
+      </form>
       <div id="insights-live" class="grid">
         <div class="card">
           <p class="eyebrow">Fonte dos dados</p>
@@ -1503,21 +1572,37 @@ async function hydrateInsights(restaurant) {
   if (!target || !restaurant) return;
   try {
     const endpoint = restaurant.analyticsEndpoint || restaurant.liveMenuEndpoint || QRSTACK_API_URL;
-    const data = await endpointGet(endpoint, "getInsights", { slug: restaurant.slug, key: OWNER_ACCESS_TOKEN });
+    const filters = getInsightsFilters();
+    const data = await endpointGet(endpoint, "getInsights", {
+      slug: restaurant.slug,
+      key: OWNER_ACCESS_TOKEN,
+      startDate: filters.startDate,
+      endDate: filters.endDate,
+    });
     const insights = data.insights || {};
     const sourceCounts = insights.source_counts || {};
     const eventTypeCounts = insights.event_type_counts || {};
+    const totalAccesses = insights.total_accesses ?? insights.total_page_views ?? insights.event_type_counts_all?.page_view;
+    const periodAccesses = insights.period_accesses ?? insights.filtered_accesses ?? eventTypeCounts.page_view ?? 0;
+    const periodEvents = insights.period_events ?? insights.filtered_events ?? insights.total_events ?? 0;
+    const totalEvents = insights.total_events ?? periodEvents;
+    const periodLabel = insights.period_label || formatInsightsPeriod(filters);
     target.innerHTML = `
-      ${metric("Acessos hoje", insights.accesses_today || 0)}
-      ${metric("Acessos 7 dias", insights.accesses_7_days || 0)}
-      ${metric("Eventos totais", insights.total_events || 0)}
+      ${metric("Acessos no período", periodAccesses)}
+      ${metric("Eventos no período", periodEvents)}
+      ${metric("Eventos totais", totalEvents)}
+      ${totalAccesses !== undefined ? metric("Acessos totais", totalAccesses) : ""}
       <article class="card">
         <p class="eyebrow">Analytics reais</p>
-        <h3>Planilha conectada</h3>
-        <p class="muted">Dados carregados da aba <strong>qrstack_events</strong> na planilha real do ${restaurant.name}.</p>
+        <h3>${periodLabel}</h3>
+        <p class="muted">Dados carregados da aba <strong>qrstack_events</strong> na planilha real do ${restaurant.name}. O total histórico continua preservado para comparação.</p>
+        <div class="table">
+          <div class="table-row"><span>Hoje</span><strong>${insights.accesses_today || 0}</strong></div>
+          <div class="table-row"><span>Últimos 7 dias</span><strong>${insights.accesses_7_days || 0}</strong></div>
+        </div>
       </article>
       <article class="card">
-        <h3>Origem</h3>
+        <h3>Origem no período</h3>
         <div class="table">
           ${Object.entries(sourceCounts).length
             ? Object.entries(sourceCounts).map(([source, count]) => `<div class="table-row"><span>${source}</span><strong>${count}</strong></div>`).join("")
@@ -1525,7 +1610,7 @@ async function hydrateInsights(restaurant) {
         </div>
       </article>
       <article class="card">
-        <h3>Eventos</h3>
+        <h3>Eventos no período</h3>
         <div class="table">
           ${Object.entries(eventTypeCounts).length
             ? Object.entries(eventTypeCounts).map(([type, count]) => `<div class="table-row"><span>${type}</span><strong>${count}</strong></div>`).join("")
@@ -1543,6 +1628,48 @@ async function hydrateInsights(restaurant) {
       ${metric("Eventos locais", state.events.length)}
     `;
   }
+}
+
+function getInsightsFilters() {
+  const form = document.querySelector("[data-insights-filter]");
+  if (!form) return { startDate: "", endDate: "" };
+  const formData = new FormData(form);
+  return {
+    startDate: String(formData.get("startDate") || "").slice(0, 10),
+    endDate: String(formData.get("endDate") || "").slice(0, 10),
+  };
+}
+
+function setInsightsPreset(preset) {
+  const form = document.querySelector("[data-insights-filter]");
+  if (!form) return;
+  const startInput = form.querySelector('[name="startDate"]');
+  const endInput = form.querySelector('[name="endDate"]');
+  const today = todayIso();
+  if (preset === "all") {
+    startInput.value = "";
+    endInput.value = "";
+  } else if (preset === "today") {
+    startInput.value = today;
+    endInput.value = today;
+  } else {
+    startInput.value = dateDaysAgo(Number(preset) - 1);
+    endInput.value = today;
+  }
+}
+
+function dateDaysAgo(days) {
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
+function formatInsightsPeriod(filters) {
+  if (!filters.startDate && !filters.endDate) return "Todos os tempos";
+  if (filters.startDate && filters.endDate && filters.startDate === filters.endDate) return formatDate(filters.startDate);
+  const start = filters.startDate ? formatDate(filters.startDate) : "início";
+  const end = filters.endDate ? formatDate(filters.endDate) : "hoje";
+  return `${start} até ${end}`;
 }
 
 function catalogImageUrl(imageUrl, restaurant = null) {
@@ -1964,6 +2091,13 @@ function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight, maxLines = 3) {
 
 window.addEventListener("hashchange", router);
 document.addEventListener("submit", (event) => {
+  const insightsFilter = event.target.closest("[data-insights-filter]");
+  if (insightsFilter) {
+    event.preventDefault();
+    hydrateInsights(getRestaurant(ACTIVE_CLIENT_SLUG));
+    return;
+  }
+
   const ownerAccessForm = event.target.closest("[data-owner-access]");
   if (ownerAccessForm) {
     event.preventDefault();
@@ -2000,6 +2134,13 @@ document.addEventListener("click", async (event) => {
     event.preventDefault();
     if (history.length > 1) history.back();
     else window.location.hash = "#/home";
+    return;
+  }
+  const insightsPreset = event.target.closest("[data-insights-preset]");
+  if (insightsPreset) {
+    event.preventDefault();
+    setInsightsPreset(insightsPreset.dataset.insightsPreset);
+    hydrateInsights(getRestaurant(ACTIVE_CLIENT_SLUG));
     return;
   }
   const copyButton = event.target.closest("[data-copy], [data-copy-input]");
