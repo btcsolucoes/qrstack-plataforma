@@ -155,12 +155,57 @@ async function endpointGet(endpoint, action, params = {}) {
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   });
-  const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, 2200);
-  const text = await response.text();
-  if (!text.trim().startsWith("{")) throw new Error("endpoint_not_public_or_not_json");
-  const data = JSON.parse(text);
-  if (!response.ok || data.ok === false) throw new Error(data.error || "endpoint_request_failed");
-  return data;
+  try {
+    const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, 12000);
+    const text = await response.text();
+    if (!text.trim().startsWith("{")) throw new Error("endpoint_not_public_or_not_json");
+    const data = JSON.parse(text);
+    if (!response.ok || data.ok === false) throw new Error(data.error || "endpoint_request_failed");
+    return data;
+  } catch (error) {
+    if (action === "getInsights") return endpointJsonp(url, 12000);
+    throw error;
+  }
+}
+
+function endpointJsonp(url, timeoutMs = 12000) {
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return Promise.reject(new Error("jsonp_not_available"));
+  }
+  const jsonpUrl = new URL(url.toString());
+  const callbackName = `__qrstackJsonp${Date.now()}${Math.random().toString(16).slice(2)}`;
+  jsonpUrl.searchParams.set("callback", callbackName);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const script = document.createElement("script");
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("endpoint_jsonp_timeout"));
+    }, timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timeout);
+      delete window[callbackName];
+      script.remove();
+    };
+    window[callbackName] = (data) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (!data || data.ok === false) reject(new Error(data?.error || "endpoint_jsonp_failed"));
+      else resolve(data);
+    };
+    script.onerror = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("endpoint_jsonp_error"));
+    };
+    script.async = true;
+    script.src = jsonpUrl.toString();
+    document.head.appendChild(script);
+  });
 }
 
 async function apiPost(payload) {
@@ -1084,49 +1129,67 @@ function renderHqInsights() {
   const grouped = groupBy(state.events, "source");
   const clicksWhats = state.events.filter((event) => event.eventType === "whatsapp_click").length;
   const clicksMaps = state.events.filter((event) => event.eventType === "maps_click").length;
+  const localSourceCounts = Object.fromEntries(Object.entries(grouped).map(([source, events]) => [source, events.length]));
   return `
-    <section class="section">
+    <section class="section insights-page">
       <div class="section__head">
         <p class="eyebrow">Insights internos</p>
-        <h2>Acesso e conversão</h2>
-        <p>Essa área fica só para você na QrStack. Os números abaixo não incluem dados de demonstração.</p>
+        <h2>Dashboard de acessos</h2>
+        <p>Leitura rápida de tráfego, origem dos acessos, ações importantes e comportamento do cardápio público.</p>
       </div>
-      <div id="insights-live" class="grid">
-        <div class="card">
-          <p class="eyebrow">Fonte dos dados</p>
-          <h3>Buscando analytics reais</h3>
-          <p class="muted">A plataforma está tentando carregar o consolidado salvo na planilha via Apps Script. Enquanto isso, aparecem apenas eventos reais capturados neste navegador.</p>
+      <form class="card insights-filter" data-insights-filter>
+        <div>
+          <p class="eyebrow">Período</p>
+          <h3>Recorte do dashboard</h3>
+          <p class="muted">Escolha um período para comparar acessos, origem e ações registradas.</p>
         </div>
-        <div class="card">
-          <h3>Eventos locais</h3>
-          <div class="table">
-            <div class="table-row"><span>Eventos locais desta sessão</span><strong>${state.events.length}</strong></div>
-            <div class="table-row"><span>WhatsApp</span><strong>${clicksWhats}</strong></div>
-            <div class="table-row"><span>Como chegar</span><strong>${clicksMaps}</strong></div>
+        <div class="insights-filter__presets">
+          <button type="button" class="secondary" data-insights-preset="today">Hoje</button>
+          <button type="button" class="secondary" data-insights-preset="7">7 dias</button>
+          <button type="button" class="secondary" data-insights-preset="30">30 dias</button>
+          <button type="button" class="secondary" data-insights-preset="all">Todos</button>
+        </div>
+        <div class="insights-filter__dates">
+          <label>
+            Início
+            <input type="date" name="startDate" />
+          </label>
+          <label>
+            Fim
+            <input type="date" name="endDate" />
+          </label>
+          <button type="submit">Aplicar</button>
+        </div>
+      </form>
+      <div id="insights-live" class="insights-dashboard">
+        <article class="card dashboard-hero">
+          <div>
+            <p class="eyebrow">Carregando</p>
+            <h3>Buscando analytics reais</h3>
+            <p class="muted">A plataforma está carregando o consolidado salvo na planilha via Apps Script.</p>
           </div>
-        </div>
+          <span class="status-pill status-pill--pending">Sincronizando</span>
+        </article>
       </div>
-      <div class="grid grid--three">
-        ${metric("Últimos 7 dias", lastDaysEvents(7).length)}
-        ${metric("WhatsApp", clicksWhats)}
-        ${metric("Como chegar", clicksMaps)}
-      </div>
-      <div class="grid">
-        <div class="card">
-          <h3>Origem dos acessos locais</h3>
-          <div class="table">
-            ${Object.entries(grouped).length
-              ? Object.entries(grouped)
-                  .map(([source, events]) => `<div class="table-row"><span>${source}</span><strong>${events.length}</strong></div>`)
-                  .join("")
-              : `<p class="muted">Sem eventos locais registrados ainda.</p>`}
+      <aside class="local-insights">
+        <article class="card">
+          <p class="eyebrow">Sessão local</p>
+          <h3>Eventos capturados neste navegador</h3>
+          <p class="muted">Útil para teste rápido, separado dos analytics reais da planilha.</p>
+          <div class="compact-kpis">
+            ${insightKpi("Eventos locais", state.events.length)}
+            ${insightKpi("WhatsApp", clicksWhats)}
+            ${insightKpi("Como chegar", clicksMaps)}
+            ${insightKpi("7 dias locais", lastDaysEvents(7).length)}
           </div>
-        </div>
-        <div class="card">
+        </article>
+        ${renderInsightBars("Origem local", localSourceCounts, { empty: "Sem eventos locais registrados ainda." })}
+        <article class="card">
+          <p class="eyebrow">Pico local</p>
           <h3>Horário de pico</h3>
           <p class="muted">${peakHour()}</p>
-        </div>
-      </div>
+        </article>
+      </aside>
     </section>
   `;
 }
@@ -1503,46 +1566,125 @@ async function hydrateInsights(restaurant) {
   if (!target || !restaurant) return;
   try {
     const endpoint = restaurant.analyticsEndpoint || restaurant.liveMenuEndpoint || QRSTACK_API_URL;
-    const data = await endpointGet(endpoint, "getInsights", { slug: restaurant.slug, key: OWNER_ACCESS_TOKEN });
+    const filters = getInsightsFilters();
+    const data = await endpointGet(endpoint, "getInsights", {
+      slug: restaurant.slug,
+      key: OWNER_ACCESS_TOKEN,
+      startDate: filters.startDate,
+      endDate: filters.endDate,
+    });
     const insights = data.insights || {};
     const sourceCounts = insights.source_counts || {};
     const eventTypeCounts = insights.event_type_counts || {};
+    const totalAccesses = insights.total_accesses ?? insights.total_page_views ?? insights.event_type_counts_all?.page_view;
+    const periodAccesses = insights.period_accesses ?? insights.filtered_accesses ?? eventTypeCounts.page_view ?? 0;
+    const periodEvents = insights.period_events ?? insights.filtered_events ?? insights.total_events ?? 0;
+    const totalEvents = insights.total_events ?? periodEvents;
+    const periodLabel = insights.period_label || formatInsightsPeriod(filters);
+    const accessesToday = insights.accesses_today || 0;
+    const accesses7Days = insights.accesses_7_days || 0;
+    const whatsappClicks = eventTypeCounts.whatsapp_click || eventTypeCounts.whatsapp || 0;
+    const mapsClicks = eventTypeCounts.maps_click || eventTypeCounts.maps || 0;
+    const conversionBase = Number(periodAccesses) || 0;
+    const whatsappRate = conversionBase ? `${Math.round((Number(whatsappClicks) / conversionBase) * 100)}%` : "0%";
+    const mapsRate = conversionBase ? `${Math.round((Number(mapsClicks) / conversionBase) * 100)}%` : "0%";
+    const peak = insights.peak_hour || "Sem dados suficientes no período.";
     target.innerHTML = `
-      ${metric("Acessos hoje", insights.accesses_today || 0)}
-      ${metric("Acessos 7 dias", insights.accesses_7_days || 0)}
-      ${metric("Eventos totais", insights.total_events || 0)}
-      <article class="card">
-        <p class="eyebrow">Analytics reais</p>
-        <h3>Planilha conectada</h3>
-        <p class="muted">Dados carregados da aba <strong>qrstack_events</strong> na planilha real do ${restaurant.name}.</p>
-      </article>
-      <article class="card">
-        <h3>Origem</h3>
-        <div class="table">
-          ${Object.entries(sourceCounts).length
-            ? Object.entries(sourceCounts).map(([source, count]) => `<div class="table-row"><span>${source}</span><strong>${count}</strong></div>`).join("")
-            : `<p class="muted">Sem origem registrada.</p>`}
+      <article class="card dashboard-hero">
+        <div>
+          <p class="eyebrow">Analytics reais</p>
+          <h3>${restaurant.name} · ${periodLabel}</h3>
+          <p class="muted">Dados carregados da aba <strong>qrstack_events</strong> na planilha real. O dashboard cruza período, total histórico, origem e ações para leitura rápida.</p>
         </div>
+        <span class="status-pill">Atualizado pela planilha</span>
       </article>
-      <article class="card">
-        <h3>Eventos</h3>
-        <div class="table">
-          ${Object.entries(eventTypeCounts).length
-            ? Object.entries(eventTypeCounts).map(([type, count]) => `<div class="table-row"><span>${type}</span><strong>${count}</strong></div>`).join("")
-            : `<p class="muted">Sem eventos registrados.</p>`}
-        </div>
+      <div class="dashboard-kpis">
+        ${insightKpi("Acessos no período", periodAccesses, "page views filtrados")}
+        ${insightKpi("Acessos hoje", accessesToday, "dia atual")}
+        ${insightKpi("Últimos 7 dias", accesses7Days, "tendência recente")}
+        ${totalAccesses !== undefined ? insightKpi("Acessos totais", totalAccesses, "histórico completo") : ""}
+        ${insightKpi("WhatsApp", whatsappClicks, `${whatsappRate} dos acessos`)}
+        ${insightKpi("Como chegar", mapsClicks, `${mapsRate} dos acessos`)}
+      </div>
+      <div class="dashboard-grid">
+        ${renderInsightBars("Origem dos acessos", sourceCounts, { empty: "Sem origem registrada neste período.", labeler: formatSourceLabel })}
+        ${renderInsightBars("Eventos do período", eventTypeCounts, { empty: "Sem eventos registrados neste período.", labeler: formatEventLabel })}
+        <article class="card insight-card">
+          <p class="eyebrow">Comportamento</p>
+          <h3>Resumo operacional</h3>
+          <div class="table">
+            <div class="table-row"><span>Eventos no período</span><strong>${periodEvents}</strong></div>
+            <div class="table-row"><span>Eventos totais</span><strong>${totalEvents}</strong></div>
+            <div class="table-row"><span>Horário de pico</span><strong>${peak}</strong></div>
+          </div>
+        </article>
+        <article class="card insight-card">
+          <p class="eyebrow">Leitura rápida</p>
+          <h3>O que observar</h3>
+          <p class="muted">${insightSummary(periodAccesses, sourceCounts, whatsappClicks, mapsClicks)}</p>
+        </article>
+      </div>
+      <article class="card insight-table-card">
+        <p class="eyebrow">Detalhamento</p>
+        <h3>Origem e volume</h3>
+        ${renderInsightTable(sourceCounts, formatSourceLabel, "Nenhuma origem registrada no período.")}
       </article>
     `;
   } catch (error) {
     target.innerHTML = `
-      <article class="card">
+      <article class="card dashboard-hero dashboard-hero--warning">
         <p class="eyebrow">Analytics reais</p>
-        <h3>Analytics do Amaro ainda não ativo</h3>
+        <h3>Analytics do ${restaurant.name} ainda não ativo</h3>
         <p class="muted">A tela não vai inventar número. O endpoint real do ${restaurant.name} ainda não retornou JSON de insights. Publique o Apps Script da planilha original com suporte a <strong>getInsights</strong> e <strong>doPost</strong>.</p>
       </article>
-      ${metric("Eventos locais", state.events.length)}
+      <div class="dashboard-kpis">
+        ${insightKpi("Eventos locais", state.events.length, "capturados neste navegador")}
+        ${insightKpi("Últimos 7 dias", lastDaysEvents(7).length, "sessão local")}
+      </div>
     `;
   }
+}
+
+function getInsightsFilters() {
+  const form = document.querySelector("[data-insights-filter]");
+  if (!form) return { startDate: "", endDate: "" };
+  const formData = new FormData(form);
+  return {
+    startDate: String(formData.get("startDate") || "").slice(0, 10),
+    endDate: String(formData.get("endDate") || "").slice(0, 10),
+  };
+}
+
+function setInsightsPreset(preset) {
+  const form = document.querySelector("[data-insights-filter]");
+  if (!form) return;
+  const startInput = form.querySelector('[name="startDate"]');
+  const endInput = form.querySelector('[name="endDate"]');
+  const today = todayIso();
+  if (preset === "all") {
+    startInput.value = "";
+    endInput.value = "";
+  } else if (preset === "today") {
+    startInput.value = today;
+    endInput.value = today;
+  } else {
+    startInput.value = dateDaysAgo(Number(preset) - 1);
+    endInput.value = today;
+  }
+}
+
+function dateDaysAgo(days) {
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
+function formatInsightsPeriod(filters) {
+  if (!filters.startDate && !filters.endDate) return "Todos os tempos";
+  if (filters.startDate && filters.endDate && filters.startDate === filters.endDate) return formatDate(filters.startDate);
+  const start = filters.startDate ? formatDate(filters.startDate) : "início";
+  const end = filters.endDate ? formatDate(filters.endDate) : "hoje";
+  return `${start} até ${end}`;
 }
 
 function catalogImageUrl(imageUrl, restaurant = null) {
@@ -1874,6 +2016,114 @@ function metric(label, value) {
   `;
 }
 
+function insightKpi(label, value, detail = "") {
+  return `
+    <article class="card insight-kpi">
+      <span class="eyebrow">${label}</span>
+      <strong>${formatNumber(value)}</strong>
+      ${detail ? `<small>${detail}</small>` : ""}
+    </article>
+  `;
+}
+
+function renderInsightBars(title, counts, options = {}) {
+  const entries = sortedCountEntries(counts);
+  const max = Math.max(...entries.map(([, count]) => Number(count) || 0), 1);
+  const labeler = options.labeler || ((value) => value);
+  return `
+    <article class="card insight-chart">
+      <p class="eyebrow">Distribuição</p>
+      <h3>${title}</h3>
+      ${
+        entries.length
+          ? `<div class="insight-bars">
+              ${entries
+                .map(([key, count]) => {
+                  const numeric = Number(count) || 0;
+                  const width = Math.max(6, Math.round((numeric / max) * 100));
+                  return `
+                    <div class="insight-bar">
+                      <div class="insight-bar__label">
+                        <span>${labeler(key)}</span>
+                        <strong>${formatNumber(numeric)}</strong>
+                      </div>
+                      <div class="insight-bar__track"><i style="width:${width}%"></i></div>
+                    </div>
+                  `;
+                })
+                .join("")}
+            </div>`
+          : `<p class="muted">${options.empty || "Sem dados registrados."}</p>`
+      }
+    </article>
+  `;
+}
+
+function renderInsightTable(counts, labeler = (value) => value, empty = "Sem dados registrados.") {
+  const entries = sortedCountEntries(counts);
+  const total = entries.reduce((sum, [, count]) => sum + Number(count || 0), 0);
+  if (!entries.length) return `<p class="muted">${empty}</p>`;
+  return `
+    <div class="table insight-table">
+      ${entries
+        .map(([key, count]) => {
+          const numeric = Number(count) || 0;
+          const percent = total ? Math.round((numeric / total) * 100) : 0;
+          return `<div class="table-row"><span>${labeler(key)}</span><strong>${formatNumber(numeric)} · ${percent}%</strong></div>`;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function sortedCountEntries(counts = {}) {
+  return Object.entries(counts)
+    .filter(([, count]) => Number(count) > 0)
+    .sort((a, b) => Number(b[1]) - Number(a[1]));
+}
+
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString("pt-BR");
+}
+
+function formatSourceLabel(source = "") {
+  const labels = {
+    direct: "Direto",
+    instagram: "Instagram",
+    whatsapp: "WhatsApp",
+    google: "Google",
+    qr: "QR Code",
+    platform: "QrStack",
+    hq: "Central QrStack",
+    cliente: "Portal do restaurante",
+    internet: "Internet",
+  };
+  const key = String(source || "direct").toLowerCase();
+  return labels[key] || String(source || "Direto");
+}
+
+function formatEventLabel(type = "") {
+  const labels = {
+    page_view: "Acesso ao cardápio",
+    whatsapp_click: "Clique no WhatsApp",
+    maps_click: "Clique em Como chegar",
+    instagram_click: "Clique no Instagram",
+    menu_open: "Abertura de cardápio",
+    story_click: "Clique no Story",
+  };
+  const key = String(type || "").toLowerCase();
+  return labels[key] || String(type || "Evento");
+}
+
+function insightSummary(periodAccesses, sourceCounts, whatsappClicks, mapsClicks) {
+  const topSource = sortedCountEntries(sourceCounts)[0];
+  const sourceText = topSource ? `${formatSourceLabel(topSource[0])} lidera as entradas com ${formatNumber(topSource[1])} acesso(s)` : "ainda não há origem dominante registrada";
+  const actionCount = Number(whatsappClicks || 0) + Number(mapsClicks || 0);
+  if (!Number(periodAccesses)) return "Sem acessos no recorte atual. Use um período maior ou confira se o link publicado já está registrando eventos.";
+  if (!actionCount) return `${sourceText}. Ainda não houve clique em WhatsApp ou rota neste recorte.`;
+  return `${sourceText}. O período gerou ${formatNumber(actionCount)} ação(ões) de intenção, somando WhatsApp e rota.`;
+}
+
 function groupBy(list, key) {
   return list.reduce((acc, item) => {
     const group = item[key] || "Geral";
@@ -1964,6 +2214,13 @@ function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight, maxLines = 3) {
 
 window.addEventListener("hashchange", router);
 document.addEventListener("submit", (event) => {
+  const insightsFilter = event.target.closest("[data-insights-filter]");
+  if (insightsFilter) {
+    event.preventDefault();
+    hydrateInsights(getRestaurant(ACTIVE_CLIENT_SLUG));
+    return;
+  }
+
   const ownerAccessForm = event.target.closest("[data-owner-access]");
   if (ownerAccessForm) {
     event.preventDefault();
@@ -2000,6 +2257,13 @@ document.addEventListener("click", async (event) => {
     event.preventDefault();
     if (history.length > 1) history.back();
     else window.location.hash = "#/home";
+    return;
+  }
+  const insightsPreset = event.target.closest("[data-insights-preset]");
+  if (insightsPreset) {
+    event.preventDefault();
+    setInsightsPreset(insightsPreset.dataset.insightsPreset);
+    hydrateInsights(getRestaurant(ACTIVE_CLIENT_SLUG));
     return;
   }
   const copyButton = event.target.closest("[data-copy], [data-copy-input]");
