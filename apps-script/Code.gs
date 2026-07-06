@@ -165,6 +165,9 @@ function trackEvent(payload) {
     language: payload.language || payload.idioma || '',
     session_id: payload.session_id || payload.sessionId || '',
     visitor_id: payload.visitor_id || payload.visitorId || '',
+    dish_name: payload.dish_name || payload.item_name || payload.prato || '',
+    dish_key: payload.dish_key || normalizeHeader(payload.dish_name || payload.item_name || payload.prato || ''),
+    dish_category: payload.dish_category || payload.item_category || payload.categoria || '',
     device_type: payload.device_type || payload.deviceType || device.type,
     browser: payload.browser || device.browser,
     os: payload.os || device.os,
@@ -289,6 +292,7 @@ function getInsights(restaurantId, filters = {}) {
   const last7 = realEvents.filter((event) => new Date(event.created_at) >= sevenDaysAgo);
   const periodEvents = filterEventsByPeriod(realEvents, filters.startDate, filters.endDate);
   const periodPageViews = periodEvents.filter((event) => event.event_type === 'page_view');
+  const periodDishViews = periodEvents.filter((event) => event.event_type === 'dish_view');
   const allPageViews = realEvents.filter((event) => event.event_type === 'page_view');
   const sourceCounts = countBy(periodPageViews, 'source');
   const typeCounts = countBy(periodEvents, 'event_type');
@@ -307,6 +311,9 @@ function getInsights(restaurantId, filters = {}) {
     source_counts: sourceCounts,
     event_type_counts: typeCounts,
     event_type_counts_all: allTypeCounts,
+    dish_view_counts: countBy(periodDishViews, 'dish_name'),
+    dish_view_category_counts: countBy(periodDishViews, 'dish_category'),
+    total_dish_views: periodDishViews.length,
     device_counts: countBy(periodPageViews, 'device_type'),
     browser_counts: countBy(periodPageViews, 'browser'),
     os_counts: countBy(periodPageViews, 'os'),

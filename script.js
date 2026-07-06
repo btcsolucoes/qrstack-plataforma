@@ -1720,6 +1720,9 @@ async function hydrateInsights(restaurant) {
     const dailyAccesses = insights.daily_accesses || {};
     const hourCounts = insights.hour_counts || {};
     const deviceCounts = normalizeCountKeys(insights.device_counts || {}, (value) => String(value || "desconhecido").toLowerCase());
+    const dishViewCounts = insights.dish_view_counts || {};
+    const dishCategoryCounts = insights.dish_view_category_counts || {};
+    const totalDishViews = insights.total_dish_views ?? eventTypeCounts.dish_view ?? 0;
     const recentEvents = insights.recent_events || [];
     const testEvents = Number(insights.test_events || 0);
     const collectedAt = insights.collected_at ? formatDateTime(insights.collected_at) : "Agora";
@@ -1742,6 +1745,7 @@ async function hydrateInsights(restaurant) {
         ${insightKpi("Visitantes únicos", uniqueSessions, uniqueSessionsTotal ? `${formatNumber(uniqueSessionsTotal)} no histórico` : "por sessão")}
         ${insightKpi("Acessos hoje", accessesToday, "dia atual")}
         ${insightKpi("Últimos 7 dias", accesses7Days, "tendência recente")}
+        ${insightKpi("Pratos vistos", totalDishViews, "cards visualizados")}
         ${insightKpi("WhatsApp", whatsappClicks, `${whatsappRate} dos acessos`)}
         ${insightKpi("Como chegar", mapsClicks, `${mapsRate} dos acessos`)}
       </div>
@@ -1759,6 +1763,8 @@ async function hydrateInsights(restaurant) {
         ${renderInsightBars("Dispositivos", deviceCounts, { empty: "Sem dispositivo registrado neste período.", labeler: formatDeviceLabel })}
         ${renderInsightBars("Acessos por horário", hourCounts, { empty: "Sem horário suficiente neste período.", labeler: formatHourLabel })}
         ${renderInsightBars("Acessos por dia", dailyAccesses, { empty: "Sem série diária neste período.", labeler: formatDateShort })}
+        ${renderInsightBars("Pratos mais vistos", dishViewCounts, { empty: "A coleta de visualização por prato ainda não registrou dados neste período.", labeler: (value) => value })}
+        ${renderInsightBars("Categorias de pratos vistas", dishCategoryCounts, { empty: "Sem categorias de pratos visualizadas neste período.", labeler: (value) => value })}
         ${renderConversionFunnel(periodAccesses, whatsappClicks, mapsClicks)}
         <article class="card insight-card">
           <p class="eyebrow">Comportamento</p>
@@ -2367,6 +2373,7 @@ function formatDateShort(value = "") {
 function formatEventLabel(type = "") {
   const labels = {
     page_view: "Acesso ao cardápio",
+    dish_view: "Prato visualizado",
     whatsapp_click: "Clique no WhatsApp",
     maps_click: "Clique em Como chegar",
     instagram_click: "Clique no Instagram",
