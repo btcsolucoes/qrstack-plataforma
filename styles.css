@@ -387,6 +387,17 @@ h3 {
   line-height: 1.04;
 }
 
+.dashboard-hero__status {
+  flex: 0 0 auto;
+  display: grid;
+  justify-items: end;
+  gap: 0.45rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-align: right;
+}
+
 .dashboard-hero--warning {
   border-color: color-mix(in srgb, #d64d31 32%, var(--line));
 }
@@ -436,6 +447,48 @@ h3 {
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 800;
+}
+
+.channel-board {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.2fr);
+  gap: 1rem;
+  align-items: stretch;
+}
+
+.channel-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.channel-card {
+  display: grid;
+  gap: 0.2rem;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, var(--primary));
+  border-radius: calc(var(--radius) - 6px);
+  background: color-mix(in srgb, var(--paper) 88%, white);
+  padding: 0.85rem;
+}
+
+.channel-card span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.channel-card strong {
+  color: var(--ink);
+  font-size: 1.8rem;
+  line-height: 1;
+}
+
+.channel-card small {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+  line-height: 1.35;
 }
 
 .dashboard-grid {
@@ -488,6 +541,41 @@ h3 {
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--primary), var(--secondary));
+}
+
+.funnel {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.funnel-step {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.funnel-step div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.8rem;
+  font-weight: 900;
+}
+
+.funnel-step span {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.funnel-step strong {
+  white-space: nowrap;
+}
+
+.funnel-step i {
+  display: block;
+  height: 16px;
+  min-width: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--secondary), var(--primary));
 }
 
 .insight-table .table-row strong {
@@ -942,6 +1030,16 @@ canvas {
 
   .dashboard-hero {
     display: grid;
+  }
+
+  .dashboard-hero__status {
+    justify-items: start;
+    text-align: left;
+  }
+
+  .channel-board,
+  .channel-grid {
+    grid-template-columns: 1fr;
   }
 
   .status-pill {
