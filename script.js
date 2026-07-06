@@ -1700,7 +1700,7 @@ async function hydrateInsights(restaurant) {
       endDate: filters.endDate,
     });
     const insights = data.insights || {};
-    const sourceCounts = insights.source_counts || {};
+    const sourceCounts = normalizeCountKeys(insights.source_counts || {}, normalizeSource);
     const eventTypeCounts = insights.event_type_counts || {};
     const totalAccesses = insights.total_accesses ?? insights.total_page_views ?? insights.event_type_counts_all?.page_view;
     const periodAccesses = insights.period_accesses ?? insights.filtered_accesses ?? eventTypeCounts.page_view ?? 0;
@@ -1719,7 +1719,7 @@ async function hydrateInsights(restaurant) {
     const peak = insights.peak_hour || "Sem dados suficientes no período.";
     const dailyAccesses = insights.daily_accesses || {};
     const hourCounts = insights.hour_counts || {};
-    const deviceCounts = insights.device_counts || {};
+    const deviceCounts = normalizeCountKeys(insights.device_counts || {}, (value) => String(value || "desconhecido").toLowerCase());
     const recentEvents = insights.recent_events || [];
     const testEvents = Number(insights.test_events || 0);
     const collectedAt = insights.collected_at ? formatDateTime(insights.collected_at) : "Agora";
@@ -2310,6 +2310,14 @@ function sortedCountEntries(counts = {}) {
   return Object.entries(counts)
     .filter(([, count]) => Number(count) > 0)
     .sort((a, b) => Number(b[1]) - Number(a[1]));
+}
+
+function normalizeCountKeys(counts = {}, normalizer = (value) => value) {
+  return Object.entries(counts).reduce((acc, [key, count]) => {
+    const normalized = normalizer(key) || key || "direct";
+    acc[normalized] = (acc[normalized] || 0) + Number(count || 0);
+    return acc;
+  }, {});
 }
 
 function formatNumber(value) {
