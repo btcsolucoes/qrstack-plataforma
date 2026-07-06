@@ -148,15 +148,29 @@ function saveMenuDay(payload) {
 function trackEvent(payload) {
   const restaurant = getRestaurantBySlug(payload.slug);
   const now = new Date().toISOString();
+  const source = normalizeSource(payload.source || payload.origem || payload.utm_source || 'direct');
+  const device = detectDevice(payload.user_agent || payload.userAgent || '');
   const event = {
     id: uuid('event'),
     restaurant_id: restaurant.id,
     menu_day_id: payload.menu_day_id || '',
     event_type: payload.event_type || 'page_view',
-    source: payload.source || 'direct',
+    source,
+    source_detail: payload.source_detail || payload.sourceDetail || payload.referrer || '',
+    url: payload.url || '',
+    path: payload.path || '',
     user_agent: payload.user_agent || '',
     referrer: payload.referrer || '',
     ip_hash: payload.ip_hash || '',
+    language: payload.language || payload.idioma || '',
+    session_id: payload.session_id || payload.sessionId || '',
+    visitor_id: payload.visitor_id || payload.visitorId || '',
+    device_type: payload.device_type || payload.deviceType || device.type,
+    browser: payload.browser || device.browser,
+    os: payload.os || device.os,
+    screen: payload.screen || '',
+    viewport: payload.viewport || '',
+    timezone_offset: payload.timezone_offset || payload.timezoneOffset || '',
     created_at: now,
   };
   appendObjects(SHEETS.events, [event]);
@@ -267,30 +281,43 @@ function getFormSchemaByRestaurant(restaurantId) {
 }
 
 function getInsights(restaurantId, filters = {}) {
-  const events = readObjects(SHEETS.events).filter((row) => row.restaurant_id === restaurantId);
+  const events = readObjects(SHEETS.events).filter((row) => row.restaurant_id === restaurantId).map(normalizeStoredEvent);
+  const realEvents = events.filter((event) => !isTestEvent(event));
   const now = new Date();
   const today = todayIso();
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  const last7 = events.filter((event) => new Date(event.created_at) >= sevenDaysAgo);
-  const periodEvents = filterEventsByPeriod(events, filters.startDate, filters.endDate);
-  const sourceCounts = countBy(periodEvents, 'source');
+  const last7 = realEvents.filter((event) => new Date(event.created_at) >= sevenDaysAgo);
+  const periodEvents = filterEventsByPeriod(realEvents, filters.startDate, filters.endDate);
+  const periodPageViews = periodEvents.filter((event) => event.event_type === 'page_view');
+  const allPageViews = realEvents.filter((event) => event.event_type === 'page_view');
+  const sourceCounts = countBy(periodPageViews, 'source');
   const typeCounts = countBy(periodEvents, 'event_type');
-  const allTypeCounts = countBy(events, 'event_type');
+  const allTypeCounts = countBy(realEvents, 'event_type');
 
   return {
-    total_events: events.length,
-    total_accesses: events.filter((event) => event.event_type === 'page_view').length,
+    total_events: realEvents.length,
+    test_events: events.length - realEvents.length,
+    total_accesses: allPageViews.length,
+    unique_sessions_total: uniqueCount(allPageViews, 'session_id'),
     period_events: periodEvents.length,
-    period_accesses: periodEvents.filter((event) => event.event_type === 'page_view').length,
-    accesses_today: events.filter((event) => String(event.created_at).slice(0, 10) === today && event.event_type === 'page_view').length,
+    period_accesses: periodPageViews.length,
+    unique_sessions_period: uniqueCount(periodPageViews, 'session_id'),
+    accesses_today: realEvents.filter((event) => String(event.created_at).slice(0, 10) === today && event.event_type === 'page_view').length,
     accesses_7_days: last7.filter((event) => event.event_type === 'page_view').length,
     source_counts: sourceCounts,
     event_type_counts: typeCounts,
     event_type_counts_all: allTypeCounts,
+    device_counts: countBy(periodPageViews, 'device_type'),
+    browser_counts: countBy(periodPageViews, 'browser'),
+    os_counts: countBy(periodPageViews, 'os'),
+    daily_accesses: dailyCounts(periodPageViews),
+    hour_counts: hourCounts(periodPageViews),
+    recent_events: recentEvents(periodEvents, 12),
     period_start: filters.startDate || '',
     period_end: filters.endDate || '',
     period_label: periodLabel(filters.startDate, filters.endDate),
-    peak_hour: peakHour(periodEvents),
+    peak_hour: peakHour(periodPageViews),
+    collected_at: new Date().toISOString(),
   };
 }
 
@@ -336,9 +363,23 @@ function readObjects(sheetName) {
 function appendObjects(sheetName, objects) {
   if (!objects.length) return;
   const sheet = getSheet(sheetName);
+  ensureHeadersForObjects(sheet, objects);
   const headers = getHeaders(sheet);
   const rows = objects.map((object) => headers.map((header) => object[header] ?? ''));
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
+function ensureHeadersForObjects(sheet, objects) {
+  const headers = getHeaders(sheet);
+  const missing = [];
+  objects.forEach((object) => {
+    Object.keys(object).forEach((key) => {
+      if (!headers.includes(key) && !missing.includes(key)) missing.push(key);
+    });
+  });
+  if (missing.length) {
+    sheet.getRange(1, headers.length + 1, 1, missing.length).setValues([missing]);
+  }
 }
 
 function upsertObject(sheetName, key, object) {
@@ -449,12 +490,113 @@ function todayIso() {
   return Utilities.formatDate(new Date(), 'America/Sao_Paulo', 'yyyy-MM-dd');
 }
 
+function normalizeStoredEvent(event) {
+  const device = detectDevice(event.user_agent || '');
+  return {
+    ...event,
+    event_type: normalizeEventType(event.event_type || event.tipo || 'page_view'),
+    source: normalizeSource(event.source || event.origem || 'direct'),
+    device_type: normalizeDeviceType(event.device_type || device.type),
+    browser: event.browser || device.browser,
+    os: event.os || device.os,
+  };
+}
+
+function normalizeEventType(value) {
+  const text = normalizeHeader(value);
+  if (text === 'pageview' || text === 'page view' || text === 'access' || text === 'acesso') return 'page_view';
+  return text.replace(/\s+/g, '_') || 'page_view';
+}
+
+function normalizeSource(value) {
+  const text = normalizeHeader(value);
+  if (!text || text === 'direto' || text === 'direct') return 'direct';
+  if (/\b(qr|qrcode|qr code|mesa|table)\b/.test(text)) return 'qr';
+  if (text.indexOf('whatsapp') >= 0 || text === 'wa' || text.indexOf('wpp') >= 0 || text.indexOf('wa me') >= 0) return 'whatsapp';
+  if (text.indexOf('instagram') >= 0 || text.indexOf('instagr') >= 0 || text === 'ig' || text.indexOf('stories') >= 0) return 'instagram';
+  if (text.indexOf('google') >= 0 || text.indexOf('pesquisa') >= 0 || text.indexOf('search') >= 0 || text.indexOf('organic') >= 0) return 'google';
+  if (text.indexOf('bing') >= 0 || text.indexOf('yahoo') >= 0 || text.indexOf('duckduckgo') >= 0) return 'search';
+  if (text.indexOf('facebook') >= 0 || text === 'fb') return 'facebook';
+  if (text.indexOf('tiktok') >= 0) return 'tiktok';
+  if (text.indexOf('codex') >= 0 || text.indexOf('teste') >= 0 || text.indexOf('test') >= 0) return text.replace(/\s+/g, '_');
+  return 'internet';
+}
+
+function normalizeDeviceType(value) {
+  const text = normalizeHeader(value);
+  if (text.indexOf('mobile') >= 0 || text.indexOf('celular') >= 0) return 'mobile';
+  if (text.indexOf('tablet') >= 0) return 'tablet';
+  if (text.indexOf('desktop') >= 0 || text.indexOf('computador') >= 0) return 'desktop';
+  return text || 'desconhecido';
+}
+
+function detectDevice(userAgent) {
+  const ua = String(userAgent || '');
+  const type = /iPad|Tablet/i.test(ua) ? 'tablet' : /Mobile|Android|iPhone|iPod/i.test(ua) ? 'mobile' : 'desktop';
+  const browser = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : /Firefox\//.test(ua) ? 'Firefox' : 'Outro';
+  const os = /Android/i.test(ua) ? 'Android' : /iPhone|iPad|iPod/i.test(ua) ? 'iOS' : /Windows/i.test(ua) ? 'Windows' : /Mac OS/i.test(ua) ? 'macOS' : /Linux/i.test(ua) ? 'Linux' : 'Outro';
+  return { type, browser, os };
+}
+
+function isTestEvent(event) {
+  const source = normalizeHeader(event.source);
+  const url = normalizeHeader(event.url);
+  return source.indexOf('codex') >= 0 || source.indexOf('test') >= 0 || source.indexOf('teste') >= 0 || url.indexOf('codex') >= 0;
+}
+
 function countBy(rows, key) {
   return rows.reduce((acc, row) => {
     const value = row[key] || 'direct';
     acc[value] = (acc[value] || 0) + 1;
     return acc;
   }, {});
+}
+
+function uniqueCount(rows, key) {
+  const values = rows.map((row) => String(row[key] || '').trim()).filter(Boolean);
+  return new Set(values).size;
+}
+
+function dailyCounts(rows) {
+  return rows.reduce((acc, row) => {
+    const date = eventDateOnly(row.created_at);
+    if (!date) return acc;
+    acc[date] = (acc[date] || 0) + 1;
+    return acc;
+  }, {});
+}
+
+function hourCounts(rows) {
+  return rows.reduce((acc, row) => {
+    const date = new Date(row.created_at);
+    if (Number.isNaN(date.getTime())) return acc;
+    const hour = Utilities.formatDate(date, 'America/Sao_Paulo', 'HH');
+    acc[hour] = (acc[hour] || 0) + 1;
+    return acc;
+  }, {});
+}
+
+function recentEvents(rows, limit) {
+  return rows
+    .slice()
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+    .slice(0, limit || 10)
+    .map((event) => ({
+      created_at: event.created_at || '',
+      event_type: event.event_type || '',
+      source: event.source || '',
+      source_detail: event.source_detail || '',
+      device_type: event.device_type || '',
+    }));
+}
+
+function normalizeHeader(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
 function peakHour(events) {

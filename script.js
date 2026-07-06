@@ -221,6 +221,22 @@ async function apiPost(payload) {
   return data;
 }
 
+function sendAnalyticsEvent(endpoint, payload) {
+  if (!endpoint) return Promise.resolve();
+  const body = JSON.stringify(payload);
+  if (navigator.sendBeacon) {
+    const sent = navigator.sendBeacon(endpoint, new Blob([body], { type: "text/plain;charset=UTF-8" }));
+    if (sent) return Promise.resolve();
+  }
+  return fetch(endpoint, {
+    method: "POST",
+    mode: "no-cors",
+    headers: { "Content-Type": "text/plain;charset=UTF-8" },
+    body,
+    keepalive: true,
+  }).then(() => undefined);
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = 1800) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -338,7 +354,7 @@ async function router() {
   const [path, hashQuery = ""] = hash.split("?");
   const parts = path.split("/").filter(Boolean);
   const params = new URLSearchParams(hashQuery || window.location.search);
-  const source = params.get("src") || "direct";
+  const source = resolveTrafficSource(params).source;
 
   if (!hash || parts[0] === "home") return renderHome();
   if (parts[0] === "hq" || parts[0] === "central") return renderOwnerRoute(parts[1] || "overview", params);
@@ -412,7 +428,7 @@ function clientPortalLink(restaurant) {
 }
 
 function publicMenuHash(restaurant, source = "qr") {
-  return `#/r/${restaurant.slug}?src=${source}`;
+  return `#/r/${restaurant.slug}?src=${encodeURIComponent(normalizeSource(source))}`;
 }
 
 function absoluteAppUrl(hash) {
@@ -431,7 +447,7 @@ function restaurantOriginalMenuUrl(restaurant, source = "platform") {
   const base = restaurant.githubPagesUrl || restaurant.pagesUrl || restaurant.assetsBaseUrl || restaurantPublicUrl(restaurant, source);
   try {
     const url = new URL(base);
-    url.searchParams.set("src", source);
+    url.searchParams.set("src", normalizeSource(source));
     return url.toString();
   } catch {
     return base;
@@ -456,6 +472,108 @@ function setSystemTheme() {
   document.documentElement.style.setProperty("--accent", "#f4b740");
   document.documentElement.style.setProperty("--hero-mark", `url("${ASSETS.qrstackMark}")`);
   document.documentElement.style.setProperty("--brand-pattern", `url("${ASSETS.qrstackMark}")`);
+}
+
+function buildTrafficPayload(sourceHint = "") {
+  const params = new URLSearchParams(window.location.search);
+  const hashQuery = window.location.hash.includes("?") ? window.location.hash.split("?").slice(1).join("?") : "";
+  const hashParams = new URLSearchParams(hashQuery);
+  hashParams.forEach((value, key) => {
+    if (!params.has(key)) params.set(key, value);
+  });
+  const traffic = resolveTrafficSource(params, sourceHint);
+  const device = detectDevice();
+  return {
+    source: traffic.source,
+    source_detail: traffic.detail,
+    url: location.href,
+    path: `${location.pathname}${location.hash || ""}`,
+    referrer: document.referrer || "",
+    user_agent: navigator.userAgent,
+    language: navigator.language || "",
+    session_id: getSessionId(),
+    visitor_id: getVisitorId(),
+    device_type: device.type,
+    browser: device.browser,
+    os: device.os,
+    screen: `${window.screen?.width || 0}x${window.screen?.height || 0}`,
+    viewport: `${window.innerWidth || 0}x${window.innerHeight || 0}`,
+    timezone_offset: String(new Date().getTimezoneOffset()),
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function resolveTrafficSource(params = new URLSearchParams(), sourceHint = "") {
+  const explicit = sourceHint || params.get("src") || params.get("source") || params.get("origem") || params.get("ref") || params.get("utm_source") || params.get("utm_medium");
+  const explicitSource = sourceFromText(explicit);
+  if (explicitSource) return { source: explicitSource, detail: explicit || explicitSource };
+  if (params.has("gclid") || params.has("gbraid") || params.has("wbraid")) return { source: "google", detail: "google_ads" };
+  const referrer = document.referrer || "";
+  if (!referrer) return { source: "direct", detail: "sem_referrer" };
+  try {
+    const host = new URL(referrer).hostname.replace(/^www\./, "");
+    return { source: sourceFromText(host) || "internet", detail: host };
+  } catch {
+    return { source: "internet", detail: "referrer_invalido" };
+  }
+}
+
+function normalizeSource(value = "") {
+  return sourceFromText(value) || "direct";
+}
+
+function sourceFromText(value = "") {
+  const text = normalizeKey(value);
+  if (!text) return "";
+  if (/\b(qr|qrcode|qr code|mesa|table)\b/.test(text)) return "qr";
+  if (text.includes("whatsapp") || text === "wa" || text.includes("wpp") || text.includes("wa me")) return "whatsapp";
+  if (text.includes("instagram") || text.includes("instagr") || text === "ig" || text.includes("stories") || text.includes("l instagram")) return "instagram";
+  if (text.includes("google") || text.includes("pesquisa") || text.includes("search") || text.includes("organic")) return "google";
+  if (text.includes("bing") || text.includes("yahoo") || text.includes("duckduckgo")) return "search";
+  if (text.includes("facebook") || text === "fb" || text.includes("l facebook")) return "facebook";
+  if (text.includes("tiktok")) return "tiktok";
+  if (text.includes("direct") || text.includes("direto")) return "direct";
+  if (text.includes("platform") || text.includes("qrstack")) return "platform";
+  if (text.includes("cliente")) return "cliente";
+  if (text.includes("hq") || text.includes("central")) return "hq";
+  return "";
+}
+
+function getSessionId() {
+  const key = "qrstack:session-id";
+  try {
+    let sessionId = sessionStorage.getItem(key);
+    if (!sessionId) {
+      sessionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      sessionStorage.setItem(key, sessionId);
+    }
+    return sessionId;
+  } catch {
+    return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+function getVisitorId() {
+  const key = "qrstack:visitor-id";
+  try {
+    let visitorId = localStorage.getItem(key);
+    if (!visitorId) {
+      visitorId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem(key, visitorId);
+    }
+    return visitorId;
+  } catch {
+    return "";
+  }
+}
+
+function detectDevice() {
+  const ua = navigator.userAgent || "";
+  const isMobile = /Mobile|Android|iPhone|iPod/i.test(ua);
+  const isTablet = /iPad|Tablet/i.test(ua);
+  const browser = /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : /Firefox\//.test(ua) ? "Firefox" : "Outro";
+  const os = /Android/i.test(ua) ? "Android" : /iPhone|iPad|iPod/i.test(ua) ? "iOS" : /Windows/i.test(ua) ? "Windows" : /Mac OS/i.test(ua) ? "macOS" : /Linux/i.test(ua) ? "Linux" : "Outro";
+  return { type: isTablet ? "tablet" : isMobile ? "mobile" : "desktop", browser, os };
 }
 
 function getRestaurant(slug) {
@@ -640,27 +758,27 @@ function normalizeKey(value) {
     .trim();
 }
 
-function trackEvent(restaurant, eventType, source = "direct", menuDayId = null) {
+function trackEvent(restaurant, eventType, source = "", menuDayId = null) {
+  const traffic = buildTrafficPayload(source);
   state.events.push({
     id: crypto.randomUUID(),
     restaurantId: restaurant.id,
     menuDayId,
     eventType,
-    source,
+    source: traffic.source,
+    sourceDetail: traffic.source_detail,
     userAgent: navigator.userAgent,
-    referrer: document.referrer,
+    referrer: traffic.referrer,
     ipHash: "",
     createdAt: new Date().toISOString(),
   });
   saveState();
-  apiPost({
+  sendAnalyticsEvent(restaurant.analyticsEndpoint || restaurant.liveMenuEndpoint || QRSTACK_API_URL, {
     action: "trackEvent",
     slug: restaurant.slug,
     menu_day_id: menuDayId || "",
     event_type: eventType,
-    source,
-    user_agent: navigator.userAgent,
-    referrer: document.referrer,
+    ...traffic,
   }).catch((error) => console.warn("QrStack event API unavailable:", error.message));
 }
 
@@ -1085,6 +1203,9 @@ function renderHqPublicMenus() {
       const menu = getLatestMenu(restaurant.id);
       const itemCount = menu ? getMenuItems(menu.id).length : 0;
       const publicUrl = restaurantPublicUrl(restaurant);
+      const qrUrl = restaurantOriginalMenuUrl(restaurant, "qr");
+      const instagramUrl = restaurantOriginalMenuUrl(restaurant, "instagram");
+      const whatsappUrl = restaurantOriginalMenuUrl(restaurant, "whatsapp");
       const privateUrl = restaurantAccessUrl(restaurant);
       return `
         <article class="card public-menu-card">
@@ -1102,12 +1223,17 @@ function renderHqPublicMenus() {
             <div class="table-row"><span>Preço exibido</span><strong>${menu ? priceSummary(menu, getMenuItems(menu.id)) : "Consulte"}</strong></div>
           </div>
           <p class="copy-url">${publicUrl}</p>
+          <p class="copy-url">QR: ${qrUrl}</p>
+          <p class="copy-url">Instagram: ${instagramUrl}</p>
+          <p class="copy-url">WhatsApp: ${whatsappUrl}</p>
           <p class="copy-url">${privateUrl}</p>
               <div class="actions">
             <a class="button" href="${publicMenuHash(restaurant, "hq")}">Abrir cardápio</a>
             <a class="button secondary" href="${clientPortalLink(restaurant)}">Atualizar</a>
             <button type="button" class="secondary" data-copy="${escapeAttr(privateUrl)}">Copiar acesso</button>
-            <button type="button" class="ghost" data-copy="${escapeAttr(publicUrl)}">Copiar público</button>
+            <button type="button" class="ghost" data-copy="${escapeAttr(qrUrl)}">Copiar QR</button>
+            <button type="button" class="ghost" data-copy="${escapeAttr(instagramUrl)}">Copiar Instagram</button>
+            <button type="button" class="ghost" data-copy="${escapeAttr(whatsappUrl)}">Copiar WhatsApp</button>
           </div>
         </article>
       `;
@@ -1583,38 +1709,64 @@ async function hydrateInsights(restaurant) {
     const periodLabel = insights.period_label || formatInsightsPeriod(filters);
     const accessesToday = insights.accesses_today || 0;
     const accesses7Days = insights.accesses_7_days || 0;
+    const uniqueSessions = insights.unique_sessions_period ?? insights.unique_sessions ?? 0;
+    const uniqueSessionsTotal = insights.unique_sessions_total ?? 0;
     const whatsappClicks = eventTypeCounts.whatsapp_click || eventTypeCounts.whatsapp || 0;
     const mapsClicks = eventTypeCounts.maps_click || eventTypeCounts.maps || 0;
     const conversionBase = Number(periodAccesses) || 0;
     const whatsappRate = conversionBase ? `${Math.round((Number(whatsappClicks) / conversionBase) * 100)}%` : "0%";
     const mapsRate = conversionBase ? `${Math.round((Number(mapsClicks) / conversionBase) * 100)}%` : "0%";
     const peak = insights.peak_hour || "Sem dados suficientes no período.";
+    const dailyAccesses = insights.daily_accesses || {};
+    const hourCounts = insights.hour_counts || {};
+    const deviceCounts = insights.device_counts || {};
+    const recentEvents = insights.recent_events || [];
+    const testEvents = Number(insights.test_events || 0);
+    const collectedAt = insights.collected_at ? formatDateTime(insights.collected_at) : "Agora";
+    const topSource = sortedCountEntries(sourceCounts)[0];
     target.innerHTML = `
       <article class="card dashboard-hero">
         <div>
           <p class="eyebrow">Analytics reais</p>
           <h3>${restaurant.name} · ${periodLabel}</h3>
-          <p class="muted">Dados carregados da aba <strong>qrstack_events</strong> na planilha real. O dashboard cruza período, total histórico, origem e ações para leitura rápida.</p>
+          <p class="muted">Dados carregados da aba <strong>qrstack_events</strong> na planilha real. A leitura abaixo separa origem, volume, visitantes únicos, dispositivos e ações de intenção.</p>
         </div>
-        <span class="status-pill">Atualizado pela planilha</span>
+        <div class="dashboard-hero__status">
+          <span class="status-pill">Coleta ativa</span>
+          <small>Atualizado: ${collectedAt}</small>
+          ${testEvents ? `<small>${formatNumber(testEvents)} evento(s) de teste filtrado(s)</small>` : ""}
+        </div>
       </article>
       <div class="dashboard-kpis">
         ${insightKpi("Acessos no período", periodAccesses, "page views filtrados")}
+        ${insightKpi("Visitantes únicos", uniqueSessions, uniqueSessionsTotal ? `${formatNumber(uniqueSessionsTotal)} no histórico` : "por sessão")}
         ${insightKpi("Acessos hoje", accessesToday, "dia atual")}
         ${insightKpi("Últimos 7 dias", accesses7Days, "tendência recente")}
-        ${totalAccesses !== undefined ? insightKpi("Acessos totais", totalAccesses, "histórico completo") : ""}
         ${insightKpi("WhatsApp", whatsappClicks, `${whatsappRate} dos acessos`)}
         ${insightKpi("Como chegar", mapsClicks, `${mapsRate} dos acessos`)}
       </div>
+      <article class="card channel-board">
+        <div>
+          <p class="eyebrow">Canais</p>
+          <h3>De onde o cliente está chegando</h3>
+          <p class="muted">${topSource ? `${formatSourceLabel(topSource[0])} é a origem principal neste recorte.` : "Ainda sem origem dominante no período."}</p>
+        </div>
+        ${renderChannelCards(sourceCounts, periodAccesses)}
+      </article>
       <div class="dashboard-grid">
         ${renderInsightBars("Origem dos acessos", sourceCounts, { empty: "Sem origem registrada neste período.", labeler: formatSourceLabel })}
         ${renderInsightBars("Eventos do período", eventTypeCounts, { empty: "Sem eventos registrados neste período.", labeler: formatEventLabel })}
+        ${renderInsightBars("Dispositivos", deviceCounts, { empty: "Sem dispositivo registrado neste período.", labeler: formatDeviceLabel })}
+        ${renderInsightBars("Acessos por horário", hourCounts, { empty: "Sem horário suficiente neste período.", labeler: formatHourLabel })}
+        ${renderInsightBars("Acessos por dia", dailyAccesses, { empty: "Sem série diária neste período.", labeler: formatDateShort })}
+        ${renderConversionFunnel(periodAccesses, whatsappClicks, mapsClicks)}
         <article class="card insight-card">
           <p class="eyebrow">Comportamento</p>
           <h3>Resumo operacional</h3>
           <div class="table">
             <div class="table-row"><span>Eventos no período</span><strong>${periodEvents}</strong></div>
             <div class="table-row"><span>Eventos totais</span><strong>${totalEvents}</strong></div>
+            ${totalAccesses !== undefined ? `<div class="table-row"><span>Acessos totais</span><strong>${formatNumber(totalAccesses)}</strong></div>` : ""}
             <div class="table-row"><span>Horário de pico</span><strong>${peak}</strong></div>
           </div>
         </article>
@@ -1628,6 +1780,11 @@ async function hydrateInsights(restaurant) {
         <p class="eyebrow">Detalhamento</p>
         <h3>Origem e volume</h3>
         ${renderInsightTable(sourceCounts, formatSourceLabel, "Nenhuma origem registrada no período.")}
+      </article>
+      <article class="card insight-table-card">
+        <p class="eyebrow">Eventos recentes</p>
+        <h3>Últimas movimentações</h3>
+        ${renderRecentEvents(recentEvents)}
       </article>
     `;
   } catch (error) {
@@ -2076,6 +2233,79 @@ function renderInsightTable(counts, labeler = (value) => value, empty = "Sem dad
   `;
 }
 
+function renderChannelCards(sourceCounts, totalAccesses) {
+  const channels = [
+    ["qr", "QR Code", "Mesa e material impresso"],
+    ["instagram", "Instagram", "Bio, stories e perfil"],
+    ["whatsapp", "WhatsApp", "Compartilhamentos"],
+    ["google", "Google", "Pesquisa na internet"],
+    ["internet", "Internet", "Sites e links externos"],
+    ["direct", "Direto", "Sem referrer"],
+  ];
+  return `
+    <div class="channel-grid">
+      ${channels
+        .map(([key, label, hint]) => {
+          const count = Number(sourceCounts[key] || 0);
+          const percent = Number(totalAccesses) ? Math.round((count / Number(totalAccesses)) * 100) : 0;
+          return `
+            <div class="channel-card">
+              <span>${label}</span>
+              <strong>${formatNumber(count)}</strong>
+              <small>${percent}% · ${hint}</small>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderConversionFunnel(periodAccesses, whatsappClicks, mapsClicks) {
+  const accesses = Number(periodAccesses || 0);
+  const whatsapp = Number(whatsappClicks || 0);
+  const maps = Number(mapsClicks || 0);
+  const intent = whatsapp + maps;
+  return `
+    <article class="card insight-chart">
+      <p class="eyebrow">Conversão</p>
+      <h3>Funil de intenção</h3>
+      <div class="funnel">
+        ${funnelStep("Acessou o cardápio", accesses, accesses || 1)}
+        ${funnelStep("Chamou no WhatsApp", whatsapp, accesses || 1)}
+        ${funnelStep("Pediu rota", maps, accesses || 1)}
+      </div>
+      <p class="muted">${accesses ? `${Math.round((intent / accesses) * 100)}% dos acessos viraram ação de intenção.` : "Sem acessos no período para calcular intenção."}</p>
+    </article>
+  `;
+}
+
+function funnelStep(label, value, max) {
+  const width = Math.max(8, Math.round((Number(value || 0) / Number(max || 1)) * 100));
+  return `
+    <div class="funnel-step">
+      <div><span>${label}</span><strong>${formatNumber(value)}</strong></div>
+      <i style="width:${width}%"></i>
+    </div>
+  `;
+}
+
+function renderRecentEvents(events = []) {
+  if (!events.length) return `<p class="muted">Ainda não há eventos recentes no recorte atual.</p>`;
+  return `
+    <div class="table insight-table">
+      ${events
+        .map((event) => `
+          <div class="table-row">
+            <span>${formatEventLabel(event.event_type)} · ${formatSourceLabel(event.source)} · ${formatDeviceLabel(event.device_type)}</span>
+            <strong>${event.created_at ? formatDateTime(event.created_at) : ""}</strong>
+          </div>
+        `)
+        .join("")}
+    </div>
+  `;
+}
+
 function sortedCountEntries(counts = {}) {
   return Object.entries(counts)
     .filter(([, count]) => Number(count) > 0)
@@ -2093,6 +2323,9 @@ function formatSourceLabel(source = "") {
     whatsapp: "WhatsApp",
     google: "Google",
     qr: "QR Code",
+    search: "Busca",
+    facebook: "Facebook",
+    tiktok: "TikTok",
     platform: "QrStack",
     hq: "Central QrStack",
     cliente: "Portal do restaurante",
@@ -2100,6 +2333,27 @@ function formatSourceLabel(source = "") {
   };
   const key = String(source || "direct").toLowerCase();
   return labels[key] || String(source || "Direto");
+}
+
+function formatDeviceLabel(device = "") {
+  const labels = {
+    mobile: "Mobile",
+    desktop: "Desktop",
+    tablet: "Tablet",
+    desconhecido: "Não identificado",
+  };
+  const key = String(device || "desconhecido").toLowerCase();
+  return labels[key] || String(device || "Não identificado");
+}
+
+function formatHourLabel(hour = "") {
+  const clean = String(hour || "").padStart(2, "0").slice(0, 2);
+  return /^\d{2}$/.test(clean) ? `${clean}h` : String(hour || "");
+}
+
+function formatDateShort(value = "") {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return String(value || "");
+  return new Date(`${value}T12:00:00`).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
 }
 
 function formatEventLabel(type = "") {
