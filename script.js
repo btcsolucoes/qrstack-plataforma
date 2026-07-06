@@ -1721,8 +1721,15 @@ async function hydrateInsights(restaurant) {
     const hourCounts = insights.hour_counts || {};
     const deviceCounts = normalizeCountKeys(insights.device_counts || {}, (value) => String(value || "desconhecido").toLowerCase());
     const dishViewCounts = insights.dish_view_counts || {};
+    const dishTouchCounts = insights.dish_touch_counts || {};
+    const dishObserveSeconds = insights.dish_observe_seconds || {};
+    const dishAttentionScores = insights.dish_attention_scores || {};
     const dishCategoryCounts = insights.dish_view_category_counts || {};
+    const dishTouchCategoryCounts = insights.dish_touch_category_counts || {};
+    const dishObserveCategorySeconds = insights.dish_observe_category_seconds || {};
     const totalDishViews = insights.total_dish_views ?? eventTypeCounts.dish_view ?? 0;
+    const totalDishTouches = insights.total_dish_touches ?? eventTypeCounts.dish_touch ?? 0;
+    const totalDishObserveSeconds = insights.total_dish_observe_seconds ?? 0;
     const recentEvents = insights.recent_events || [];
     const testEvents = Number(insights.test_events || 0);
     const collectedAt = insights.collected_at ? formatDateTime(insights.collected_at) : "Agora";
@@ -1746,6 +1753,8 @@ async function hydrateInsights(restaurant) {
         ${insightKpi("Acessos hoje", accessesToday, "dia atual")}
         ${insightKpi("Últimos 7 dias", accesses7Days, "tendência recente")}
         ${insightKpi("Pratos vistos", totalDishViews, "cards visualizados")}
+        ${insightKpi("Toques em pratos", totalDishTouches, "interações nos cards")}
+        ${insightKpi("Tempo em pratos", formatDurationShort(totalDishObserveSeconds), "observação acumulada")}
         ${insightKpi("WhatsApp", whatsappClicks, `${whatsappRate} dos acessos`)}
         ${insightKpi("Como chegar", mapsClicks, `${mapsRate} dos acessos`)}
       </div>
@@ -1763,8 +1772,13 @@ async function hydrateInsights(restaurant) {
         ${renderInsightBars("Dispositivos", deviceCounts, { empty: "Sem dispositivo registrado neste período.", labeler: formatDeviceLabel })}
         ${renderInsightBars("Acessos por horário", hourCounts, { empty: "Sem horário suficiente neste período.", labeler: formatHourLabel })}
         ${renderInsightBars("Acessos por dia", dailyAccesses, { empty: "Sem série diária neste período.", labeler: formatDateShort })}
+        ${renderInsightBars("Ranking de interesse dos pratos", dishAttentionScores, { empty: "Sem score de interesse suficiente neste período.", labeler: (value) => value, valueFormatter: formatScore })}
         ${renderInsightBars("Pratos mais vistos", dishViewCounts, { empty: "A coleta de visualização por prato ainda não registrou dados neste período.", labeler: (value) => value })}
+        ${renderInsightBars("Pratos mais tocados", dishTouchCounts, { empty: "Ainda não houve toque nos cards de pratos neste período.", labeler: (value) => value })}
+        ${renderInsightBars("Tempo observado por prato", dishObserveSeconds, { empty: "Ainda não há tempo observado por prato neste período.", labeler: (value) => value, valueFormatter: formatDurationShort })}
         ${renderInsightBars("Categorias de pratos vistas", dishCategoryCounts, { empty: "Sem categorias de pratos visualizadas neste período.", labeler: (value) => value })}
+        ${renderInsightBars("Categorias mais tocadas", dishTouchCategoryCounts, { empty: "Sem toques por categoria neste período.", labeler: (value) => value })}
+        ${renderInsightBars("Tempo por categoria", dishObserveCategorySeconds, { empty: "Sem tempo por categoria neste período.", labeler: (value) => value, valueFormatter: formatDurationShort })}
         ${renderConversionFunnel(periodAccesses, whatsappClicks, mapsClicks)}
         <article class="card insight-card">
           <p class="eyebrow">Comportamento</p>
@@ -2193,6 +2207,7 @@ function renderInsightBars(title, counts, options = {}) {
   const entries = sortedCountEntries(counts);
   const max = Math.max(...entries.map(([, count]) => Number(count) || 0), 1);
   const labeler = options.labeler || ((value) => value);
+  const valueFormatter = options.valueFormatter || formatNumber;
   return `
     <article class="card insight-chart">
       <p class="eyebrow">Distribuição</p>
@@ -2208,7 +2223,7 @@ function renderInsightBars(title, counts, options = {}) {
                     <div class="insight-bar">
                       <div class="insight-bar__label">
                         <span>${labeler(key)}</span>
-                        <strong>${formatNumber(numeric)}</strong>
+                        <strong>${valueFormatter(numeric)}</strong>
                       </div>
                       <div class="insight-bar__track"><i style="width:${width}%"></i></div>
                     </div>
@@ -2301,12 +2316,16 @@ function renderRecentEvents(events = []) {
   return `
     <div class="table insight-table">
       ${events
-        .map((event) => `
+        .map((event) => {
+          const dishText = event.dish_name ? ` · ${event.dish_name}` : "";
+          const durationText = event.observe_seconds ? ` · ${formatDurationShort(event.observe_seconds)}` : "";
+          return `
           <div class="table-row">
-            <span>${formatEventLabel(event.event_type)} · ${formatSourceLabel(event.source)} · ${formatDeviceLabel(event.device_type)}</span>
+            <span>${formatEventLabel(event.event_type)}${dishText}${durationText} · ${formatSourceLabel(event.source)} · ${formatDeviceLabel(event.device_type)}</span>
             <strong>${event.created_at ? formatDateTime(event.created_at) : ""}</strong>
           </div>
-        `)
+        `;
+        })
         .join("")}
     </div>
   `;
@@ -2327,7 +2346,25 @@ function normalizeCountKeys(counts = {}, normalizer = (value) => value) {
 }
 
 function formatNumber(value) {
-  return Number(value || 0).toLocaleString("pt-BR");
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number.toLocaleString("pt-BR") : String(value || "0");
+}
+
+function formatDurationShort(value) {
+  const seconds = Math.round(Number(value || 0));
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0s";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const minuteRest = minutes % 60;
+  return minuteRest ? `${hours}h ${minuteRest}m` : `${hours}h`;
+}
+
+function formatScore(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number.toLocaleString("pt-BR", { maximumFractionDigits: 1 }) : "0";
 }
 
 function formatSourceLabel(source = "") {
@@ -2374,6 +2411,8 @@ function formatEventLabel(type = "") {
   const labels = {
     page_view: "Acesso ao cardápio",
     dish_view: "Prato visualizado",
+    dish_touch: "Toque em prato",
+    dish_observe: "Tempo observando prato",
     whatsapp_click: "Clique no WhatsApp",
     maps_click: "Clique em Como chegar",
     instagram_click: "Clique no Instagram",
