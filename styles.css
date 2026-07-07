@@ -492,6 +492,15 @@ h3 {
   align-items: stretch;
 }
 
+.control-room > *,
+.dashboard-grid > *,
+.menu-command-grid > *,
+.menu-side-stack > *,
+.command-metrics > *,
+.channel-grid > * {
+  min-width: 0;
+}
+
 .command-panel {
   display: grid;
   grid-template-columns: minmax(260px, 0.9fr) minmax(0, 1.1fr);
@@ -538,6 +547,7 @@ h3 {
 .command-metrics .insight-kpi strong {
   color: white;
   font-size: clamp(1.75rem, 3.8vw, 2.5rem);
+  overflow-wrap: anywhere;
 }
 
 .decision-panel {
@@ -572,6 +582,7 @@ h3 {
   color: var(--ink);
   font-size: 1.05rem;
   line-height: 1.12;
+  overflow-wrap: anywhere;
 }
 
 .highlight-item small {
@@ -626,6 +637,7 @@ h3 {
   color: var(--ink);
   font-size: 1.8rem;
   line-height: 1;
+  overflow-wrap: anywhere;
 }
 
 .channel-card small {
@@ -680,6 +692,7 @@ h3 {
   display: grid;
   align-content: start;
   gap: 0.85rem;
+  min-width: 0;
 }
 
 .insight-bars {
@@ -699,11 +712,24 @@ h3 {
   gap: 1rem;
   color: var(--ink);
   font-weight: 900;
+  min-width: 0;
 }
 
 .insight-bar__label span {
+  min-width: 0;
   overflow-wrap: anywhere;
   line-height: 1.18;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.insight-bar__label strong {
+  flex: 0 0 auto;
+  max-width: 44%;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .insight-bar__track {
@@ -757,6 +783,170 @@ h3 {
 
 .insight-table .table-row strong {
   white-space: nowrap;
+}
+
+.insight-chart--visual {
+  min-height: 296px;
+}
+
+.chart-figure {
+  min-height: 172px;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--paper) 82%, white);
+  padding: 0.6rem;
+}
+
+.chart-figure svg {
+  display: block;
+  width: 100%;
+  height: 172px;
+  overflow: visible;
+}
+
+.chart-figure text {
+  fill: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.area-fill {
+  fill: color-mix(in srgb, var(--primary) 18%, transparent);
+}
+
+.area-line {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chart-figure circle {
+  fill: var(--secondary);
+  stroke: var(--paper);
+  stroke-width: 2;
+}
+
+.column-chart {
+  display: grid;
+  grid-template-columns: repeat(var(--columns), minmax(7px, 1fr));
+  align-items: end;
+  gap: 0.28rem;
+  min-height: 176px;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 8px;
+  background:
+    linear-gradient(to top, color-mix(in srgb, var(--primary) 8%, transparent) 1px, transparent 1px) 0 0 / 100% 25%,
+    color-mix(in srgb, var(--paper) 82%, white);
+  padding: 1rem 0.7rem 0.55rem;
+}
+
+.column-bar {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  gap: 0.35rem;
+  height: 150px;
+  min-width: 0;
+  align-items: end;
+}
+
+.column-bar i {
+  display: block;
+  width: 100%;
+  min-height: 4px;
+  border-radius: 999px 999px 2px 2px;
+  background: linear-gradient(180deg, var(--secondary), var(--primary));
+}
+
+.column-bar span {
+  min-height: 12px;
+  color: var(--muted);
+  font-size: 0.58rem;
+  font-weight: 900;
+  line-height: 1;
+  text-align: center;
+}
+
+.donut-layout {
+  display: grid;
+  grid-template-columns: minmax(128px, 0.72fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: center;
+}
+
+.donut-chart {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: min(100%, 170px);
+  aspect-ratio: 1;
+  justify-self: center;
+  border-radius: 50%;
+}
+
+.donut-chart::after {
+  content: "";
+  position: absolute;
+  inset: 21%;
+  border-radius: 50%;
+  background: var(--paper);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.donut-chart span,
+.donut-chart small {
+  position: relative;
+  z-index: 1;
+}
+
+.donut-chart span {
+  color: var(--ink);
+  font-size: clamp(1.25rem, 4vw, 2rem);
+  font-weight: 900;
+  line-height: 1;
+}
+
+.donut-chart small {
+  margin-top: 1.7rem;
+  margin-left: -2.2rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.donut-legend {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.donut-legend div {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  align-items: center;
+  color: var(--ink);
+  font-weight: 900;
+}
+
+.donut-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.donut-legend span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.donut-legend strong {
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 .rail {
@@ -1171,10 +1361,21 @@ canvas {
 
 .table-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 1rem;
   border-bottom: 1px solid var(--line);
   padding-bottom: 0.55rem;
+}
+
+.table-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.table-row strong {
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .toast {
@@ -1294,6 +1495,45 @@ canvas {
   .insight-card,
   .insight-table-card {
     gap: 0.7rem;
+  }
+
+  .insight-chart--visual {
+    min-height: auto;
+  }
+
+  .chart-figure,
+  .column-chart {
+    min-height: 150px;
+  }
+
+  .chart-figure svg {
+    height: 150px;
+  }
+
+  .column-bar {
+    height: 128px;
+  }
+
+  .donut-layout {
+    grid-template-columns: 1fr;
+    gap: 0.8rem;
+  }
+
+  .donut-chart {
+    width: min(58vw, 150px);
+  }
+
+  .donut-legend span {
+    white-space: normal;
+  }
+
+  .insight-bar__label {
+    align-items: flex-start;
+  }
+
+  .insight-bar__label strong {
+    max-width: 38%;
+    font-size: 0.9rem;
   }
 
   .hero {

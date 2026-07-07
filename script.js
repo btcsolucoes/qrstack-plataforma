@@ -1786,7 +1786,7 @@ async function hydrateInsights(restaurant) {
         </div>
         ${renderChannelCards(sourceCounts, periodAccesses)}
         <div class="dashboard-grid dashboard-grid--split">
-          ${renderInsightBars("Origem dos acessos", sourceCounts, { empty: "Sem origem registrada neste período.", labeler: formatSourceLabel })}
+          ${renderDonutChart("Composição dos acessos", sourceCounts, { empty: "Sem origem registrada neste período.", labeler: formatSourceLabel })}
           ${renderConversionFunnel(periodAccesses, whatsappClicks, mapsClicks)}
         </div>
       </section>
@@ -1821,9 +1821,9 @@ async function hydrateInsights(restaurant) {
           <span>Separado de acesso real para evitar leitura inflada</span>
         </div>
         <div class="dashboard-grid dashboard-grid--three">
-          ${renderInsightBars("Acessos por dia", dailyAccesses, { empty: "Sem série diária neste período.", labeler: formatDateShort })}
-          ${renderInsightBars("Acessos por horário", hourCounts, { empty: "Sem horário suficiente neste período.", labeler: formatHourLabel })}
-          ${renderInsightBars("Dispositivos", deviceCounts, { empty: "Sem dispositivo registrado neste período.", labeler: formatDeviceLabel })}
+          ${renderAreaChart("Evolução diária", dailyAccesses, { empty: "Sem série diária neste período.", labeler: formatDateShort })}
+          ${renderColumnChart("Horários de acesso", hourCounts, { empty: "Sem horário suficiente neste período.", labeler: formatHourLabel })}
+          ${renderDonutChart("Dispositivos", deviceCounts, { empty: "Sem dispositivo registrado neste período.", labeler: formatDeviceLabel })}
         </div>
       </section>
       <section class="insight-section insight-section--categories">
@@ -2285,6 +2285,128 @@ function renderInsightBars(title, counts, options = {}) {
       }
     </article>
   `;
+}
+
+function renderAreaChart(title, counts, options = {}) {
+  const entries = orderedChartEntries(counts, options.order || "date");
+  const max = Math.max(...entries.map(([, value]) => Number(value) || 0), 1);
+  const labeler = options.labeler || ((value) => value);
+  if (!entries.length) {
+    return chartShell(title, `<p class="muted">${options.empty || "Sem dados registrados."}</p>`);
+  }
+  const width = 320;
+  const height = 150;
+  const left = 18;
+  const right = 18;
+  const top = 16;
+  const bottom = 24;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const points = entries.map(([, value], index) => {
+    const x = left + (entries.length === 1 ? plotWidth / 2 : (index / (entries.length - 1)) * plotWidth);
+    const y = top + plotHeight - ((Number(value) || 0) / max) * plotHeight;
+    return { x, y, value: Number(value) || 0 };
+  });
+  const line = points.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
+  const area = `${left},${height - bottom} ${line} ${width - right},${height - bottom}`;
+  const last = points[points.length - 1];
+  return chartShell(title, `
+    <div class="chart-figure chart-figure--area">
+      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${title}">
+        <polygon points="${area}" class="area-fill"></polygon>
+        <polyline points="${line}" class="area-line"></polyline>
+        ${points.map((point) => `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="3.2"></circle>`).join("")}
+        <text x="${left}" y="${height - 5}">${labeler(entries[0][0])}</text>
+        <text x="${width - right}" y="${height - 5}" text-anchor="end">${labeler(entries[entries.length - 1][0])}</text>
+        <text x="${Math.min(width - right, last.x + 8)}" y="${Math.max(14, last.y - 8)}" text-anchor="${last.x > width - 78 ? "end" : "start"}">${formatNumber(last.value)}</text>
+      </svg>
+    </div>
+  `);
+}
+
+function renderColumnChart(title, counts, options = {}) {
+  const entries = orderedChartEntries(counts, options.order || "hour");
+  const max = Math.max(...entries.map(([, value]) => Number(value) || 0), 1);
+  const labeler = options.labeler || ((value) => value);
+  if (!entries.length) {
+    return chartShell(title, `<p class="muted">${options.empty || "Sem dados registrados."}</p>`);
+  }
+  return chartShell(title, `
+    <div class="column-chart" style="--columns:${entries.length}">
+      ${entries.map(([key, value], index) => {
+        const numeric = Number(value) || 0;
+        const height = Math.max(4, Math.round((numeric / max) * 100));
+        const showLabel = entries.length <= 12 || index % 4 === 0 || index === entries.length - 1;
+        return `
+          <div class="column-bar" title="${labeler(key)}: ${formatNumber(numeric)}">
+            <i style="height:${height}%"></i>
+            <span>${showLabel ? labeler(key).replace("h", "") : ""}</span>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `);
+}
+
+function renderDonutChart(title, counts, options = {}) {
+  const entries = sortedCountEntries(counts).slice(0, options.limit || 5);
+  const labeler = options.labeler || ((value) => value);
+  const total = entries.reduce((sum, [, value]) => sum + Number(value || 0), 0);
+  if (!entries.length || !total) {
+    return chartShell(title, `<p class="muted">${options.empty || "Sem dados registrados."}</p>`);
+  }
+  const colors = ["var(--primary)", "var(--secondary)", "#153f2e", "#d9a441", "#6b7280"];
+  let cursor = 0;
+  const gradient = entries.map(([, value], index) => {
+    const percent = (Number(value || 0) / total) * 100;
+    const start = cursor;
+    cursor += percent;
+    return `${colors[index % colors.length]} ${start.toFixed(2)}% ${cursor.toFixed(2)}%`;
+  }).join(", ");
+  return chartShell(title, `
+    <div class="donut-layout">
+      <div class="donut-chart" style="background:conic-gradient(${gradient});">
+        <span>${formatNumber(total)}</span>
+        <small>total</small>
+      </div>
+      <div class="donut-legend">
+        ${entries.map(([key, value], index) => {
+          const numeric = Number(value) || 0;
+          const percent = Math.round((numeric / total) * 100);
+          return `
+            <div>
+              <i style="background:${colors[index % colors.length]}"></i>
+              <span>${labeler(key)}</span>
+              <strong>${percent}%</strong>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </div>
+  `);
+}
+
+function chartShell(title, body) {
+  return `
+    <article class="card insight-chart insight-chart--visual">
+      <p class="eyebrow">Gráfico</p>
+      <h3>${title}</h3>
+      ${body}
+    </article>
+  `;
+}
+
+function orderedChartEntries(counts, order) {
+  const entries = Object.entries(counts || {})
+    .map(([key, value]) => [key, Number(value) || 0])
+    .filter(([, value]) => value > 0);
+  if (order === "hour") {
+    return entries.sort((a, b) => Number(a[0]) - Number(b[0]));
+  }
+  if (order === "date") {
+    return entries.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  }
+  return entries;
 }
 
 function renderInsightTable(counts, labeler = (value) => value, empty = "Sem dados registrados.") {
