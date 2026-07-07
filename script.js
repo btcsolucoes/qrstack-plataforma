@@ -1734,6 +1734,10 @@ async function hydrateInsights(restaurant) {
     const testEvents = Number(insights.test_events || 0);
     const collectedAt = insights.collected_at ? formatDateTime(insights.collected_at) : "Agora";
     const topSource = sortedCountEntries(sourceCounts)[0];
+    const topDish = sortedCountEntries(dishAttentionScores)[0];
+    const topObservedDish = sortedCountEntries(dishObserveSeconds)[0];
+    const topCategory = sortedCountEntries(dishCategoryCounts)[0];
+    const topDevice = sortedCountEntries(deviceCounts)[0];
     target.innerHTML = `
       <article class="card dashboard-hero">
         <div>
@@ -1747,126 +1751,104 @@ async function hydrateInsights(restaurant) {
           ${testEvents ? `<small>${formatNumber(testEvents)} evento(s) de teste filtrado(s)</small>` : ""}
         </div>
       </article>
-      <section class="insight-section insight-section--summary">
-        <div class="insight-section__head">
-          <div>
-            <p class="eyebrow">Resumo de tráfego</p>
-            <h3>Acessos reais ao cardápio</h3>
+      <section class="control-room">
+        <article class="card command-panel">
+          <div class="command-panel__copy">
+            <p class="eyebrow">Leitura executiva</p>
+            <h3>${formatNumber(periodAccesses)} acessos reais</h3>
+            <p class="muted">Acessos são aberturas do cardápio. As ${formatNumber(periodEvents)} interações abaixo mostram o que aconteceu depois que a pessoa entrou.</p>
           </div>
-          <p class="muted">Acesso aqui é somente abertura de página. Visualização de prato, toque e tempo observado entram como engajamento.</p>
-        </div>
-        <div class="dashboard-kpis dashboard-kpis--primary">
-          ${insightKpi("Acessos no período", periodAccesses, "page views filtrados")}
-          ${insightKpi("Visitantes únicos", uniqueSessions, uniqueSessionsTotal ? `${formatNumber(uniqueSessionsTotal)} no histórico` : "por sessão")}
-          ${insightKpi("Acessos hoje", accessesToday, "dia atual")}
-          ${insightKpi("Últimos 7 dias", accesses7Days, "tendência recente")}
-        </div>
+          <div class="command-metrics">
+            ${insightKpi("Visitantes únicos", uniqueSessions, uniqueSessionsTotal ? `${formatNumber(uniqueSessionsTotal)} no histórico` : "por sessão")}
+            ${insightKpi("Hoje", accessesToday, "acessos no dia")}
+            ${insightKpi("7 dias", accesses7Days, "janela recente")}
+            ${insightKpi("Pico", peak || "Sem dados", "maior horário")}
+          </div>
+        </article>
+        <article class="card decision-panel">
+          <p class="eyebrow">O que merece atenção</p>
+          ${renderInsightHighlights([
+            ["Origem líder", topSource ? formatSourceLabel(topSource[0]) : "Sem origem", topSource ? `${formatNumber(topSource[1])} acessos` : "sem dados"],
+            ["Prato líder", topDish ? topDish[0] : "Sem ranking", topDish ? `${formatScore(topDish[1])} pontos` : "sem dados"],
+            ["Mais observado", topObservedDish ? topObservedDish[0] : "Sem tempo", topObservedDish ? formatDurationShort(topObservedDish[1]) : "sem dados"],
+            ["Categoria quente", topCategory ? topCategory[0] : "Sem categoria", topCategory ? `${formatNumber(topCategory[1])} visualizações` : "sem dados"],
+          ])}
+          <p class="muted decision-panel__note">${insightSummary(periodAccesses, sourceCounts, whatsappClicks, mapsClicks)}</p>
+        </article>
       </section>
-      <section class="insight-section">
-        <div class="insight-section__head">
+      <section class="insight-section insight-section--traffic">
+        <div class="section-title-row">
           <div>
-            <p class="eyebrow">Engajamento</p>
-            <h3>O que as pessoas observaram dentro do cardápio</h3>
+            <p class="eyebrow">Entrada</p>
+            <h3>Canais que trazem gente para o cardápio</h3>
           </div>
-          <p class="muted">${formatNumber(periodEvents)} interações registradas no período. Elas não são acessos extras.</p>
+          <span>${topDevice ? `${formatDeviceLabel(topDevice[0])} domina o acesso` : "Sem dispositivo dominante"}</span>
         </div>
-        <div class="dashboard-kpis dashboard-kpis--engagement">
-          ${insightKpi("Pratos vistos", totalDishViews, "cards com permanência mínima")}
-          ${insightKpi("Toques em pratos", totalDishTouches, "interações nos cards")}
-          ${insightKpi("Tempo em pratos", formatDurationShort(totalDishObserveSeconds), "observação acumulada")}
-          ${insightKpi("Horário de pico", peak || "Sem dados", "maior volume de acessos")}
-        </div>
-      </section>
-      <section class="insight-section">
-        <div class="insight-section__head">
-          <div>
-            <p class="eyebrow">Aquisição</p>
-            <h3>Origem, canais e dispositivos</h3>
-          </div>
-          <p class="muted">${topSource ? `${formatSourceLabel(topSource[0])} é a origem principal neste recorte.` : "Ainda sem origem dominante no período."}</p>
-        </div>
-        <div class="channel-board">
-          ${renderChannelCards(sourceCounts, periodAccesses)}
-        </div>
-        <div class="dashboard-grid dashboard-grid--three">
+        ${renderChannelCards(sourceCounts, periodAccesses)}
+        <div class="dashboard-grid dashboard-grid--split">
           ${renderInsightBars("Origem dos acessos", sourceCounts, { empty: "Sem origem registrada neste período.", labeler: formatSourceLabel })}
-          ${renderInsightBars("Dispositivos", deviceCounts, { empty: "Sem dispositivo registrado neste período.", labeler: formatDeviceLabel })}
           ${renderConversionFunnel(periodAccesses, whatsappClicks, mapsClicks)}
         </div>
       </section>
-      <section class="insight-section">
-        <div class="insight-section__head">
+      <section class="insight-section insight-section--menu">
+        <div class="section-title-row">
           <div>
-            <p class="eyebrow">Pratos</p>
-            <h3>Ranking de interesse e intenção</h3>
+            <p class="eyebrow">Cardápio</p>
+            <h3>Pratos com mais força comercial</h3>
           </div>
-          <p class="muted">O score combina visualização, toque e tempo observado. É o melhor sinal para decidir destaque, story e teste de preço.</p>
+          <span>Score = visualização + toque + tempo</span>
         </div>
-        <div class="dashboard-grid dashboard-grid--priority">
-          ${renderInsightBars("Ranking de interesse dos pratos", dishAttentionScores, { empty: "Sem score de interesse suficiente neste período.", labeler: (value) => value, valueFormatter: formatScore, limit: 10 })}
-          ${renderInsightBars("Tempo observado por prato", dishObserveSeconds, { empty: "Ainda não há tempo observado por prato neste período.", labeler: (value) => value, valueFormatter: formatDurationShort, limit: 10 })}
-          ${renderInsightBars("Pratos mais vistos", dishViewCounts, { empty: "A coleta de visualização por prato ainda não registrou dados neste período.", labeler: (value) => value, limit: 10 })}
-          ${renderInsightBars("Pratos mais tocados", dishTouchCounts, { empty: "Ainda não houve toque nos cards de pratos neste período.", labeler: (value) => value, limit: 10 })}
+        <div class="menu-command-grid">
+          ${renderInsightBars("Ranking principal", dishAttentionScores, { empty: "Sem score de interesse suficiente neste período.", labeler: (value) => value, valueFormatter: formatScore, limit: 8 })}
+          <div class="menu-side-stack">
+            ${renderInsightBars("Tempo observado", dishObserveSeconds, { empty: "Ainda não há tempo observado por prato neste período.", labeler: (value) => value, valueFormatter: formatDurationShort, limit: 6 })}
+            ${renderInsightBars("Toques nos pratos", dishTouchCounts, { empty: "Ainda não houve toque nos cards de pratos neste período.", labeler: (value) => value, limit: 6 })}
+          </div>
+        </div>
+        <div class="dashboard-kpis dashboard-kpis--engagement">
+          ${insightKpi("Pratos vistos", totalDishViews, "cards com permanência mínima")}
+          ${insightKpi("Toques", totalDishTouches, "interações nos cards")}
+          ${insightKpi("Tempo observado", formatDurationShort(totalDishObserveSeconds), "soma do período")}
+          ${insightKpi("Interações", periodEvents, "eventos no período")}
         </div>
       </section>
-      <section class="insight-section">
-        <div class="insight-section__head">
+      <section class="insight-section insight-section--patterns">
+        <div class="section-title-row">
           <div>
-            <p class="eyebrow">Categorias</p>
-            <h3>Leitura por grupo do cardápio</h3>
+            <p class="eyebrow">Padrões</p>
+            <h3>Quando e como o cliente navega</h3>
           </div>
-          <p class="muted">Ajuda a entender se o cliente está explorando almoço, entradas, doces, cafés ou bebidas.</p>
-        </div>
-        <div class="dashboard-grid dashboard-grid--three">
-          ${renderInsightBars("Categorias vistas", dishCategoryCounts, { empty: "Sem categorias de pratos visualizadas neste período.", labeler: (value) => value })}
-          ${renderInsightBars("Categorias mais tocadas", dishTouchCategoryCounts, { empty: "Sem toques por categoria neste período.", labeler: (value) => value })}
-          ${renderInsightBars("Tempo por categoria", dishObserveCategorySeconds, { empty: "Sem tempo por categoria neste período.", labeler: (value) => value, valueFormatter: formatDurationShort })}
-        </div>
-      </section>
-      <section class="insight-section">
-        <div class="insight-section__head">
-          <div>
-            <p class="eyebrow">Comportamento técnico</p>
-            <h3>Série temporal e eventos</h3>
-          </div>
-          <p class="muted">Esta parte mostra atividade interna do cardápio, não deve ser confundida com acessos únicos.</p>
+          <span>Separado de acesso real para evitar leitura inflada</span>
         </div>
         <div class="dashboard-grid dashboard-grid--three">
           ${renderInsightBars("Acessos por dia", dailyAccesses, { empty: "Sem série diária neste período.", labeler: formatDateShort })}
           ${renderInsightBars("Acessos por horário", hourCounts, { empty: "Sem horário suficiente neste período.", labeler: formatHourLabel })}
-          ${renderInsightBars("Tipos de evento", eventTypeCounts, { empty: "Sem eventos registrados neste período.", labeler: formatEventLabel })}
-        </div>
-        <div class="dashboard-grid dashboard-grid--two">
-          <article class="card insight-card">
-            <p class="eyebrow">Totais</p>
-            <h3>Resumo operacional</h3>
-            <div class="table">
-              <div class="table-row"><span>Acessos no período</span><strong>${formatNumber(periodAccesses)}</strong></div>
-              ${totalAccesses !== undefined ? `<div class="table-row"><span>Acessos totais</span><strong>${formatNumber(totalAccesses)}</strong></div>` : ""}
-              <div class="table-row"><span>Interações no período</span><strong>${formatNumber(periodEvents)}</strong></div>
-              <div class="table-row"><span>Interações totais</span><strong>${formatNumber(totalEvents)}</strong></div>
-            </div>
-          </article>
-          <article class="card insight-card">
-            <p class="eyebrow">Leitura rápida</p>
-            <h3>O que observar</h3>
-            <p class="muted">${insightSummary(periodAccesses, sourceCounts, whatsappClicks, mapsClicks)}</p>
-          </article>
+          ${renderInsightBars("Dispositivos", deviceCounts, { empty: "Sem dispositivo registrado neste período.", labeler: formatDeviceLabel })}
         </div>
       </section>
-      <section class="insight-section">
-        <div class="insight-section__head">
+      <section class="insight-section insight-section--categories">
+        <div class="section-title-row">
           <div>
-            <p class="eyebrow">Auditoria</p>
-            <h3>Origem detalhada e eventos recentes</h3>
+            <p class="eyebrow">Categorias</p>
+            <h3>Onde o usuário passa mais tempo</h3>
           </div>
         </div>
+        <div class="dashboard-grid dashboard-grid--three">
+          ${renderInsightBars("Categorias vistas", dishCategoryCounts, { empty: "Sem categorias visualizadas neste período.", labeler: (value) => value, limit: 8 })}
+          ${renderInsightBars("Tempo por categoria", dishObserveCategorySeconds, { empty: "Sem tempo por categoria neste período.", labeler: (value) => value, valueFormatter: formatDurationShort, limit: 8 })}
+          ${renderInsightBars("Categorias tocadas", dishTouchCategoryCounts, { empty: "Sem toques por categoria neste período.", labeler: (value) => value, limit: 8 })}
+        </div>
+      </section>
+      <section class="insight-section insight-section--audit">
+        <div class="section-title-row">
+          <div>
+            <p class="eyebrow">Auditoria</p>
+            <h3>Base bruta para conferir os dados</h3>
+          </div>
+          <span>${totalAccesses !== undefined ? `${formatNumber(totalAccesses)} acessos totais · ` : ""}${formatNumber(totalEvents)} interações totais</span>
+        </div>
         <div class="dashboard-grid dashboard-grid--two">
-          <article class="card insight-table-card">
-            <p class="eyebrow">Detalhamento</p>
-            <h3>Origem e volume</h3>
-            ${renderInsightTable(sourceCounts, formatSourceLabel, "Nenhuma origem registrada no período.")}
-          </article>
+          ${renderInsightBars("Tipos de evento", eventTypeCounts, { empty: "Sem eventos registrados neste período.", labeler: formatEventLabel })}
           <article class="card insight-table-card">
             <p class="eyebrow">Eventos recentes</p>
             <h3>Últimas movimentações</h3>
@@ -2317,6 +2299,22 @@ function renderInsightTable(counts, labeler = (value) => value, empty = "Sem dad
           const percent = total ? Math.round((numeric / total) * 100) : 0;
           return `<div class="table-row"><span>${labeler(key)}</span><strong>${formatNumber(numeric)} · ${percent}%</strong></div>`;
         })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderInsightHighlights(items) {
+  return `
+    <div class="highlight-list">
+      ${items
+        .map(([label, value, detail]) => `
+          <div class="highlight-item">
+            <span>${label}</span>
+            <strong>${value}</strong>
+            <small>${detail}</small>
+          </div>
+        `)
         .join("")}
     </div>
   `;
