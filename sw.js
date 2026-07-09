@@ -1,16 +1,6 @@
-const CACHE_NAME = "qrstack-platform-20260703e";
-const APP_SHELL = [
-  "./",
-  "./index.html",
-  "./styles.css?v=qrstack-platform-20260703e",
-  "./script.js?v=qrstack-platform-20260703e",
-  "./data/amaro-catalog.js?v=amaro-full-import-20260608",
-  "./assets/qrstack-mark.png",
-  "./assets/qrstack-wordmark.png"
-];
+const CACHE_PURGE_VERSION = "qrstack-platform-network-first-20260709";
 
-self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
+self.addEventListener("install", () => {
   self.skipWaiting();
 });
 
@@ -18,29 +8,10 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
-  );
-  self.clients.claim();
-});
-
-self.addEventListener("fetch", (event) => {
-  const request = event.request;
-  if (request.method !== "GET") return;
-  const url = new URL(request.url);
-  if (url.hostname.includes("script.google.com")) return;
-
-  event.respondWith(
-    caches.match(request).then((cached) => {
-      const fetched = fetch(request)
-        .then((response) => {
-          if (response && response.ok && url.origin === location.origin) {
-            const copy = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-          }
-          return response;
-        })
-        .catch(() => cached || caches.match("./index.html"));
-      return cached || fetched;
-    })
+      .then((keys) => Promise.all(keys.map((key) => caches.delete(key))))
+      .then(() => self.clients.claim())
   );
 });
+
+// The dashboard must always show fresh data and fresh code. Keeping no fetch
+// handler lets the browser use the network normally after old caches are purged.
