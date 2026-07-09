@@ -156,19 +156,19 @@ async function endpointGet(endpoint, action, params = {}) {
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   });
   try {
-    const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, 12000);
+    const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, 45000);
     const text = await response.text();
     if (!text.trim().startsWith("{")) throw new Error("endpoint_not_public_or_not_json");
     const data = JSON.parse(text);
     if (!response.ok || data.ok === false) throw new Error(data.error || "endpoint_request_failed");
     return data;
   } catch (error) {
-    if (action === "getInsights") return endpointJsonp(url, 12000);
+    if (action === "getInsights") return endpointJsonp(url, 45000);
     throw error;
   }
 }
 
-function endpointJsonp(url, timeoutMs = 12000) {
+function endpointJsonp(url, timeoutMs = 45000) {
   if (typeof document === "undefined" || typeof window === "undefined") {
     return Promise.reject(new Error("jsonp_not_available"));
   }
@@ -181,12 +181,19 @@ function endpointJsonp(url, timeoutMs = 12000) {
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
-      cleanup();
+      cleanup(true);
       reject(new Error("endpoint_jsonp_timeout"));
     }, timeoutMs);
-    const cleanup = () => {
+    const cleanup = (keepLateCallback = false) => {
       clearTimeout(timeout);
-      delete window[callbackName];
+      if (keepLateCallback) {
+        window[callbackName] = () => {};
+        setTimeout(() => {
+          delete window[callbackName];
+        }, 120000);
+      } else {
+        delete window[callbackName];
+      }
       script.remove();
     };
     window[callbackName] = (data) => {
