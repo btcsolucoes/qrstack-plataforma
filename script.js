@@ -155,6 +155,7 @@ async function endpointGet(endpoint, action, params = {}) {
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   });
+  if (action === "getInsights") return endpointJsonp(url, 90000);
   try {
     const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, 45000);
     const text = await response.text();
@@ -163,12 +164,11 @@ async function endpointGet(endpoint, action, params = {}) {
     if (!response.ok || data.ok === false) throw new Error(data.error || "endpoint_request_failed");
     return data;
   } catch (error) {
-    if (action === "getInsights") return endpointJsonp(url, 45000);
     throw error;
   }
 }
 
-function endpointJsonp(url, timeoutMs = 45000) {
+function endpointJsonp(url, timeoutMs = 90000) {
   if (typeof document === "undefined" || typeof window === "undefined") {
     return Promise.reject(new Error("jsonp_not_available"));
   }
@@ -1865,11 +1865,14 @@ async function hydrateInsights(restaurant) {
       </section>
     `;
   } catch (error) {
+    console.warn("QrStack insights unavailable:", error);
+    const isTimeout = String(error?.message || "").includes("timeout");
     target.innerHTML = `
       <article class="card dashboard-hero dashboard-hero--warning">
         <p class="eyebrow">Analytics reais</p>
-        <h3>Analytics do ${restaurant.name} ainda não ativo</h3>
-        <p class="muted">A tela não vai inventar número. O endpoint real do ${restaurant.name} ainda não retornou JSON de insights. Publique o Apps Script da planilha original com suporte a <strong>getInsights</strong> e <strong>doPost</strong>.</p>
+        <h3>${isTimeout ? "A base de insights demorou para responder" : `Analytics do ${restaurant.name} indisponível agora`}</h3>
+        <p class="muted">${isTimeout ? "O endpoint real existe, mas a resposta passou do limite de carregamento nesta tentativa. Recarregue a tela para buscar novamente sem usar dados inventados." : `O endpoint real do ${restaurant.name} não retornou os dados nesta tentativa. A plataforma continua bloqueando números falsos e preserva apenas os eventos locais deste navegador.`}</p>
+        <button class="button button--ghost" type="button" onclick="window.location.reload()">Recarregar insights</button>
       </article>
       <div class="dashboard-kpis">
         ${insightKpi("Eventos locais", state.events.length, "capturados neste navegador")}
