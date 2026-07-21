@@ -398,8 +398,8 @@ h3 {
   text-align: right;
 }
 
-.dashboard-hero--warning {
-  border-color: color-mix(in srgb, #d64d31 32%, var(--line));
+.dashboard-hero--sync {
+  border-color: color-mix(in srgb, var(--secondary) 46%, var(--line));
 }
 
 .status-pill {
@@ -431,6 +431,10 @@ h3 {
 
 .dashboard-kpis--engagement {
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.dashboard-kpis--loading .kpi strong {
+  font-size: clamp(1.2rem, 3vw, 1.7rem);
 }
 
 .compact-kpis {
