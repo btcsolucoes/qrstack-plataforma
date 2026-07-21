@@ -72,10 +72,12 @@ const DEFAULT_STATE = {
 };
 
 const STORE_KEY = "qrstack-platform-v4-amaro";
+const INSIGHTS_CACHE_KEY = "qrstack-insights-html-cache-v2";
 const app = document.getElementById("app");
 let state = loadState();
 let lastStoryDataUrl = "";
 let routeVersion = 0;
+const insightsRetryTimers = new Map();
 
 function item(menuDayId, name, category, isHighlight, sortOrder, description = "", price = "") {
   return {
@@ -131,6 +133,62 @@ function hydratePersistedState(parsedState) {
 
 function saveState() {
   localStorage.setItem(STORE_KEY, JSON.stringify(state));
+}
+
+function insightsCacheId(restaurant, filters = {}) {
+  return [
+    restaurant?.slug || "restaurant",
+    filters.startDate || "all",
+    filters.endDate || "all",
+  ].join(":");
+}
+
+function readInsightsCache() {
+  try {
+    return JSON.parse(localStorage.getItem(INSIGHTS_CACHE_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function getCachedInsightsHtml(restaurant, filters = {}) {
+  const cache = readInsightsCache();
+  return cache[insightsCacheId(restaurant, filters)] || null;
+}
+
+function saveCachedInsightsHtml(restaurant, filters = {}, html = "") {
+  if (!html) return;
+  try {
+    const cache = readInsightsCache();
+    cache[insightsCacheId(restaurant, filters)] = {
+      html,
+      savedAt: new Date().toISOString(),
+    };
+    const entries = Object.entries(cache).slice(-12);
+    localStorage.setItem(INSIGHTS_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // Cache is only a resilience layer; the dashboard must keep working without it.
+  }
+}
+
+function clearInsightsRetry(restaurant) {
+  const key = restaurant?.slug || "restaurant";
+  const timer = insightsRetryTimers.get(key);
+  if (timer) clearTimeout(timer);
+  insightsRetryTimers.delete(key);
+}
+
+function scheduleInsightsRetry(restaurant, delayMs = 18000) {
+  if (!restaurant) return;
+  const key = restaurant.slug || "restaurant";
+  clearInsightsRetry(restaurant);
+  insightsRetryTimers.set(
+    key,
+    setTimeout(() => {
+      insightsRetryTimers.delete(key);
+      if (document.getElementById("insights-live")) hydrateInsights(restaurant);
+    }, delayMs)
+  );
 }
 
 async function apiGet(action, params = {}) {
@@ -1697,9 +1755,9 @@ function renderFullCatalog(restaurant) {
 async function hydrateInsights(restaurant) {
   const target = document.getElementById("insights-live");
   if (!target || !restaurant) return;
+  const filters = getInsightsFilters();
   try {
     const endpoint = restaurant.analyticsEndpoint || restaurant.liveMenuEndpoint || QRSTACK_API_URL;
-    const filters = getInsightsFilters();
     const data = await endpointGet(endpoint, "getInsights", {
       slug: restaurant.slug,
       key: OWNER_ACCESS_TOKEN,
@@ -1864,19 +1922,45 @@ async function hydrateInsights(restaurant) {
         </div>
       </section>
     `;
+    saveCachedInsightsHtml(restaurant, filters, target.innerHTML);
+    clearInsightsRetry(restaurant);
   } catch (error) {
     console.warn("QrStack insights unavailable:", error);
-    const isTimeout = String(error?.message || "").includes("timeout");
+    const cached = getCachedInsightsHtml(restaurant, filters);
+    scheduleInsightsRetry(restaurant);
+    if (cached?.html) {
+      target.innerHTML = `
+        <article class="card dashboard-hero dashboard-hero--sync">
+          <div>
+            <p class="eyebrow">Analytics reais</p>
+            <h3>${restaurant.name} · última leitura salva</h3>
+            <p class="muted">A conexão com a planilha está oscilando, então a plataforma manteve o último dashboard válido enquanto tenta atualizar sozinha.</p>
+          </div>
+          <div class="dashboard-hero__status">
+            <span class="status-pill status-pill--pending">Sincronizando</span>
+            <small>Última leitura: ${formatDateTime(cached.savedAt)}</small>
+          </div>
+        </article>
+        ${cached.html}
+      `;
+      return;
+    }
     target.innerHTML = `
-      <article class="card dashboard-hero dashboard-hero--warning">
-        <p class="eyebrow">Analytics reais</p>
-        <h3>${isTimeout ? "A base de insights demorou para responder" : `Analytics do ${restaurant.name} indisponível agora`}</h3>
-        <p class="muted">${isTimeout ? "O endpoint real existe, mas a resposta passou do limite de carregamento nesta tentativa. Recarregue a tela para buscar novamente sem usar dados inventados." : `O endpoint real do ${restaurant.name} não retornou os dados nesta tentativa. A plataforma continua bloqueando números falsos e preserva apenas os eventos locais deste navegador.`}</p>
-        <button class="button button--ghost" type="button" onclick="window.location.reload()">Recarregar insights</button>
+      <article class="card dashboard-hero dashboard-hero--sync">
+        <div>
+          <p class="eyebrow">Analytics reais</p>
+          <h3>Sincronizando dados do ${restaurant.name}</h3>
+          <p class="muted">A base real está sendo carregada pela planilha. A plataforma vai tentar novamente em segundo plano e preencher o dashboard assim que a resposta chegar.</p>
+        </div>
+        <div class="dashboard-hero__status">
+          <span class="status-pill status-pill--pending">Carregando</span>
+          <small>Sem usar número inventado</small>
+        </div>
       </article>
-      <div class="dashboard-kpis">
+      <div class="dashboard-kpis dashboard-kpis--loading">
+        ${insightKpi("Coleta", "ativa", "aguardando leitura")}
         ${insightKpi("Eventos locais", state.events.length, "capturados neste navegador")}
-        ${insightKpi("Últimos 7 dias", lastDaysEvents(7).length, "sessão local")}
+        ${insightKpi("Retry", "auto", "sem rua sem saída")}
       </div>
     `;
   }
