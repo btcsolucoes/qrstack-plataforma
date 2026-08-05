@@ -19,7 +19,7 @@ const EVENT_COLUMNS = [
   "source_detail", "url", "path", "referrer", "user_agent", "language",
   "session_id", "visitor_id", "dish_name", "dish_key", "dish_category",
   "duration_ms", "observe_seconds", "device_type", "browser", "os", "screen",
-  "viewport", "timezone_offset", "created_at",
+  "viewport", "timezone_offset", "banner_shown", "banner_platform", "created_at",
 ];
 
 export default {
@@ -162,6 +162,8 @@ async function trackEvent(db, payload, request) {
     screen: payload.screen || "",
     viewport: payload.viewport || "",
     timezone_offset: payload.timezone_offset || payload.timezoneOffset || "",
+    banner_shown: toBooleanInteger(payload.banner_shown ?? payload.bannerShown),
+    banner_platform: payload.banner_platform || payload.bannerPlatform || "",
     created_at: normalizeTimestamp(payload.timestamp || payload.created_at) || new Date().toISOString(),
   };
 
@@ -184,13 +186,15 @@ async function getInsights(db, filters) {
   const dishViews = eventWhere(restaurant.slug, bounds, "event_type = 'dish_view' AND COALESCE(dish_name, '') <> ''");
   const dishTouches = eventWhere(restaurant.slug, bounds, "event_type = 'dish_touch' AND COALESCE(dish_name, '') <> ''");
   const dishObserves = eventWhere(restaurant.slug, bounds, "event_type = 'dish_observe' AND COALESCE(dish_name, '') <> ''");
+  const webviewBanner = eventWhere(restaurant.slug, bounds, "banner_shown = 1");
 
   const [
     totalEvents, periodEvents, totalAccesses, periodAccesses, accessesToday, accesses7Days,
     uniqueSessionsPeriod, uniqueSessionsTotal, sourceCounts, eventTypeCounts, eventTypeCountsAll,
     dailyAccesses, hourCounts, deviceCounts, browserCounts, osCounts, dishViewCounts,
     dishTouchCounts, dishObserveSeconds, dishCategoryCounts, dishTouchCategoryCounts,
-    dishObserveCategorySeconds, totalDishObserveSeconds, recentEvents,
+    dishObserveCategorySeconds, totalDishObserveSeconds, webviewBannerShown,
+    webviewBannerPlatformCounts, recentEvents,
   ] = await Promise.all([
     scalarCount(db, all),
     scalarCount(db, period),
@@ -215,6 +219,8 @@ async function getInsights(db, filters) {
     groupedCounts(db, dishTouches, "dish_category"),
     groupedSums(db, dishObserves, "dish_category", "observe_seconds"),
     scalarSum(db, dishObserves, "observe_seconds"),
+    scalarCount(db, webviewBanner),
+    groupedCounts(db, webviewBanner, "banner_platform"),
     recentEventsQuery(db, period, 15),
   ]);
 
@@ -254,6 +260,8 @@ async function getInsights(db, filters) {
     dish_view_category_counts: dishCategoryCounts,
     dish_touch_category_counts: dishTouchCategoryCounts,
     dish_observe_category_seconds: dishObserveCategorySeconds,
+    webview_banner_shown: webviewBannerShown,
+    webview_banner_platform_counts: webviewBannerPlatformCounts,
     total_dish_views: sumObjectValues(dishViewCounts),
     total_dish_touches: sumObjectValues(dishTouchCounts),
     total_dish_observe_seconds: totalDishObserveSeconds,
@@ -469,6 +477,12 @@ function addDays(isoDate, days) {
 function toInteger(value) {
   const number = Number(value || 0);
   return Number.isFinite(number) ? Math.round(number) : 0;
+}
+
+function toBooleanInteger(value) {
+  if (value === true || value === 1 || value === "1") return 1;
+  if (typeof value === "string" && value.toLowerCase() === "true") return 1;
+  return 0;
 }
 
 function titleize(value) {

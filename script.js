@@ -1822,6 +1822,7 @@ async function hydrateInsights(restaurant) {
     const totalDishViews = insights.total_dish_views ?? eventTypeCounts.dish_view ?? 0;
     const totalDishTouches = insights.total_dish_touches ?? eventTypeCounts.dish_touch ?? 0;
     const totalDishObserveSeconds = insights.total_dish_observe_seconds ?? 0;
+    const webviewBannerShown = insights.webview_banner_shown || 0;
     const recentEvents = insights.recent_events || [];
     const testEvents = Number(insights.test_events || 0);
     const collectedAt = insights.collected_at ? formatDateTime(insights.collected_at) : "Agora";
@@ -1854,6 +1855,7 @@ async function hydrateInsights(restaurant) {
             ${insightKpi("Visitantes únicos", uniqueSessions, uniqueSessionsTotal ? `${formatNumber(uniqueSessionsTotal)} no histórico` : "por sessão")}
             ${insightKpi("Hoje", accessesToday, "acessos no dia")}
             ${insightKpi("7 dias", accesses7Days, "janela recente")}
+            ${insightKpi("Webview IG", webviewBannerShown, "avisos/redirects")}
             ${insightKpi("Pico", peak || "Sem dados", "maior horário")}
           </div>
         </article>
