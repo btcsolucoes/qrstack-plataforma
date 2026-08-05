@@ -1,4 +1,6 @@
 wrangler.toml
 cloudflare/import/*-import.sql
 cloudflare/import/*.sql
+cloudflare/import/logs/
+cloudflare/backups/
 .wrangler/

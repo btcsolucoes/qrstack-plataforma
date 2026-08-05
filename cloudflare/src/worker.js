@@ -194,7 +194,7 @@ async function getInsights(db, filters) {
     dailyAccesses, hourCounts, deviceCounts, browserCounts, osCounts, dishViewCounts,
     dishTouchCounts, dishObserveSeconds, dishCategoryCounts, dishTouchCategoryCounts,
     dishObserveCategorySeconds, totalDishObserveSeconds, webviewBannerShown,
-    webviewBannerPlatformCounts, recentEvents,
+    webviewBannerPlatformCounts, instagramToDirect, recentEvents,
   ] = await Promise.all([
     scalarCount(db, all),
     scalarCount(db, period),
@@ -221,6 +221,7 @@ async function getInsights(db, filters) {
     scalarSum(db, dishObserves, "observe_seconds"),
     scalarCount(db, webviewBanner),
     groupedCounts(db, webviewBanner, "banner_platform"),
+    instagramToDirectQuery(db, restaurant.slug, bounds),
     recentEventsQuery(db, period, 15),
   ]);
 
@@ -262,6 +263,7 @@ async function getInsights(db, filters) {
     dish_observe_category_seconds: dishObserveCategorySeconds,
     webview_banner_shown: webviewBannerShown,
     webview_banner_platform_counts: webviewBannerPlatformCounts,
+    instagram_to_direct: instagramToDirect,
     total_dish_views: sumObjectValues(dishViewCounts),
     total_dish_touches: sumObjectValues(dishTouchCounts),
     total_dish_observe_seconds: totalDishObserveSeconds,
@@ -348,6 +350,45 @@ async function recentEventsQuery(db, where, limit) {
     LIMIT ?
   `).bind(...where.params, limit).all();
   return rows.results || [];
+}
+
+async function instagramToDirectQuery(db, slug, bounds) {
+  const pageViews = eventWhere(slug, bounds, "event_type = 'page_view' AND COALESCE(visitor_id, '') <> ''");
+  const row = await db.prepare(`
+    WITH pageviews AS (
+      SELECT visitor_id, session_id, source, created_at
+      FROM analytics_events_normalized
+      WHERE ${pageViews.sql}
+    ),
+    instagram_visitors AS (
+      SELECT visitor_id, MIN(created_at) AS first_instagram_at
+      FROM pageviews
+      WHERE source = 'instagram'
+      GROUP BY visitor_id
+    ),
+    direct_after_instagram AS (
+      SELECT p.visitor_id,
+             MIN(p.created_at) AS first_direct_after_instagram_at,
+             COUNT(DISTINCT p.session_id) AS direct_sessions_after_instagram
+      FROM pageviews p
+      JOIN instagram_visitors i ON i.visitor_id = p.visitor_id
+      WHERE p.source = 'direct'
+        AND p.created_at > i.first_instagram_at
+      GROUP BY p.visitor_id
+    )
+    SELECT
+      (SELECT COUNT(*) FROM instagram_visitors) AS instagram_visitors,
+      (SELECT COUNT(*) FROM direct_after_instagram) AS instagram_to_direct_visitors,
+      (SELECT COALESCE(SUM(direct_sessions_after_instagram), 0) FROM direct_after_instagram) AS direct_sessions_after_instagram
+  `).bind(...pageViews.params).first();
+  const instagramVisitors = Number(row?.instagram_visitors || 0);
+  const convertedVisitors = Number(row?.instagram_to_direct_visitors || 0);
+  return {
+    instagram_visitors: instagramVisitors,
+    instagram_to_direct_visitors: convertedVisitors,
+    direct_sessions_after_instagram: Number(row?.direct_sessions_after_instagram || 0),
+    instagram_to_direct_rate: instagramVisitors ? Number(((convertedVisitors / instagramVisitors) * 100).toFixed(2)) : 0,
+  };
 }
 
 function json(payload, status = 200, headers = JSON_HEADERS) {

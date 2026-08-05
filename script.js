@@ -1823,6 +1823,11 @@ async function hydrateInsights(restaurant) {
     const totalDishTouches = insights.total_dish_touches ?? eventTypeCounts.dish_touch ?? 0;
     const totalDishObserveSeconds = insights.total_dish_observe_seconds ?? 0;
     const webviewBannerShown = insights.webview_banner_shown || 0;
+    const instagramToDirect = insights.instagram_to_direct || {};
+    const instagramVisitors = Number(instagramToDirect.instagram_visitors || 0);
+    const instagramToDirectVisitors = Number(instagramToDirect.instagram_to_direct_visitors || 0);
+    const instagramToDirectSessions = Number(instagramToDirect.direct_sessions_after_instagram || 0);
+    const instagramToDirectRate = Number(instagramToDirect.instagram_to_direct_rate || 0);
     const recentEvents = insights.recent_events || [];
     const testEvents = Number(insights.test_events || 0);
     const collectedAt = insights.collected_at ? formatDateTime(insights.collected_at) : "Agora";
@@ -1856,6 +1861,7 @@ async function hydrateInsights(restaurant) {
             ${insightKpi("Hoje", accessesToday, "acessos no dia")}
             ${insightKpi("7 dias", accesses7Days, "janela recente")}
             ${insightKpi("Webview IG", webviewBannerShown, "avisos/redirects")}
+            ${insightKpi("IG -> Direct", instagramToDirectVisitors, `${formatPercentNumber(instagramToDirectRate)} de retorno`)}
             ${insightKpi("Pico", peak || "Sem dados", "maior horário")}
           </div>
         </article>
@@ -1866,6 +1872,7 @@ async function hydrateInsights(restaurant) {
             ["Prato líder", topDish ? topDish[0] : "Sem ranking", topDish ? `${formatScore(topDish[1])} pontos` : "sem dados"],
             ["Mais observado", topObservedDish ? topObservedDish[0] : "Sem tempo", topObservedDish ? formatDurationShort(topObservedDish[1]) : "sem dados"],
             ["Categoria quente", topCategory ? topCategory[0] : "Sem categoria", topCategory ? `${formatNumber(topCategory[1])} visualizações` : "sem dados"],
+            ["IG -> Direct", `${formatNumber(instagramToDirectVisitors)} visitante(s)`, `${formatNumber(instagramToDirectSessions)} sessão(ões) diretas após Instagram`],
           ])}
           <p class="muted decision-panel__note">${insightSummary(periodAccesses, sourceCounts, whatsappClicks, mapsClicks)}</p>
         </article>
@@ -1881,7 +1888,7 @@ async function hydrateInsights(restaurant) {
         ${renderChannelCards(sourceCounts, periodAccesses)}
         <div class="dashboard-grid dashboard-grid--split">
           ${renderDonutChart("Composição dos acessos", sourceCounts, { empty: "Sem origem registrada neste período.", labeler: formatSourceLabel })}
-          ${renderConversionFunnel(periodAccesses, whatsappClicks, mapsClicks)}
+          ${renderInstagramDirectConversion(instagramToDirect)}
         </div>
       </section>
       <section class="insight-section insight-section--menu">
@@ -2612,6 +2619,25 @@ function renderConversionFunnel(periodAccesses, whatsappClicks, mapsClicks) {
   `;
 }
 
+function renderInstagramDirectConversion(conversion = {}) {
+  const instagramVisitors = Number(conversion.instagram_visitors || 0);
+  const convertedVisitors = Number(conversion.instagram_to_direct_visitors || 0);
+  const directSessions = Number(conversion.direct_sessions_after_instagram || 0);
+  const rate = Number(conversion.instagram_to_direct_rate || 0);
+  return `
+    <article class="card insight-chart">
+      <p class="eyebrow">Conversão Instagram -> Direct</p>
+      <h3>Jornada até o restaurante</h3>
+      <div class="funnel">
+        ${funnelStep("Visitou pelo Instagram", instagramVisitors, instagramVisitors || 1)}
+        ${funnelStep("Depois voltou como direct/QR", convertedVisitors, instagramVisitors || 1)}
+        ${funnelStep("Sessões diretas após Instagram", directSessions, instagramVisitors || 1)}
+      </div>
+      <p class="muted">${instagramVisitors ? `${formatPercentNumber(rate)} dos visitantes de Instagram reapareceram depois como direct no mesmo navegador.` : "Ainda não há visitantes de Instagram suficientes para calcular essa jornada."}</p>
+    </article>
+  `;
+}
+
 function funnelStep(label, value, max) {
   const width = Math.max(8, Math.round((Number(value || 0) / Number(max || 1)) * 100));
   return `
@@ -2659,6 +2685,13 @@ function normalizeCountKeys(counts = {}, normalizer = (value) => value) {
 function formatNumber(value) {
   const number = Number(value || 0);
   return Number.isFinite(number) ? number.toLocaleString("pt-BR") : String(value || "0");
+}
+
+function formatPercentNumber(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number)
+    ? `${number.toLocaleString("pt-BR", { minimumFractionDigits: number % 1 ? 2 : 0, maximumFractionDigits: 2 })}%`
+    : "0%";
 }
 
 function formatDurationShort(value) {
