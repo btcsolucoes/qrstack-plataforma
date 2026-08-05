@@ -79,6 +79,7 @@ let state = loadState();
 let lastStoryDataUrl = "";
 let routeVersion = 0;
 const insightsRetryTimers = new Map();
+persistRuntimeStateMigrations();
 
 function item(menuDayId, name, category, isHighlight, sortOrder, description = "", price = "") {
   return {
@@ -116,6 +117,7 @@ function hydratePersistedState(parsedState) {
   const defaultsBySlug = new Map(DEFAULT_STATE.restaurants.map((restaurant) => [restaurant.slug, restaurant]));
   parsedState.restaurants = (parsedState.restaurants || []).map((restaurant) => {
     const defaults = defaultsBySlug.get(restaurant.slug) || {};
+    const analyticsEndpoint = normalizedAnalyticsEndpoint(restaurant, defaults);
     return {
       ...defaults,
       ...restaurant,
@@ -126,10 +128,23 @@ function hydratePersistedState(parsedState) {
       catalogUrl: restaurant.catalogUrl || defaults.catalogUrl || "",
       sectionsUrl: restaurant.sectionsUrl || defaults.sectionsUrl || "",
       liveMenuEndpoint: restaurant.liveMenuEndpoint || defaults.liveMenuEndpoint || "",
-      analyticsEndpoint: restaurant.analyticsEndpoint || defaults.analyticsEndpoint || restaurant.liveMenuEndpoint || defaults.liveMenuEndpoint || "",
+      analyticsEndpoint,
     };
   });
   return parsedState;
+}
+
+function normalizedAnalyticsEndpoint(restaurant, defaults = {}) {
+  if (restaurant.slug === ACTIVE_CLIENT_SLUG && QRSTACK_D1_API_URL) return QRSTACK_D1_API_URL;
+  return restaurant.analyticsEndpoint || defaults.analyticsEndpoint || restaurant.liveMenuEndpoint || defaults.liveMenuEndpoint || "";
+}
+
+function persistRuntimeStateMigrations() {
+  state.restaurants = state.restaurants.map((restaurant) => {
+    const defaults = DEFAULT_STATE.restaurants.find((item) => item.slug === restaurant.slug) || {};
+    return { ...restaurant, analyticsEndpoint: normalizedAnalyticsEndpoint(restaurant, defaults) };
+  });
+  saveState();
 }
 
 function saveState() {
@@ -214,16 +229,17 @@ async function endpointGet(endpoint, action, params = {}) {
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   });
-  if (action === "getInsights" && !supportsCorsEndpoint(endpoint)) return endpointJsonp(url, 90000);
+  const corsEndpoint = supportsCorsEndpoint(endpoint);
+  if (action === "getInsights" && !corsEndpoint) return endpointJsonp(url, 15000);
   try {
-    const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, action === "getInsights" ? 12000 : 45000);
+    const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, action === "getInsights" ? 6000 : 45000);
     const text = await response.text();
     if (!text.trim().startsWith("{")) throw new Error("endpoint_not_public_or_not_json");
     const data = JSON.parse(text);
     if (!response.ok || data.ok === false) throw new Error(data.error || "endpoint_request_failed");
     return data;
   } catch (error) {
-    if (action === "getInsights") return endpointJsonp(url, 90000);
+    if (action === "getInsights" && !corsEndpoint) return endpointJsonp(url, 15000);
     throw error;
   }
 }
@@ -1763,6 +1779,10 @@ async function hydrateInsights(restaurant) {
   const target = document.getElementById("insights-live");
   if (!target || !restaurant) return;
   const filters = getInsightsFilters();
+  const cachedBeforeFetch = getCachedInsightsHtml(restaurant, filters);
+  if (cachedBeforeFetch?.html) {
+    target.innerHTML = cachedBeforeFetch.html;
+  }
   try {
     const endpoint = restaurant.analyticsEndpoint || restaurant.liveMenuEndpoint || QRSTACK_API_URL;
     const data = await endpointGet(endpoint, "getInsights", {
