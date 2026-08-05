@@ -23,7 +23,7 @@ const EVENT_COLUMNS = [
 ];
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS_HEADERS });
 
     try {
@@ -45,17 +45,24 @@ export default {
 
       if (action === "getInsights") {
         assertOwner(url.searchParams, request, env);
+        const cacheRequest = insightsCacheRequest(request);
+        const cachedResponse = cacheRequest ? await caches.default.match(cacheRequest) : null;
+        if (cachedResponse) return cachedResponse;
         const slug = url.searchParams.get("slug") || "amaro";
         const insights = await getInsights(env.DB, {
           slug,
           startDate: normalizeDate(url.searchParams.get("startDate") || url.searchParams.get("start_date")),
           endDate: normalizeDate(url.searchParams.get("endDate") || url.searchParams.get("end_date")),
         });
-        return jsonp(url, {
+        const response = jsonp(url, {
           ok: true,
           restaurant: { slug, name: insights.restaurant_name || slug },
           insights,
         }, 200, READ_CACHE_HEADERS);
+        if (cacheRequest && request.method === "GET" && !url.searchParams.get("callback")) {
+          ctx.waitUntil(caches.default.put(cacheRequest, response.clone()));
+        }
+        return response;
       }
 
       if (action === "getRestaurant") {
@@ -93,6 +100,22 @@ function assertOwner(params, request, env) {
     error.status = 401;
     throw error;
   }
+}
+
+function insightsCacheRequest(request) {
+  if (request.method !== "GET") return null;
+  const url = new URL(request.url);
+  if (url.searchParams.get("callback")) return null;
+  const action = url.searchParams.get("action") || "health";
+  if (action !== "getInsights") return null;
+  const cacheUrl = new URL(url.origin + url.pathname);
+  cacheUrl.searchParams.set("action", "getInsights");
+  cacheUrl.searchParams.set("slug", normalizeSlug(url.searchParams.get("slug") || "amaro"));
+  const startDate = normalizeDate(url.searchParams.get("startDate") || url.searchParams.get("start_date"));
+  const endDate = normalizeDate(url.searchParams.get("endDate") || url.searchParams.get("end_date"));
+  if (startDate) cacheUrl.searchParams.set("startDate", startDate);
+  if (endDate) cacheUrl.searchParams.set("endDate", endDate);
+  return new Request(cacheUrl.toString(), { method: "GET" });
 }
 
 async function getRestaurant(db, slug) {
