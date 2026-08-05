@@ -69,14 +69,15 @@ function rowMatchesDate(headers, row, yyyyMmDd) {
 function normalizeEvent(row, index) {
   const slug = normalizeSlug(row.cliente || row.slug || row.restaurant_slug || "amaro");
   const dishName = row.dish_name || row.item_name || row.prato || "";
+  const source = inferSource(row);
   return {
     id: row.id || `legacy_${Date.now()}_${index}`,
     restaurant_id: `rest_${slug}`,
     restaurant_slug: slug,
     menu_day_id: row.menu_day_id || "",
     event_type: normalizeEventType(row.event_type || row.tipo || "page_view"),
-    source: normalizeSource(row.source || row.origem || "direct"),
-    source_detail: row.source_detail || row.sourceDetail || row.referrer || "",
+    source,
+    source_detail: row.source_detail || row.sourceDetail || inferSourceDetail(row, source),
     url: row.url || "",
     path: row.path || "",
     referrer: row.referrer || "",
@@ -97,6 +98,43 @@ function normalizeEvent(row, index) {
     timezone_offset: row.timezone_offset || row.timezoneOffset || "",
     created_at: normalizeTimestamp(row.created_at || row.timestamp) || new Date().toISOString(),
   };
+}
+
+function inferSource(row) {
+  const explicit = row.source || row.origem || "";
+  if (explicit) return normalizeSource(explicit);
+
+  const url = safeUrl(row.url || "");
+  const referrer = safeUrl(row.referrer || "");
+  const utmSource = normalizeKey(url?.searchParams.get("utm_source") || "");
+  const src = normalizeKey(url?.searchParams.get("src") || "");
+  const host = normalizeKey(referrer?.hostname || "");
+
+  return normalizeSource(utmSource || src || host || "direct");
+}
+
+function inferSourceDetail(row, source) {
+  const url = safeUrl(row.url || "");
+  const referrer = safeUrl(row.referrer || "");
+  const utmSource = normalizeKey(url?.searchParams.get("utm_source") || "");
+  const src = normalizeKey(url?.searchParams.get("src") || "");
+  const host = normalizeKey(referrer?.hostname || "");
+
+  if (utmSource) return utmSource;
+  if (src) return src;
+  if (host) return host;
+  if (source === "direct") return "sem_referrer";
+  return "";
+}
+
+function safeUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  try {
+    return new URL(text);
+  } catch {
+    return null;
+  }
 }
 
 function parseCsv(text) {
