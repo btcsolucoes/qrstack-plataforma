@@ -5,6 +5,7 @@ const ASSETS = {
 
 const QRSTACK_API_URL =
   "https://script.google.com/macros/s/AKfycbxb7McfZcNZ1FwpJ1WXKS1NURWjE8AQdK5X7CYAL0zNQIH2UQdtnKCKQjlzmyyuQwrcuQ/exec";
+const QRSTACK_D1_API_URL = "https://qrstack-api.qrstack.workers.dev";
 const ACTIVE_CLIENT_SLUG = "amaro";
 const ACTIVE_CLIENT_TOKEN = "qrstack-amaro-2026";
 const OWNER_ACCESS_TOKEN = "qrstack-berna-2026";
@@ -34,7 +35,7 @@ const DEFAULT_STATE = {
       catalogUrl: `${AMARO_ASSETS_BASE_URL}qrstack/amaro-catalog.json`,
       sectionsUrl: `${AMARO_ASSETS_BASE_URL}qrstack/amaro-sections.json`,
       liveMenuEndpoint: "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec",
-      analyticsEndpoint: "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec",
+      analyticsEndpoint: QRSTACK_D1_API_URL || "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec",
       adminToken: ACTIVE_CLIENT_TOKEN,
       reminderTime: "09:00",
       reminderEnabled: false,
@@ -213,17 +214,23 @@ async function endpointGet(endpoint, action, params = {}) {
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   });
-  if (action === "getInsights") return endpointJsonp(url, 90000);
+  if (action === "getInsights" && !supportsCorsEndpoint(endpoint)) return endpointJsonp(url, 90000);
   try {
-    const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, 45000);
+    const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, action === "getInsights" ? 12000 : 45000);
     const text = await response.text();
     if (!text.trim().startsWith("{")) throw new Error("endpoint_not_public_or_not_json");
     const data = JSON.parse(text);
     if (!response.ok || data.ok === false) throw new Error(data.error || "endpoint_request_failed");
     return data;
   } catch (error) {
+    if (action === "getInsights") return endpointJsonp(url, 90000);
     throw error;
   }
+}
+
+function supportsCorsEndpoint(endpoint = "") {
+  const text = String(endpoint || "").toLowerCase();
+  return text.includes("workers.dev") || text.includes("pages.dev") || text.includes("cloudflare");
 }
 
 function endpointJsonp(url, timeoutMs = 90000) {
@@ -1009,7 +1016,7 @@ function renderHqOverview() {
       </div>
       <div class="card">
         <h3>Como substitui o Google Forms</h3>
-        <p class="muted">No Amaro, o cardápio público busca um endpoint do Google Apps Script, filtra as respostas da planilha pela data de hoje e renderiza o almoço automaticamente. Na QrStack, o restaurante preenche este painel, o sistema salva no Supabase e a página pública lê o cardápio publicado pelo slug do cliente. O GitHub fica só para código/deploy, não para atualizar cardápio.</p>
+        <p class="muted">No Amaro, o cardápio público busca um endpoint do Google Apps Script, filtra as respostas da planilha pela data de hoje e renderiza o almoço automaticamente. Na QrStack, os dados gerenciais e os analytics ficam no Cloudflare D1, enquanto o GitHub segue só para código/deploy.</p>
       </div>
       <div class="card">
         <h3>Cardápios publicados</h3>
@@ -1357,7 +1364,7 @@ function renderHqInsights() {
           <div>
             <p class="eyebrow">Carregando</p>
             <h3>Buscando analytics reais</h3>
-            <p class="muted">A plataforma está carregando o consolidado salvo na planilha via Apps Script.</p>
+            <p class="muted">A plataforma está carregando o consolidado salvo na base analítica QrStack.</p>
           </div>
           <span class="status-pill status-pill--pending">Sincronizando</span>
         </article>
@@ -1366,7 +1373,7 @@ function renderHqInsights() {
         <article class="card">
           <p class="eyebrow">Sessão local</p>
           <h3>Eventos capturados neste navegador</h3>
-          <p class="muted">Útil para teste rápido, separado dos analytics reais da planilha.</p>
+          <p class="muted">Útil para teste rápido, separado dos analytics reais da base QrStack.</p>
           <div class="compact-kpis">
             ${insightKpi("Eventos locais", state.events.length)}
             ${insightKpi("WhatsApp", clicksWhats)}
@@ -1808,7 +1815,7 @@ async function hydrateInsights(restaurant) {
         <div>
           <p class="eyebrow">Analytics reais</p>
           <h3>${restaurant.name} · ${periodLabel}</h3>
-          <p class="muted">Dados carregados da aba <strong>qrstack_events</strong> na planilha real. A leitura abaixo separa origem, volume, visitantes únicos, dispositivos e ações de intenção.</p>
+          <p class="muted">Dados carregados da base analítica QrStack. A leitura abaixo separa origem, volume, visitantes únicos, dispositivos e ações de intenção.</p>
         </div>
         <div class="dashboard-hero__status">
           <span class="status-pill">Coleta ativa</span>
@@ -1934,7 +1941,7 @@ async function hydrateInsights(restaurant) {
           <div>
             <p class="eyebrow">Analytics reais</p>
             <h3>${restaurant.name} · última leitura salva</h3>
-            <p class="muted">A conexão com a planilha está oscilando, então a plataforma manteve o último dashboard válido enquanto tenta atualizar sozinha.</p>
+            <p class="muted">A conexão com a base analítica está oscilando, então a plataforma manteve o último dashboard válido enquanto tenta atualizar sozinha.</p>
           </div>
           <div class="dashboard-hero__status">
             <span class="status-pill status-pill--pending">Sincronizando</span>
@@ -1950,7 +1957,7 @@ async function hydrateInsights(restaurant) {
         <div>
           <p class="eyebrow">Analytics reais</p>
           <h3>Sincronizando dados do ${restaurant.name}</h3>
-          <p class="muted">A base real está sendo carregada pela planilha. A plataforma vai tentar novamente em segundo plano e preencher o dashboard assim que a resposta chegar.</p>
+          <p class="muted">A base real de analytics está sendo carregada. A plataforma vai tentar novamente em segundo plano e preencher o dashboard assim que a resposta chegar.</p>
         </div>
         <div class="dashboard-hero__status">
           <span class="status-pill status-pill--pending">Carregando</span>
