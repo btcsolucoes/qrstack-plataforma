@@ -22,7 +22,8 @@ Plataforma QrStack para gerenciar clientes, formulários, cardápios dinâmicos,
 - Download e compartilhamento nativo do Story.
 - Tentativa de abertura do Instagram após compartilhamento.
 - Eventos e insights internos para a central QrStack, sem dados de demonstração.
-- Schema Supabase em `supabase/schema.sql`.
+- Schema legado Supabase preservado em `supabase/schema.sql`.
+- Nova migração gratuita Cloudflare D1 em `cloudflare/`.
 - Central QrStack com identidade própria do sistema.
 - Portal do cliente com tema herdado do restaurante.
 
@@ -30,18 +31,28 @@ Plataforma QrStack para gerenciar clientes, formulários, cardápios dinâmicos,
 
 O fluxo atual do Amaro usa Google Forms, Google Sheets e um endpoint de Google Apps Script. O site busca esse endpoint, filtra os itens pela data do dia e renderiza o cardápio automaticamente.
 
-No produto QrStack, o Google Forms sai do fluxo:
+No produto QrStack, esse fluxo pode continuar para clientes que já usam Forms/Sheets. A migração para D1 deve acontecer primeiro na camada gerencial e de analytics:
 
-1. Restaurante recebe link do painel.
-2. Preenche formulário próprio da QrStack.
-3. Supabase salva cardápio e itens.
-4. Página pública busca por `slug` e data.
-5. Story é gerado a partir da mesma publicação.
-6. Insights ficam na central QrStack.
+1. Restaurante mantém Forms/Sheets quando a automação já está em produção.
+2. Apps Script continua alimentando o cardápio publicado.
+3. Cloudflare D1 salva clientes, catálogo, fotos indexadas e analytics.
+4. Dashboard QrStack consulta D1, não a planilha pesada.
+5. Story usa a identidade, o catálogo e o link definidos na base QrStack.
 
 ## Analytics
 
-O front registra eventos reais de navegação local e tenta gravar na aba `events` via Apps Script. Se o Web App do Google responder com login/HTML ou não estiver publicado para acesso público, a plataforma exibe essa limitação em vez de inventar métricas.
+O front registra eventos reais de navegação local. A nova rota recomendada é gravar analytics e dados gerenciais no Cloudflare D1 via Worker, mantendo Apps Script apenas para a automação do cardápio quando o cliente ainda usa Google Forms/Sheets.
+
+Arquivos da migração D1:
+
+- `cloudflare/migrations/0001_qrstack_core.sql`
+- `cloudflare/migrations/0002_analytics_normalized_view.sql`
+- `cloudflare/src/worker.js`
+- `cloudflare/wrangler.toml.example`
+- `cloudflare/import/events-csv-to-sql.mjs`
+- `cloudflare/import/catalog-json-to-sql.mjs`
+
+Depois que o Worker estiver publicado, preencha `cloudflareD1WorkerUrl` em `config/qrstack.json` e atualize o `QRSTACK_D1_API_URL` em `script.js`.
 
 ## Google Sheets
 
@@ -70,7 +81,7 @@ Passos para publicar:
 ## Próxima fase
 
 - Migrar para Next.js.
-- Conectar Supabase/Postgres.
-- Salvar imagens no Supabase Storage.
+- Conectar Cloudflare D1 como banco gratuito da QrStack.
+- Migrar analytics e dados gerenciais para D1.
 - Criar autenticação/token por restaurante.
 - Preparar automação WhatsApp para lembretes.

@@ -1,0 +1,13 @@
+name = "qrstack-api"
+main = "cloudflare/src/worker.js"
+compatibility_date = "2026-08-04"
+workers_dev = true
+
+[vars]
+OWNER_ACCESS_TOKEN = "troque-por-sua-chave-da-central"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "qrstack-db"
+database_id = "cole-o-database-id-do-d1-aqui"
+migrations_dir = "cloudflare/migrations"
