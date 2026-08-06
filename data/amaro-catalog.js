@@ -1,9 +1,5 @@
 window.QRSTACK_AMARO_SECTIONS = [
   {
-    "id": "especial-junino",
-    "title": "Especial Junino"
-  },
-  {
     "id": "comidinhas",
     "title": "Entradinhas"
   },
@@ -57,19 +53,6 @@ window.QRSTACK_AMARO_SECTIONS = [
   }
 ];
 window.QRSTACK_AMARO_CATALOG = [
-    {
-        "id":  "catalog_tabua-junina",
-        "restaurant_id":  "rest_amaro",
-        "section_id":  "especial-junino",
-        "section_title":  "Especial Junino",
-        "name":  "Tábua Junina",
-        "category":  "Especial Junino",
-        "description":  "Bolo de Tapioca, Bolo de Macaxeira, Canjica Bruleé, 2 Pamonhas de forno, Arroz Doce, Milho com cobertura de charque, 4 Mini Coxinhas, 2 Paçocas, 2 Queijadinhas e 2 Quiches de Queijo do Reino",
-        "price":  "R$ 105,00",
-        "image_url":  "fotos%20de%20pratos/T%C3%A1bua%20Junina.jpeg",
-        "sort_order":  1,
-        "is_active":  "TRUE"
-    },
     {
         "id":  "catalog_panelinha-de-camaroes",
         "restaurant_id":  "rest_amaro",
@@ -253,6 +236,19 @@ window.QRSTACK_AMARO_CATALOG = [
         "is_active":  "TRUE"
     },
     {
+        "id":  "catalog_cupim-da-guia",
+        "restaurant_id":  "rest_amaro",
+        "section_id":  "executivos",
+        "section_title":  "Executivos",
+        "name":  "Cupim da Guia",
+        "category":  "Executivo",
+        "description":  "Steak de cupim ao molho escuro, purê de macaxeira, baião de dois, farofa de bacon e crispy de cebola",
+        "price":  "R$ 38,00",
+        "image_url":  "",
+        "sort_order":  6,
+        "is_active":  "TRUE"
+    },
+    {
         "id":  "catalog_frango-a-parmegiana",
         "restaurant_id":  "rest_amaro",
         "section_id":  "executivos",
@@ -328,6 +324,19 @@ window.QRSTACK_AMARO_CATALOG = [
         "price":  "R$ 43,00",
         "image_url":  "fotos%20de%20pratos/Moqueca%20de%20Camar%C3%A3o.png",
         "sort_order":  11,
+        "is_active":  "TRUE"
+    },
+    {
+        "id":  "catalog_bobo-de-camarao",
+        "restaurant_id":  "rest_amaro",
+        "section_id":  "executivos",
+        "section_title":  "Executivos",
+        "name":  "Bobó de Camarão",
+        "category":  "Executivo",
+        "description":  "Bobó de camarão, arroz de alho acompanhado de chips de batata e farofa",
+        "price":  "R$ 43,00",
+        "image_url":  "",
+        "sort_order":  12,
         "is_active":  "TRUE"
     },
     {
