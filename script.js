@@ -1869,7 +1869,7 @@ async function hydrateInsights(restaurant) {
             ${insightKpi("Hoje", accessesToday, "acessos no dia")}
             ${insightKpi("7 dias", accesses7Days, "janela recente")}
             ${insightKpi("Webview IG", webviewBannerShown, "avisos/redirects")}
-            ${insightKpi("IG -> Direct", instagramToDirectVisitors, `${formatPercentNumber(instagramToDirectRate)} de retorno`)}
+            ${insightKpi("Pessoas que retornaram", instagramToDirectVisitors, `${formatPercentNumber(instagramToDirectRate)} dos visitantes do Instagram`)}
             ${insightKpi("Pico", peak || "Sem dados", "maior horário")}
           </div>
         </article>
@@ -1880,7 +1880,7 @@ async function hydrateInsights(restaurant) {
             ["Prato líder", topDish ? topDish[0] : "Sem ranking", topDish ? `${formatScore(topDish[1])} pontos` : "sem dados"],
             ["Mais observado", topObservedDish ? topObservedDish[0] : "Sem tempo", topObservedDish ? formatDurationShort(topObservedDish[1]) : "sem dados"],
             ["Categoria quente", topCategory ? topCategory[0] : "Sem categoria", topCategory ? `${formatNumber(topCategory[1])} visualizações` : "sem dados"],
-            ["IG -> Direct", `${formatNumber(instagramToDirectVisitors)} visitante(s)`, `${formatNumber(instagramToDirectSessions)} sessão(ões) diretas após Instagram`],
+            ["Conversão Instagram -> Direto", `${formatNumber(instagramToDirectVisitors)} pessoa(s) retornaram`, `${formatNumber(instagramToDirectSessions)} acesso(s) direto(s) feito(s) por elas`],
           ])}
           <p class="muted decision-panel__note">${insightSummary(periodAccesses, sourceCounts, whatsappClicks, mapsClicks)}</p>
         </article>
@@ -2644,11 +2644,11 @@ function renderInstagramDirectConversion(conversion = {}) {
       <p class="eyebrow">Conversão Instagram -> Direct</p>
       <h3>Jornada até o restaurante</h3>
       <div class="funnel">
-        ${funnelStep("Visitou pelo Instagram", instagramVisitors, instagramVisitors || 1)}
-        ${funnelStep("Depois voltou como direct/QR", convertedVisitors, instagramVisitors || 1)}
-        ${funnelStep("Sessões diretas após Instagram", directSessions, instagramVisitors || 1)}
+        ${funnelStep("Pessoas que vieram do Instagram", instagramVisitors, instagramVisitors || 1)}
+        ${funnelStep("Pessoas que voltaram via direto/QR", convertedVisitors, instagramVisitors || 1)}
+        ${funnelStep("Acessos diretos feitos por essas pessoas", directSessions, instagramVisitors || 1)}
       </div>
-      <p class="muted">${instagramVisitors ? `${formatPercentNumber(rate)} dos visitantes de Instagram reapareceram depois como direct no mesmo navegador.` : "Ainda não há visitantes de Instagram suficientes para calcular essa jornada."}</p>
+      <p class="muted conversion-explainer">${instagramVisitors ? `<strong>${formatNumber(convertedVisitors)} pessoas únicas retornaram.</strong> Juntas, elas abriram o cardápio ${formatNumber(directSessions)} vezes de forma direta/QR. A taxa de retorno foi ${formatPercentNumber(rate)}.` : "Ainda não há visitantes de Instagram suficientes para calcular essa jornada."}</p>
     </article>
   `;
 }

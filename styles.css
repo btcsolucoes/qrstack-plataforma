@@ -785,6 +785,15 @@ h3 {
   background: linear-gradient(90deg, var(--secondary), var(--primary));
 }
 
+.conversion-explainer {
+  border-top: 1px solid var(--line);
+  padding-top: 0.85rem;
+}
+
+.conversion-explainer strong {
+  color: var(--ink);
+}
+
 .insight-table .table-row strong {
   white-space: nowrap;
 }
