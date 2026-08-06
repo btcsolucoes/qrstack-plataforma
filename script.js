@@ -974,12 +974,13 @@ function renderAdminHero(title, subtitle, logoUrl) {
     <header class="admin-hero">
       <div class="admin-hero__inner">
         <div class="admin-title">
-          <div>
-            <p class="eyebrow">QrStack</p>
+          <img src="${logoUrl}" alt="" />
+          <div class="admin-title__copy">
+            <p class="eyebrow">QrStack Workspace</p>
             <h2>${title}</h2>
             <p>${subtitle}</p>
           </div>
-          <img src="${logoUrl}" alt="" />
+          <span class="admin-title__status"><i></i> Operação online</span>
         </div>
       </div>
     </header>
@@ -1358,10 +1359,10 @@ function renderHqInsights() {
           <p class="muted">Escolha um período para comparar acessos, origem e ações registradas.</p>
         </div>
         <div class="insights-filter__presets">
-          <button type="button" class="secondary" data-insights-preset="today">Hoje</button>
-          <button type="button" class="secondary" data-insights-preset="7">7 dias</button>
-          <button type="button" class="secondary" data-insights-preset="30">30 dias</button>
-          <button type="button" class="secondary" data-insights-preset="all">Todos</button>
+          <button type="button" class="secondary" data-insights-preset="today" aria-pressed="false">Hoje</button>
+          <button type="button" class="secondary" data-insights-preset="7" aria-pressed="false">7 dias</button>
+          <button type="button" class="secondary" data-insights-preset="30" aria-pressed="false">30 dias</button>
+          <button type="button" class="secondary" data-insights-preset="all" aria-pressed="false">Todos</button>
         </div>
         <div class="insights-filter__dates">
           <label>
@@ -1385,25 +1386,32 @@ function renderHqInsights() {
           <span class="status-pill status-pill--pending">Sincronizando</span>
         </article>
       </div>
-      <aside class="local-insights">
-        <article class="card">
-          <p class="eyebrow">Sessão local</p>
-          <h3>Eventos capturados neste navegador</h3>
-          <p class="muted">Útil para teste rápido, separado dos analytics reais da base QrStack.</p>
+      <details class="local-insights card">
+        <summary>
+          <span>
+            <span class="eyebrow">Diagnóstico</span>
+            <strong>Eventos deste navegador</strong>
+          </span>
+          <small>${formatNumber(state.events.length)} evento(s) local(is)</small>
+        </summary>
+        <div class="local-insights__content">
+          <p class="muted">Área técnica para testes. Estes números ficam separados dos analytics reais da base QrStack.</p>
           <div class="compact-kpis">
             ${insightKpi("Eventos locais", state.events.length)}
             ${insightKpi("WhatsApp", clicksWhats)}
             ${insightKpi("Como chegar", clicksMaps)}
             ${insightKpi("7 dias locais", lastDaysEvents(7).length)}
           </div>
-        </article>
-        ${renderInsightBars("Origem local", localSourceCounts, { empty: "Sem eventos locais registrados ainda." })}
-        <article class="card">
-          <p class="eyebrow">Pico local</p>
-          <h3>Horário de pico</h3>
-          <p class="muted">${peakHour()}</p>
-        </article>
-      </aside>
+          <div class="dashboard-grid dashboard-grid--two">
+            ${renderInsightBars("Origem local", localSourceCounts, { empty: "Sem eventos locais registrados ainda." })}
+            <article class="insight-card local-peak">
+              <p class="eyebrow">Pico local</p>
+              <h3>Horário de pico</h3>
+              <p class="muted">${peakHour()}</p>
+            </article>
+          </div>
+        </div>
+      </details>
     </section>
   `;
 }
@@ -2015,6 +2023,11 @@ function getInsightsFilters() {
 function setInsightsPreset(preset) {
   const form = document.querySelector("[data-insights-filter]");
   if (!form) return;
+  form.querySelectorAll("[data-insights-preset]").forEach((button) => {
+    const isActive = button.dataset.insightsPreset === preset;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  });
   const startInput = form.querySelector('[name="startDate"]');
   const endInput = form.querySelector('[name="endDate"]');
   const today = todayIso();
@@ -2375,7 +2388,7 @@ function metric(label, value) {
 
 function insightKpi(label, value, detail = "") {
   return `
-    <article class="card insight-kpi">
+    <article class="insight-kpi">
       <span class="eyebrow">${label}</span>
       <strong>${formatNumber(value)}</strong>
       ${detail ? `<small>${detail}</small>` : ""}
@@ -2496,8 +2509,10 @@ function renderDonutChart(title, counts, options = {}) {
   return chartShell(title, `
     <div class="donut-layout">
       <div class="donut-chart" style="background:conic-gradient(${gradient});">
-        <span>${formatNumber(total)}</span>
-        <small>total</small>
+        <div class="donut-chart__value">
+          <span>${formatNumber(total)}</span>
+          <small>Total</small>
+        </div>
       </div>
       <div class="donut-legend">
         ${entries.map(([key, value], index) => {
@@ -2869,6 +2884,10 @@ document.addEventListener("submit", (event) => {
   const insightsFilter = event.target.closest("[data-insights-filter]");
   if (insightsFilter) {
     event.preventDefault();
+    insightsFilter.querySelectorAll("[data-insights-preset]").forEach((button) => {
+      button.classList.remove("is-active");
+      button.setAttribute("aria-pressed", "false");
+    });
     hydrateInsights(getRestaurant(ACTIVE_CLIENT_SLUG));
     return;
   }
