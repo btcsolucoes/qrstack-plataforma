@@ -78,6 +78,7 @@ const app = document.getElementById("app");
 let state = loadState();
 let lastStoryDataUrl = "";
 let routeVersion = 0;
+const runtimeCatalogs = new Map();
 const insightsRetryTimers = new Map();
 persistRuntimeStateMigrations();
 
@@ -681,6 +682,8 @@ function getMenuItems(menuDayId) {
 }
 
 function getAmaroCatalog() {
+  const liveCatalog = runtimeCatalogs.get("rest_amaro");
+  if (liveCatalog?.length) return liveCatalog;
   return Array.isArray(window.QRSTACK_AMARO_CATALOG) ? window.QRSTACK_AMARO_CATALOG : [];
 }
 
@@ -711,7 +714,59 @@ function getAllCatalogItems() {
 }
 
 function getCatalogForRestaurant(restaurant) {
+  const liveCatalog = runtimeCatalogs.get(restaurant.id);
+  if (liveCatalog?.length) return liveCatalog;
   return getAllCatalogItems().filter((item) => item.restaurant_id === restaurant.id);
+}
+
+function isCatalogItemActive(item) {
+  const value = item?.is_active;
+  return value !== false && value !== 0 && String(value ?? "TRUE").toUpperCase() !== "FALSE";
+}
+
+function normalizeCatalogItem(item, restaurant) {
+  return {
+    ...item,
+    id: item.id || `catalog_${normalizeKey(item.name)}`,
+    restaurant_id: item.restaurant_id || restaurant.id,
+    section_id: item.section_id || normalizeKey(item.section_title || item.category || "catalogo"),
+    section_title: item.section_title || item.category || "Catálogo",
+    name: item.name || "",
+    category: item.category || item.section_title || "Catálogo",
+    description: item.description || "",
+    price: item.price || "",
+    image_url: item.image_url || "",
+    sort_order: Number(item.sort_order || 0),
+    is_active: isCatalogItemActive(item) ? "TRUE" : "FALSE",
+  };
+}
+
+async function syncCatalogForRestaurant(restaurant) {
+  let catalog = [];
+  try {
+    const endpoint = restaurant.analyticsEndpoint || QRSTACK_D1_API_URL;
+    const data = await endpointGet(endpoint, "getCatalog", { slug: restaurant.slug });
+    catalog = Array.isArray(data.items) ? data.items : Array.isArray(data.catalog) ? data.catalog : [];
+  } catch (error) {
+    console.warn("QrStack catalog API unavailable:", error.message);
+  }
+
+  if (!catalog.length && restaurant.catalogUrl) {
+    try {
+      const response = await fetchWithTimeout(`${restaurant.catalogUrl}?v=${Date.now()}`, { cache: "no-store" }, 6000);
+      let data = JSON.parse((await response.text()).replace(/^\uFEFF/, ""));
+      if (typeof data === "string") data = JSON.parse(data.replace(/^\uFEFF/, ""));
+      catalog = Array.isArray(data) ? data : Array.isArray(data.items) ? data.items : [];
+    } catch (error) {
+      console.warn("QrStack published catalog unavailable:", error.message);
+    }
+  }
+
+  const activeCatalog = catalog
+    .filter((item) => item?.name && isCatalogItemActive(item))
+    .map((item) => normalizeCatalogItem(item, restaurant));
+  if (activeCatalog.length) runtimeCatalogs.set(restaurant.id, activeCatalog);
+  return activeCatalog.length ? activeCatalog : getCatalogForRestaurant(restaurant);
 }
 
 function getRestaurantDatabase(restaurant) {
@@ -876,20 +931,35 @@ function renderHome() {
   const ownerHasSession = hasRememberedAccess(OWNER_SESSION_KEY);
   const clientHasSession = hasRememberedAccess(clientSessionKey(restaurant));
   app.innerHTML = `
-    <section class="hero">
-      <div class="hero__inner">
-        <img class="hero__logo" src="${ASSETS.qrstackWordmark}" alt="QrStack" />
-        <p class="eyebrow">Plataforma QrStack</p>
-        <h1>Cardápio, Story e Insights em um fluxo só</h1>
-        <div class="hero__meta">
-          <span class="pill">Central do dono</span>
-          <span class="pill">Portal do restaurante</span>
-          <span class="pill">Cardápio público</span>
-        </div>
-        <div class="actions">
-          <a class="button" href="${ownerHasSession ? ownerLink("overview") : "#/hq"}">${ownerHasSession ? "Continuar na Central" : "Central QrStack"}</a>
-          <a class="button secondary" href="${clientHasSession ? clientPortalLink(restaurant) : `#/cliente/${restaurant.slug}`}">${clientHasSession ? `Continuar ${restaurant.name}` : "Acesso do restaurante"}</a>
-          <a class="button ghost" href="${publicMenuHash(restaurant)}">Cardápio público</a>
+    <section class="entry-screen">
+      <div class="entry-shell">
+        <header class="entry-header">
+          <img src="${ASSETS.qrstackWordmark}" alt="QrStack" />
+          <div>
+            <p class="eyebrow">Plataforma QrStack</p>
+            <h1>Escolha seu acesso</h1>
+            <p>Três destinos, cada um com uma função clara.</p>
+          </div>
+        </header>
+        <div class="entry-grid">
+          <a class="entry-card entry-card--owner" href="${ownerHasSession ? ownerLink("overview") : "#/hq"}">
+            <span class="entry-card__index">01</span>
+            <h2>Central QrStack</h2>
+            <p>Clientes, respostas, banco de pratos, Stories e Insights.</p>
+            <strong>${ownerHasSession ? "Continuar na Central" : "Acesso interno"}</strong>
+          </a>
+          <a class="entry-card entry-card--restaurant" href="${clientHasSession ? clientPortalLink(restaurant) : `#/cliente/${restaurant.slug}`}">
+            <span class="entry-card__index">02</span>
+            <h2>Portal do restaurante</h2>
+            <p>Formulário diário e geração da arte para o Story.</p>
+            <strong>${clientHasSession ? `Continuar como ${restaurant.name}` : "Acesso privado"}</strong>
+          </a>
+          <a class="entry-card entry-card--menu" href="${publicMenuHash(restaurant, "platform")}">
+            <span class="entry-card__index">03</span>
+            <h2>Cardápio público</h2>
+            <p>Visualização fiel do cardápio que o cliente acessa.</p>
+            <strong>Abrir cardápio</strong>
+          </a>
         </div>
       </div>
     </section>
@@ -899,18 +969,18 @@ function renderHome() {
 function renderOwnerGate() {
   setSystemTheme();
   app.innerHTML = `
-    <section class="hero">
-      <div class="hero__inner">
-        <img class="hero__logo" src="${ASSETS.qrstackWordmark}" alt="QrStack" />
+    <section class="entry-screen entry-screen--gate">
+      <div class="access-panel">
+        <img class="access-panel__logo" src="${ASSETS.qrstackWordmark}" alt="QrStack" />
         <p class="eyebrow">Acesso interno</p>
         <h1>Central QrStack</h1>
-        <p class="muted muted--light">Use o link interno com chave de dono para abrir clientes, respostas, banco de pratos, cardápios e insights.</p>
+        <p>Insira sua chave para abrir o ambiente de gestão.</p>
         <form class="access-form" data-owner-access>
           <label for="owner-access-key">Chave ou link de acesso</label>
           <input id="owner-access-key" name="ownerAccessKey" autocomplete="off" placeholder="Cole sua chave ou o link da Central" />
           <div class="actions">
             <button type="submit">Entrar na Central</button>
-            <a class="button ghost" href="#/home">Voltar</a>
+            <a class="button secondary" href="#/home">Voltar ao início</a>
           </div>
         </form>
       </div>
@@ -921,18 +991,18 @@ function renderOwnerGate() {
 function renderClientGate(restaurant) {
   setTheme(restaurant);
   app.innerHTML = `
-    <section class="hero">
-      <div class="hero__inner">
-        <img class="hero__logo" src="${restaurant.logoUrl}" alt="${restaurant.name}" />
+    <section class="entry-screen entry-screen--gate entry-screen--restaurant">
+      <div class="access-panel">
+        <img class="access-panel__logo access-panel__logo--restaurant" src="${restaurant.logoUrl}" alt="${restaurant.name}" />
         <p class="eyebrow">Acesso do restaurante</p>
         <h1>${restaurant.name}</h1>
-        <p class="muted muted--light">Este portal abre apenas pelo link privado do restaurante. A Central QrStack não fica disponível por aqui.</p>
+        <p>Use o link privado enviado pela QrStack para abrir o formulário.</p>
         <form class="access-form" data-client-access data-slug="${restaurant.slug}">
           <label for="client-access-token">Token ou link privado</label>
           <input id="client-access-token" name="clientAccessToken" autocomplete="off" placeholder="Cole o token ou link do restaurante" />
           <div class="actions">
             <button type="submit">Abrir formulário</button>
-            <a class="button ghost" href="${publicMenuHash(restaurant)}">Ver cardápio público</a>
+            <a class="button secondary" href="${publicMenuHash(restaurant, "platform")}">Ver cardápio público</a>
           </div>
         </form>
       </div>
@@ -1067,7 +1137,7 @@ function renderHqClients(restaurants) {
                 <div class="actions">
                   <a class="button" href="${clientPortalLink(restaurant)}">Link do restaurante</a>
                   <button type="button" class="secondary" data-copy="${escapeAttr(restaurantAccessUrl(restaurant))}">Copiar acesso</button>
-                  <a class="button secondary" href="${publicMenuHash(restaurant)}">Cardápio público</a>
+                  <a class="button secondary" href="${publicMenuHash(restaurant, "hq")}">Cardápio público</a>
                 </div>
               </article>
             `
@@ -1417,7 +1487,8 @@ function renderHqInsights() {
 }
 
 async function renderClientPortal(slug, version) {
-  const remote = await syncMenuFromApi(slug);
+  const localRestaurant = getRestaurant(slug);
+  const [remote] = await Promise.all([syncMenuFromApi(slug), syncCatalogForRestaurant(localRestaurant)]);
   if (!isCurrentRoute(version)) return;
   const currentHash = window.location.hash.replace(/^#\/?/, "");
   if (!currentHash.startsWith(`cliente/${slug}`) && !currentHash.startsWith(`admin/${slug}`)) return;
@@ -1436,11 +1507,7 @@ async function renderClientPortal(slug, version) {
           <p>Atualize o cardápio do dia e gere o Story.</p>
         </div>
       </header>
-      ${renderTopbar([
-        ["#formulario", "Formulário", true],
-        ["#story-panel", "Story", false],
-        [publicMenuHash(restaurant, "cliente"), "Cardápio público", false],
-      ], restaurant, clientPortalLink(restaurant))}
+      ${renderClientTopbar(restaurant)}
       <main class="client-form-page">
         <section class="section client-step" id="formulario">
           <div class="section__head">
@@ -1494,6 +1561,26 @@ async function renderClientPortal(slug, version) {
   drawStory(restaurant, menu, getMenuItems(menu.id));
 }
 
+function renderClientTopbar(restaurant) {
+  const ownerReturn = hasRememberedAccess(OWNER_SESSION_KEY)
+    ? `<a class="nav-link" href="${ownerLink("overview")}">Voltar à Central</a>`
+    : "";
+  return `
+    <nav class="topbar client-topbar" aria-label="Navegação do portal">
+      <div class="topbar__inner">
+        <a class="brand-chip" href="${clientPortalLink(restaurant)}">
+          <img src="${restaurant.logoUrl}" alt="" />
+          <span>${restaurant.name}</span>
+        </a>
+        <button type="button" class="nav-link active" data-scroll-target="formulario">Formulário</button>
+        <button type="button" class="nav-link" data-scroll-target="story-panel">Story</button>
+        <a class="nav-link" href="${publicMenuHash(restaurant, "cliente")}">Cardápio público</a>
+        ${ownerReturn}
+      </div>
+    </nav>
+  `;
+}
+
 function createBlankMenu(restaurantId) {
   const menu = {
     id: crypto.randomUUID(),
@@ -1535,7 +1622,14 @@ function renderGenericItemsTextarea(menuItems) {
 }
 
 function renderAmaroOriginalForm(menuItems) {
-  const fields = getAmaroFormFields().filter((field) => field.title.toLowerCase().startsWith("prato"));
+  const configuredFields = getAmaroFormFields().filter((field) => field.title.toLowerCase().startsWith("prato"));
+  const fields = configuredFields.length
+    ? configuredFields
+    : Array.from({ length: 7 }, (_, index) => ({ title: `Prato ${index + 1}:` }));
+  const activeExecutives = getAmaroCatalog()
+    .filter((item) => item.section_id === "executivos" && isCatalogItemActive(item))
+    .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
+    .map((item) => item.name);
   const selectedNames = menuItems.map((menuItem) => menuItem.name);
   return `
     <div class="field field--full">
@@ -1549,7 +1643,7 @@ function renderAmaroOriginalForm(menuItems) {
                 <label for="amaro-prato-${index + 1}">${field.title.replace(":", "")}</label>
                 <select id="amaro-prato-${index + 1}" name="prato_${index + 1}" required>
                   <option value="">Selecione</option>
-                  ${(field.options || [])
+                  ${activeExecutives
                     .map(
                       (option) =>
                         `<option value="${escapeAttr(option)}" ${option === selectedName ? "selected" : ""}>${option}</option>`
@@ -2170,14 +2264,20 @@ async function renderPublicMenu(slug, source = "direct", version = routeVersion)
 
 function renderOriginalPublicMenu(restaurant, source) {
   const originalUrl = restaurantOriginalMenuUrl(restaurant, source);
-  const showReturnBar = source === "hq" || source === "cliente";
+  const returnTarget = source === "cliente"
+    ? { href: clientPortalLink(restaurant), label: "Voltar ao portal" }
+    : source === "hq"
+      ? { href: ownerLink("cardapios"), label: "Voltar à Central" }
+      : source === "platform"
+        ? { href: "#/home", label: "Voltar ao início" }
+        : null;
   return `
     <div class="original-menu-shell">
-      ${showReturnBar ? `
+      ${returnTarget ? `
         <nav class="topbar">
           <div class="topbar__inner">
             <span class="brand-chip"><img src="${restaurant.logoUrl}" alt="" /><span>${restaurant.name}</span></span>
-            <button type="button" class="nav-link" data-history-back>Voltar</button>
+            <a class="nav-link" href="${returnTarget.href}">${returnTarget.label}</a>
             <a class="nav-link active" href="${restaurantOriginalMenuUrl(restaurant, source)}" target="_blank" rel="noreferrer">Abrir original</a>
           </div>
         </nav>
@@ -2226,6 +2326,14 @@ function drawStory(restaurant, menu, menuItems) {
     ctx.fillStyle = cream;
     roundRect(ctx, 84, 110, w - 168, h - 220, 28);
     ctx.fill();
+
+    if (logo) {
+      ctx.save();
+      ctx.globalAlpha = 0.075;
+      drawImageContain(ctx, logo, 118, 500, w - 236, 700);
+      drawImageContain(ctx, logo, 180, 1280, w - 360, 310);
+      ctx.restore();
+    }
 
     if (logo) {
       drawImageContain(ctx, logo, 250, 172, w - 500, 220);
@@ -2923,6 +3031,16 @@ document.addEventListener("submit", (event) => {
 });
 
 document.addEventListener("click", async (event) => {
+  const scrollButton = event.target.closest("[data-scroll-target]");
+  if (scrollButton) {
+    event.preventDefault();
+    const target = document.getElementById(scrollButton.dataset.scrollTarget);
+    if (!target) return;
+    document.querySelectorAll("[data-scroll-target]").forEach((button) => button.classList.remove("active"));
+    scrollButton.classList.add("active");
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
   const backButton = event.target.closest("[data-history-back]");
   if (backButton) {
     event.preventDefault();
