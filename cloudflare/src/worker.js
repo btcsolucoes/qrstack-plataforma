@@ -75,6 +75,17 @@ export default {
         return jsonp(url, { ok: true, ...(await getCatalog(env.DB, slug)) }, 200, READ_CACHE_HEADERS);
       }
 
+      if (action === "getMenu") {
+        const slug = url.searchParams.get("slug") || "amaro";
+        const date = normalizeDate(url.searchParams.get("date"));
+        return jsonp(url, { ok: true, ...(await getMenu(env.DB, slug, date)) }, 200, READ_CACHE_HEADERS);
+      }
+
+      if (action === "saveMenuDay") {
+        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+        return json({ ok: true, ...(await saveMenuDay(env.DB, payload)) });
+      }
+
       return jsonp(url, { ok: false, error: "unknown_action", action }, 404);
     } catch (error) {
       return json({ ok: false, error: error.message || String(error) }, error.status || 500);
@@ -284,6 +295,90 @@ async function getCatalog(db, slug) {
     ORDER BY asset_type, label
   `).bind(restaurant.id).all();
   return { restaurant, items: items.results || [], assets: assets.results || [] };
+}
+
+async function getMenu(db, slug, date = "") {
+  const restaurant = await requireRestaurant(db, normalizeSlug(slug));
+  const menu = date
+    ? await db.prepare("SELECT * FROM menu_days WHERE restaurant_id = ? AND date = ? ORDER BY updated_at DESC LIMIT 1")
+      .bind(restaurant.id, date).first()
+    : await db.prepare("SELECT * FROM menu_days WHERE restaurant_id = ? ORDER BY date DESC, updated_at DESC LIMIT 1")
+      .bind(restaurant.id).first();
+  if (!menu) return { restaurant, menu: null, items: [] };
+  const items = await db.prepare("SELECT * FROM menu_items WHERE menu_day_id = ? ORDER BY sort_order, name")
+    .bind(menu.id).all();
+  return { restaurant, menu, items: items.results || [] };
+}
+
+async function saveMenuDay(db, payload) {
+  const slug = normalizeSlug(payload.slug || "amaro");
+  const restaurant = await requireRestaurant(db, slug);
+  assertRestaurantToken(restaurant, payload.token);
+  const date = normalizeDate(payload.date) || todayIso();
+  const menuId = payload.menu_id || payload.menuId || `menu_${slug}_${date}`;
+  const now = new Date().toISOString();
+  const rawItems = Array.isArray(payload.items) ? payload.items : [];
+  const items = rawItems.slice(0, 30).filter((item) => item && String(item.name || "").trim());
+
+  const statements = [
+    db.prepare(`
+      INSERT INTO menu_days (
+        id, restaurant_id, date, title, price, service_hours, story_link, notes,
+        is_published, published_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        date = excluded.date,
+        title = excluded.title,
+        price = excluded.price,
+        service_hours = excluded.service_hours,
+        story_link = excluded.story_link,
+        notes = excluded.notes,
+        is_published = 1,
+        published_at = excluded.published_at,
+        updated_at = excluded.updated_at
+    `).bind(
+      menuId,
+      restaurant.id,
+      date,
+      String(payload.title || "Cardápio de hoje"),
+      String(payload.price || ""),
+      String(payload.service_hours || payload.serviceHours || ""),
+      String(payload.story_link || payload.storyLink || restaurant.story_link || ""),
+      String(payload.notes || ""),
+      now,
+      now,
+      now
+    ),
+    db.prepare("DELETE FROM menu_items WHERE menu_day_id = ?").bind(menuId),
+    ...items.map((item, index) => db.prepare(`
+      INSERT INTO menu_items (
+        id, menu_day_id, name, category, description, price, image_url,
+        is_highlight, sort_order, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      `item_${menuId}_${index + 1}_${normalizeKey(item.name).slice(0, 40)}`,
+      menuId,
+      String(item.name),
+      String(item.category || "Executivo"),
+      String(item.description || ""),
+      String(item.price || ""),
+      String(item.image_url || item.imageUrl || ""),
+      toBooleanInteger(item.is_highlight ?? item.isHighlight),
+      Number(item.sort_order || item.sortOrder || index + 1),
+      now
+    )),
+  ];
+  await db.batch(statements);
+  return getMenu(db, slug, date);
+}
+
+function assertRestaurantToken(restaurant, receivedToken) {
+  const expected = String(restaurant.admin_token || "");
+  if (!expected || String(receivedToken || "") !== expected) {
+    const error = new Error("unauthorized");
+    error.status = 401;
+    throw error;
+  }
 }
 
 function eventWhere(slug, bounds = null, extraSql = "") {

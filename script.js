@@ -3,9 +3,8 @@ const ASSETS = {
   qrstackWordmark: "assets/qrstack-wordmark.png",
 };
 
-const QRSTACK_API_URL =
-  "https://script.google.com/macros/s/AKfycbxb7McfZcNZ1FwpJ1WXKS1NURWjE8AQdK5X7CYAL0zNQIH2UQdtnKCKQjlzmyyuQwrcuQ/exec";
 const QRSTACK_D1_API_URL = "https://qrstack-api.qrstack.workers.dev";
+const QRSTACK_API_URL = QRSTACK_D1_API_URL;
 const ACTIVE_CLIENT_SLUG = "amaro";
 const ACTIVE_CLIENT_TOKEN = "qrstack-amaro-2026";
 const OWNER_ACCESS_TOKEN = "qrstack-berna-2026";
@@ -215,7 +214,7 @@ async function apiGet(action, params = {}) {
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   });
-  const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, 1600);
+  const response = await fetchWithRetry(url.toString(), { cache: "no-store" }, { timeoutMs: 15000, attempts: 2 });
   const text = await response.text();
   if (!text.trim().startsWith("{")) throw new Error("api_not_public_or_not_json");
   const data = JSON.parse(text);
@@ -233,14 +232,18 @@ async function endpointGet(endpoint, action, params = {}) {
   const corsEndpoint = supportsCorsEndpoint(endpoint);
   if (action === "getInsights" && !corsEndpoint) return endpointJsonp(url, 15000);
   try {
-    const response = await fetchWithTimeout(url.toString(), { cache: "no-store" }, action === "getInsights" ? 6000 : 45000);
+    const response = await fetchWithRetry(
+      url.toString(),
+      { cache: "no-store" },
+      { timeoutMs: action === "getInsights" ? 30000 : 15000, attempts: 2 }
+    );
     const text = await response.text();
     if (!text.trim().startsWith("{")) throw new Error("endpoint_not_public_or_not_json");
     const data = JSON.parse(text);
     if (!response.ok || data.ok === false) throw new Error(data.error || "endpoint_request_failed");
     return data;
   } catch (error) {
-    if (action === "getInsights" && !corsEndpoint) return endpointJsonp(url, 15000);
+    if (action === "getInsights") return endpointJsonp(url, 30000);
     throw error;
   }
 }
@@ -299,10 +302,15 @@ function endpointJsonp(url, timeoutMs = 90000) {
 
 async function apiPost(payload) {
   if (!QRSTACK_API_URL) throw new Error("missing_api_url");
-  const response = await fetchWithTimeout(QRSTACK_API_URL, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  }, 2200);
+  const response = await fetchWithRetry(
+    QRSTACK_API_URL,
+    {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=UTF-8" },
+      body: JSON.stringify(payload),
+    },
+    { timeoutMs: 20000, attempts: 2 }
+  );
   const text = await response.text();
   if (!text.trim().startsWith("{")) throw new Error("api_not_public_or_not_json");
   const data = JSON.parse(text);
@@ -334,6 +342,23 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 1800) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchWithRetry(url, options = {}, settings = {}) {
+  const attempts = Math.max(1, Number(settings.attempts || 1));
+  const timeoutMs = Math.max(1000, Number(settings.timeoutMs || 10000));
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetchWithTimeout(url, options, timeoutMs);
+      if (response.status >= 500 && attempt < attempts) throw new Error(`server_${response.status}`);
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+    }
+  }
+  throw lastError || new Error("network_request_failed");
 }
 
 async function syncRestaurantFromApi(slug) {
