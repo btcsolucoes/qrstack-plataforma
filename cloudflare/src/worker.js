@@ -34,7 +34,7 @@ export default {
         : url.searchParams.get("action") || "health";
 
       if (action === "health") {
-        return jsonp(url, { ok: true, service: "qrstack-d1", version: "d1-v1" });
+        return jsonp(url, { ok: true, service: "qrstack-d1", version: "archive-live-v2" });
       }
 
       if (action === "trackEvent") {
@@ -49,7 +49,7 @@ export default {
         const cachedResponse = cacheRequest ? await caches.default.match(cacheRequest) : null;
         if (cachedResponse) return cachedResponse;
         const slug = url.searchParams.get("slug") || "amaro";
-        const insights = await getInsights(env.DB, {
+        const insights = await getCombinedInsights(env, {
           slug,
           startDate: normalizeDate(url.searchParams.get("startDate") || url.searchParams.get("start_date")),
           endDate: normalizeDate(url.searchParams.get("endDate") || url.searchParams.get("end_date")),
@@ -280,6 +280,86 @@ async function getInsights(db, filters) {
     total_dish_observe_seconds: totalDishObserveSeconds,
     recent_events: recentEvents,
   };
+}
+
+async function getCombinedInsights(env, filters) {
+  const databases = [env.ARCHIVE_DB, env.DB].filter(Boolean);
+  const settled = await Promise.allSettled(databases.map((db) => getInsights(db, filters)));
+  const available = settled
+    .filter((result) => result.status === "fulfilled")
+    .map((result) => result.value);
+
+  if (!available.length) {
+    const firstError = settled.find((result) => result.status === "rejected");
+    throw firstError?.reason || new Error("analytics_unavailable");
+  }
+
+  return mergeInsights(available);
+}
+
+function mergeInsights(parts) {
+  if (parts.length === 1) return { ...parts[0], provider: "cloudflare_d1" };
+
+  const merged = {
+    restaurant_name: parts.find((part) => part.restaurant_name)?.restaurant_name || "",
+    provider: "cloudflare_d1_archive_live",
+    period_label: parts.find((part) => part.period_label)?.period_label || "Todos os tempos",
+    collected_at: new Date().toISOString(),
+  };
+  const numericKeys = [
+    "total_events", "period_events", "total_accesses", "total_page_views",
+    "period_accesses", "filtered_accesses", "accesses_today", "accesses_7_days",
+    "unique_sessions_period", "unique_sessions_total", "webview_banner_shown",
+    "total_dish_views", "total_dish_touches", "total_dish_observe_seconds",
+  ];
+  const mapKeys = [
+    "source_counts", "event_type_counts", "event_type_counts_all", "daily_accesses",
+    "hour_counts", "device_counts", "browser_counts", "os_counts", "dish_view_counts",
+    "dish_touch_counts", "dish_observe_seconds", "dish_view_category_counts",
+    "dish_touch_category_counts", "dish_observe_category_seconds",
+    "webview_banner_platform_counts",
+  ];
+
+  numericKeys.forEach((key) => {
+    merged[key] = parts.reduce((total, part) => total + Number(part[key] || 0), 0);
+  });
+  mapKeys.forEach((key) => {
+    merged[key] = mergeNumberMaps(parts.map((part) => part[key]));
+  });
+
+  merged.dish_attention_scores = {};
+  mergeScore(merged.dish_attention_scores, merged.dish_view_counts, 1);
+  mergeScore(merged.dish_attention_scores, merged.dish_touch_counts, 3);
+  mergeScore(merged.dish_attention_scores, merged.dish_observe_seconds, 0.2);
+  merged.peak_hour = peakHourFromCounts(merged.hour_counts);
+
+  const conversion = parts.reduce((total, part) => {
+    const current = part.instagram_to_direct || {};
+    total.instagram_visitors += Number(current.instagram_visitors || 0);
+    total.instagram_to_direct_visitors += Number(current.instagram_to_direct_visitors || 0);
+    total.direct_sessions_after_instagram += Number(current.direct_sessions_after_instagram || 0);
+    return total;
+  }, { instagram_visitors: 0, instagram_to_direct_visitors: 0, direct_sessions_after_instagram: 0 });
+  conversion.instagram_to_direct_rate = conversion.instagram_visitors
+    ? Number(((conversion.instagram_to_direct_visitors / conversion.instagram_visitors) * 100).toFixed(2))
+    : 0;
+  merged.instagram_to_direct = conversion;
+
+  merged.recent_events = parts
+    .flatMap((part) => part.recent_events || [])
+    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
+    .slice(0, 15);
+
+  return merged;
+}
+
+function mergeNumberMaps(maps) {
+  return maps.reduce((merged, values) => {
+    Object.entries(values || {}).forEach(([key, value]) => {
+      merged[key] = Number(merged[key] || 0) + Number(value || 0);
+    });
+    return merged;
+  }, {});
 }
 
 async function getCatalog(db, slug) {
