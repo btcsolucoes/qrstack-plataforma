@@ -147,19 +147,21 @@ async function trackEvent(db, payload, request) {
   const userAgent = payload.user_agent || payload.userAgent || request.headers.get("user-agent") || "";
   const device = detectDevice(userAgent);
   const dishName = payload.dish_name || payload.item_name || payload.prato || "";
+  const eventType = normalizeEventType(payload.event_type || payload.tipo || "page_view");
+  const compactDishEvent = eventType.startsWith("dish_");
   const event = {
     id: payload.id || crypto.randomUUID(),
     restaurant_id: restaurant.id,
     restaurant_slug: restaurant.slug,
     menu_day_id: payload.menu_day_id || payload.menuDayId || "",
-    event_type: normalizeEventType(payload.event_type || payload.tipo || "page_view"),
+    event_type: eventType,
     source: normalizeSource(payload.source || payload.origem || payload.utm_source || "direct"),
     source_detail: payload.source_detail || payload.sourceDetail || payload.referrer || "",
-    url: payload.url || "",
-    path: payload.path || "",
-    referrer: payload.referrer || "",
-    user_agent: userAgent,
-    language: payload.language || payload.idioma || "",
+    url: compactDishEvent ? "" : payload.url || "",
+    path: compactDishEvent ? "" : payload.path || "",
+    referrer: compactDishEvent ? "" : payload.referrer || "",
+    user_agent: compactDishEvent ? "" : userAgent,
+    language: compactDishEvent ? "" : payload.language || payload.idioma || "",
     session_id: payload.session_id || payload.sessionId || "",
     visitor_id: payload.visitor_id || payload.visitorId || "",
     dish_name: dishName,
@@ -170,9 +172,9 @@ async function trackEvent(db, payload, request) {
     device_type: payload.device_type || payload.deviceType || device.type,
     browser: payload.browser || device.browser,
     os: payload.os || device.os,
-    screen: payload.screen || "",
-    viewport: payload.viewport || "",
-    timezone_offset: payload.timezone_offset || payload.timezoneOffset || "",
+    screen: compactDishEvent ? "" : payload.screen || "",
+    viewport: compactDishEvent ? "" : payload.viewport || "",
+    timezone_offset: compactDishEvent ? "" : payload.timezone_offset || payload.timezoneOffset || "",
     banner_shown: toBooleanInteger(payload.banner_shown ?? payload.bannerShown),
     banner_platform: payload.banner_platform || payload.bannerPlatform || "",
     created_at: normalizeTimestamp(payload.timestamp || payload.created_at) || new Date().toISOString(),
@@ -192,8 +194,8 @@ async function getInsights(db, filters) {
   const all = eventWhere(restaurant.slug);
   const periodPageViews = eventWhere(restaurant.slug, bounds, "event_type = 'page_view'");
   const allPageViews = eventWhere(restaurant.slug, null, "event_type = 'page_view'");
-  const todayPageViews = eventWhere(restaurant.slug, { start: `${todayIso()}T00:00:00.000Z`, endExclusive: `${addDays(todayIso(), 1)}T00:00:00.000Z` }, "event_type = 'page_view'");
-  const sevenDaysPageViews = eventWhere(restaurant.slug, { start: `${daysAgoIso(6)}T00:00:00.000Z` }, "event_type = 'page_view'");
+  const todayPageViews = eventWhere(restaurant.slug, { start: dateStartUtc(todayIso()), endExclusive: dateStartUtc(addDays(todayIso(), 1)) }, "event_type = 'page_view'");
+  const sevenDaysPageViews = eventWhere(restaurant.slug, { start: dateStartUtc(daysAgoIso(6)) }, "event_type = 'page_view'");
   const dishViews = eventWhere(restaurant.slug, bounds, "event_type = 'dish_view' AND COALESCE(dish_name, '') <> ''");
   const dishTouches = eventWhere(restaurant.slug, bounds, "event_type = 'dish_touch' AND COALESCE(dish_name, '') <> ''");
   const dishObserves = eventWhere(restaurant.slug, bounds, "event_type = 'dish_observe' AND COALESCE(dish_name, '') <> ''");
@@ -218,8 +220,8 @@ async function getInsights(db, filters) {
     groupedCounts(db, periodPageViews, "source"),
     groupedCounts(db, period, "event_type"),
     groupedCounts(db, all, "event_type"),
-    groupedCounts(db, periodPageViews, "substr(created_at, 1, 10)"),
-    groupedCounts(db, periodPageViews, "substr(created_at, 12, 2)"),
+    groupedCounts(db, periodPageViews, "substr(datetime(created_at, '-3 hours'), 1, 10)"),
+    groupedCounts(db, periodPageViews, "substr(datetime(created_at, '-3 hours'), 12, 2)"),
     groupedCounts(db, periodPageViews, "device_type"),
     groupedCounts(db, periodPageViews, "browser"),
     groupedCounts(db, periodPageViews, "os"),
@@ -294,7 +296,52 @@ async function getCombinedInsights(env, filters) {
     throw firstError?.reason || new Error("analytics_unavailable");
   }
 
-  return mergeInsights(available);
+  const merged = mergeInsights(available);
+  if (databases.length > 1) {
+    merged.instagram_to_direct = await instagramToDirectAcrossDatabases(
+      databases,
+      normalizeSlug(filters.slug),
+      buildDateBounds(filters),
+    );
+  }
+  return merged;
+}
+
+async function instagramToDirectAcrossDatabases(databases, slug, bounds) {
+  const pageViews = eventWhere(slug, bounds, "event_type = 'page_view' AND COALESCE(visitor_id, '') <> ''");
+  const resultSets = await Promise.all(databases.map((db) => db.prepare(`
+    SELECT visitor_id, session_id, source, created_at
+    FROM analytics_events_normalized
+    WHERE ${pageViews.sql}
+    ORDER BY created_at
+  `).bind(...pageViews.params).all()));
+  const events = resultSets.flatMap((result) => result.results || [])
+    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  const instagramVisitors = new Map();
+  const directSessions = new Map();
+
+  events.forEach((event) => {
+    if (event.source !== "instagram") return;
+    const first = instagramVisitors.get(event.visitor_id);
+    if (!first || event.created_at < first) instagramVisitors.set(event.visitor_id, event.created_at);
+  });
+  events.forEach((event) => {
+    const firstInstagram = instagramVisitors.get(event.visitor_id);
+    if (!firstInstagram || event.source !== "direct" || event.created_at <= firstInstagram) return;
+    if (!directSessions.has(event.visitor_id)) directSessions.set(event.visitor_id, new Set());
+    directSessions.get(event.visitor_id).add(event.session_id || event.created_at);
+  });
+
+  const convertedVisitors = directSessions.size;
+  const directSessionCount = [...directSessions.values()].reduce((total, sessions) => total + sessions.size, 0);
+  return {
+    instagram_visitors: instagramVisitors.size,
+    instagram_to_direct_visitors: convertedVisitors,
+    direct_sessions_after_instagram: directSessionCount,
+    instagram_to_direct_rate: instagramVisitors.size
+      ? Number(((convertedVisitors / instagramVisitors.size) * 100).toFixed(2))
+      : 0,
+  };
 }
 
 function mergeInsights(parts) {
@@ -584,9 +631,13 @@ function buildDateBounds(filters) {
   const start = normalizeDate(filters.startDate);
   const end = normalizeDate(filters.endDate);
   return {
-    start: start ? `${start}T00:00:00.000Z` : "",
-    endExclusive: end ? `${addDays(end, 1)}T00:00:00.000Z` : "",
+    start: start ? dateStartUtc(start) : "",
+    endExclusive: end ? dateStartUtc(addDays(end, 1)) : "",
   };
+}
+
+function dateStartUtc(isoDate) {
+  return `${isoDate}T03:00:00.000Z`;
 }
 
 function normalizeDate(value) {
