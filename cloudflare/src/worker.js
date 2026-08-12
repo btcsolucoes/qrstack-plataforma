@@ -14,6 +14,8 @@ const CORS_HEADERS = {
   "access-control-allow-headers": "content-type, authorization",
 };
 
+const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec";
+
 const EVENT_COLUMNS = [
   "id", "restaurant_id", "restaurant_slug", "menu_day_id", "event_type", "source",
   "source_detail", "url", "path", "referrer", "user_agent", "language",
@@ -34,13 +36,35 @@ export default {
         : url.searchParams.get("action") || "health";
 
       if (action === "health") {
-        return jsonp(url, { ok: true, service: "qrstack-d1", version: "archive-live-v2" });
+        return jsonp(url, {
+          ok: true,
+          service: "qrstack-d1",
+          version: "archive-live-v3-sheet-fallback",
+          fallback_storage: "google_sheets",
+        });
       }
 
       if (action === "trackEvent") {
-        const eventPayload = request.method === "POST" ? payload : Object.fromEntries(url.searchParams);
-        const event = await trackEvent(env.DB, eventPayload, request);
-        return json({ ok: true, event }, 201);
+        const receivedPayload = request.method === "POST" ? payload : Object.fromEntries(url.searchParams);
+        const eventPayload = { ...receivedPayload, id: receivedPayload.id || crypto.randomUUID() };
+        try {
+          const event = await trackEvent(env.DB, eventPayload, request);
+          return json({ ok: true, event, storage: "d1" }, 201);
+        } catch (error) {
+          if (!isD1CapacityError(error)) throw error;
+          const fallback = await storeEventInSheets(env, eventPayload, request);
+          console.warn("QrStack D1 capacity reached; event stored in Google Sheets", {
+            client_event_id: eventPayload.id,
+            sheet_event_id: fallback.event?.id || "",
+          });
+          return json({
+            ok: true,
+            event: fallback.event || eventPayload,
+            client_event_id: eventPayload.id,
+            storage: "google_sheets",
+            fallback_reason: "d1_capacity",
+          }, 202);
+        }
       }
 
       if (action === "getInsights") {
@@ -92,6 +116,51 @@ export default {
     }
   },
 };
+
+function isD1CapacityError(error) {
+  const message = String(error?.message || error || "");
+  return /SQLITE_FULL|database (?:or disk )?is full|maximum database size|max(?:imum)? db size|storage (?:capacity|limit)|quota (?:exceeded|reached)|exceeded[^\n]*quota|write quota/i.test(message);
+}
+
+async function storeEventInSheets(env, payload, request) {
+  const endpoint = env.SHEETS_FALLBACK_URL || DEFAULT_SHEETS_FALLBACK_URL;
+  if (!endpoint) throw new Error("D1 capacity reached and SHEETS_FALLBACK_URL is not configured");
+
+  const userAgent = payload.user_agent || payload.userAgent || request.headers.get("user-agent") || "";
+  const originalDetail = payload.source_detail || payload.sourceDetail || payload.referrer || "";
+  const eventMarker = `qrstack_event_id=${payload.id}`;
+  const sourceDetail = originalDetail.includes(eventMarker)
+    ? originalDetail
+    : [originalDetail, eventMarker].filter(Boolean).join(" | ");
+  const body = {
+    ...payload,
+    action: "trackEvent",
+    id: payload.id,
+    cliente: payload.cliente || payload.slug || payload.restaurant_slug || "amaro",
+    slug: payload.slug || payload.cliente || payload.restaurant_slug || "amaro",
+    source_detail: sourceDetail,
+    user_agent: userAgent,
+    timestamp: payload.timestamp || payload.created_at || new Date().toISOString(),
+  };
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "content-type": "text/plain;charset=UTF-8" },
+    body: JSON.stringify(body),
+    redirect: "follow",
+  });
+  const text = await response.text();
+  let result;
+  try {
+    result = JSON.parse(text);
+  } catch {
+    throw new Error(`Google Sheets fallback returned invalid JSON (${response.status})`);
+  }
+  if (!response.ok || result?.ok !== true) {
+    throw new Error(`Google Sheets fallback failed (${response.status}): ${result?.error || "unknown error"}`);
+  }
+  return result;
+}
 
 async function readPayload(request) {
   const text = await request.text();

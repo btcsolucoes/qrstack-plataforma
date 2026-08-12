@@ -98,3 +98,12 @@ Insights:
 ```powershell
 Invoke-RestMethod "https://qrstack-api.seu-subdominio.workers.dev?action=getInsights&slug=amaro&key=qrstack-berna-2026"
 ```
+
+## 9. Fallback de armazenamento
+
+O D1 e o armazenamento primario dos eventos. Se uma gravacao falhar por banco cheio ou limite de escrita, o Worker encaminha automaticamente o mesmo evento para o Apps Script configurado em `SHEETS_FALLBACK_URL`.
+
+- O cardapio considera o envio concluido somente depois da confirmacao do D1 ou do Google Sheets.
+- O `id` original do navegador e anexado a `source_detail` como `qrstack_event_id=<id>` para permitir deduplicacao em uma importacao futura.
+- Erros de validacao e falhas comuns nao acionam o fallback; nesses casos, a fila local do cardapio continua tentando.
+- Nenhuma linha existente no D1 ou no Google Sheets e removida pelo mecanismo.
