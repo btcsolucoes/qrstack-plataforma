@@ -180,11 +180,64 @@ async function trackEvent(db, payload, request) {
     created_at: normalizeTimestamp(payload.timestamp || payload.created_at) || new Date().toISOString(),
   };
 
+  if (event.event_type.startsWith("dish_") && event.session_id) {
+    const recoveredPageView = {
+      ...event,
+      id: `recovered-pageview:${event.restaurant_slug}:${event.session_id}`,
+      event_type: "page_view",
+      source_detail: event.source_detail || `recovered_from_${event.event_type}`,
+      url: payload.url || "",
+      path: payload.path || "",
+      referrer: payload.referrer || "",
+      user_agent: userAgent,
+      language: payload.language || payload.idioma || "",
+      dish_name: "",
+      dish_key: "",
+      dish_category: "",
+      duration_ms: 0,
+      observe_seconds: 0,
+      screen: payload.screen || "",
+      viewport: payload.viewport || "",
+      timezone_offset: payload.timezone_offset || payload.timezoneOffset || "",
+    };
+    await insertRecoveredPageView(db, recoveredPageView);
+  }
+
+  if (event.event_type === "page_view" && event.session_id) {
+    const recoveredId = `recovered-pageview:${event.restaurant_slug}:${event.session_id}`;
+    const columnsToRefresh = EVENT_COLUMNS.filter((column) => !["id", "restaurant_id", "restaurant_slug", "session_id"].includes(column));
+    const result = await db.prepare(`
+      UPDATE analytics_events
+      SET ${columnsToRefresh.map((column) => `${column} = ?`).join(", ")}
+      WHERE id = ?
+    `).bind(...columnsToRefresh.map((column) => event[column] ?? ""), recoveredId).run();
+    if (Number(result.meta?.changes || 0) > 0) return event;
+  }
+
+  await insertEvent(db, event);
+
+  return event;
+}
+
+async function insertEvent(db, event) {
   await db.prepare(
     `INSERT OR IGNORE INTO analytics_events (${EVENT_COLUMNS.join(", ")}) VALUES (${EVENT_COLUMNS.map(() => "?").join(", ")})`
   ).bind(...EVENT_COLUMNS.map((column) => event[column] ?? "")).run();
+}
 
-  return event;
+async function insertRecoveredPageView(db, event) {
+  await db.prepare(`
+    INSERT OR IGNORE INTO analytics_events (${EVENT_COLUMNS.join(", ")})
+    SELECT ${EVENT_COLUMNS.map(() => "?").join(", ")}
+    WHERE NOT EXISTS (
+      SELECT 1 FROM analytics_events
+      WHERE restaurant_slug = ? AND session_id = ? AND event_type = 'page_view'
+    )
+  `).bind(
+    ...EVENT_COLUMNS.map((column) => event[column] ?? ""),
+    event.restaurant_slug,
+    event.session_id,
+  ).run();
 }
 
 async function getInsights(db, filters) {
@@ -510,7 +563,17 @@ function assertRestaurantToken(restaurant, receivedToken) {
 
 function eventWhere(slug, bounds = null, extraSql = "") {
   const normalizedBounds = bounds || {};
-  const clauses = ["restaurant_slug = ?", "is_test_event = 0"];
+  const clauses = [
+    "restaurant_slug = ?",
+    "is_test_event = 0",
+    `(event_type <> 'page_view' OR id NOT LIKE 'recovered-pageview:%' OR NOT EXISTS (
+      SELECT 1 FROM analytics_events real_pageview
+      WHERE real_pageview.restaurant_slug = analytics_events_normalized.restaurant_slug
+        AND real_pageview.session_id = analytics_events_normalized.session_id
+        AND real_pageview.event_type = 'page_view'
+        AND real_pageview.id NOT LIKE 'recovered-pageview:%'
+    ))`,
+  ];
   const params = [slug];
   if (normalizedBounds.start) {
     clauses.push("created_at >= ?");
