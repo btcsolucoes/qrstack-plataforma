@@ -252,21 +252,36 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private void selectLinkSticker(AccessibilityNodeInfo root) {
-        if (tapVisibleLinkSticker(root)) {
-            advance("opening_link_editor", "Sticker LINK tocado com validação da grade (" + lastLinkTapDiagnostic + "); aguardando campo de URL", 900);
+        AccessibilityNodeInfo search = findStickerSearchEditor(root);
+        if (search == null) {
+            retryOrFail("opening_stickers", "A busca de stickers não apareceu", 8);
             return;
         }
-        if (stepAttempts >= 8) fail("A grade de stickers não pôde ser validada; a barra de pesquisa não foi tocada");
-        else retry("opening_stickers", 650);
+        String currentText = normalizeWords(search.getText());
+        if (!"link".equals(currentText) && !setText(search, "link")) {
+            tapNodeCenter(search);
+            retryOrFail("opening_stickers", "O Instagram não aceitou a pesquisa pelo sticker LINK", 8);
+            return;
+        }
+        advance("searching_link_sticker", "Busca segura pelo sticker LINK preenchida", 950);
     }
 
     private void selectSearchedLinkSticker(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo link = findStickerResult(root, "link");
-        if (tapNodeCenter(link)) {
-            advance("opening_link_editor", "Resultado LINK validado; aguardando campo de URL", 850);
+        AccessibilityNodeInfo search = findStickerSearchEditor(root);
+        if (search == null || !"link".equals(normalizeWords(search.getText()))) {
+            advance("opening_stickers", "Campo de busca mudou; repetindo a pesquisa pelo LINK", 350);
             return;
         }
-        if (stepAttempts >= 8) fail("A pesquisa não retornou o sticker LINK; publicação interrompida com segurança");
+        AccessibilityNodeInfo link = findStickerResult(root, "link");
+        if (tapNodeCenter(link)) {
+            Rect bounds = new Rect();
+            link.getBoundsInScreen(bounds);
+            lastLinkTapDiagnostic = "searched-node x=" + Math.round(bounds.exactCenterX())
+                    + " y=" + Math.round(bounds.exactCenterY());
+            advance("opening_link_editor", "Resultado LINK encontrado pela busca e validado (" + lastLinkTapDiagnostic + ")", 850);
+            return;
+        }
+        if (stepAttempts >= 10) fail("A pesquisa não expôs um resultado identificado como LINK; publicação interrompida sem tocar em outro sticker");
         else retry("searching_link_sticker", 650);
     }
 
@@ -575,12 +590,18 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             AccessibilityNodeInfo node = queue.removeFirst();
             String text = normalize(node.getText());
             String description = normalize(node.getContentDescription());
+            String viewId = normalize(node.getViewIdResourceName());
             Rect bounds = new Rect();
             node.getBoundsInScreen(bounds);
             String textWords = normalizeWords(text);
             String descriptionWords = normalizeWords(description);
-            boolean exactLabel = expected.equals(textWords) || expected.equals(descriptionWords);
-            boolean wordLabel = containsWord(textWords, expected) || containsWord(descriptionWords, expected);
+            String viewIdWords = normalizeWords(viewId);
+            boolean exactLabel = expected.equals(textWords)
+                    || expected.equals(descriptionWords)
+                    || expected.equals(viewIdWords);
+            boolean wordLabel = containsWord(textWords, expected)
+                    || containsWord(descriptionWords, expected)
+                    || containsWord(viewIdWords, expected);
             boolean belowSearch = search == null || searchBounds.isEmpty() || bounds.top >= searchBounds.bottom;
             boolean stickerSized = bounds.width() > 24 && bounds.height() > 20
                     && bounds.width() < screenWidth * 0.65f
@@ -609,12 +630,19 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 "search", "search stickers", "search gifs and stickers");
         if (search != null) return search;
 
-        if (findNode(root, "stickers", "figurinhas", "adesivos") == null) return null;
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
         ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
         queue.add(root);
         while (!queue.isEmpty()) {
             AccessibilityNodeInfo node = queue.removeFirst();
-            if (isEditable(node) && "link".equals(normalize(node.getText()))) return node;
+            Rect bounds = new Rect();
+            node.getBoundsInScreen(bounds);
+            boolean searchGeometry = !bounds.isEmpty()
+                    && bounds.width() >= screenWidth * 0.65f
+                    && bounds.top >= screenHeight * 0.12f
+                    && bounds.bottom <= screenHeight * 0.45f;
+            if (isEditable(node) && searchGeometry && "link".equals(normalizeWords(node.getText()))) return node;
             for (int index = 0; index < node.getChildCount(); index += 1) {
                 AccessibilityNodeInfo child = node.getChild(index);
                 if (child != null) queue.add(child);
@@ -697,58 +725,6 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 "contagem regressiva", "nome da contagem", "data de termino", "countdown",
                 "localizacao", "location", "mencao", "mention", "musica", "music",
                 "perguntas", "questions", "enquete", "poll") != null;
-    }
-
-    private boolean tapVisibleLinkSticker(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo search = findStickerSearchEditor(root);
-        if (search == null) return false;
-        Rect searchBounds = new Rect();
-        search.getBoundsInScreen(searchBounds);
-        int screenWidth = getResources().getDisplayMetrics().widthPixels;
-        int screenHeight = getResources().getDisplayMetrics().heightPixels;
-        boolean validSearchBar = !searchBounds.isEmpty()
-                && searchBounds.width() >= screenWidth * 0.70f
-                && searchBounds.top >= screenHeight * 0.15f
-                && searchBounds.bottom <= screenHeight * 0.42f;
-        if (!validSearchBar) return false;
-
-        AccessibilityNodeInfo exposedLink = findStickerResult(root, "link");
-        Rect linkBounds = new Rect();
-        if (exposedLink != null) exposedLink.getBoundsInScreen(linkBounds);
-        boolean exposedLooksSafe = !linkBounds.isEmpty()
-                && linkBounds.top > searchBounds.bottom
-                && linkBounds.bottom < screenHeight * 0.78f
-                && linkBounds.left < screenWidth * 0.55f
-                && linkBounds.width() < screenWidth * 0.35f
-                && linkBounds.height() < screenHeight * 0.09f;
-        if (exposedLooksSafe && tapNodeCenter(exposedLink)) {
-            lastLinkTapDiagnostic = "node x=" + Math.round(linkBounds.exactCenterX())
-                    + " y=" + Math.round(linkBounds.exactCenterY());
-            return true;
-        }
-
-        // Instagram 2026 exposes two sticker-grid layouts. English keeps LINK in the
-        // first column; Portuguese can shift it to the second visual column.
-        boolean englishGrid = isEnglishStickerTray(root, search);
-        float targetX = searchBounds.left + searchBounds.width() * (englishGrid ? 0.165f : 0.345f);
-        float targetY = searchBounds.top + screenWidth * 0.846f;
-        if (targetX <= 0 || targetX >= screenWidth || targetY <= searchBounds.bottom || targetY >= screenHeight * 0.82f) {
-            return false;
-        }
-        lastLinkTapDiagnostic = (englishGrid ? "english-grid" : "pt-grid")
-                + " x=" + Math.round(targetX)
-                + " y=" + Math.round(targetY)
-                + " search=" + searchBounds.left + "," + searchBounds.top + "," + searchBounds.right + "," + searchBounds.bottom;
-        return tapAbsolute(targetX, targetY);
-    }
-
-    private boolean isEnglishStickerTray(AccessibilityNodeInfo root, AccessibilityNodeInfo search) {
-        String searchText = normalize(search.getText()) + " "
-                + normalize(search.getContentDescription()) + " "
-                + normalize(search.getHintText());
-        if (containsWord(normalizeWords(searchText), "search")) return true;
-        return findNode(root, "location", "mention", "add yours", "frames", "cutouts", "notify", "poll", "countdown") != null
-                && findNode(root, "localizacao", "mencao", "sua vez", "quadros", "recortes", "enquete", "contagem regressiva") == null;
     }
 
     private boolean isStickerSearchField(AccessibilityNodeInfo node) {
