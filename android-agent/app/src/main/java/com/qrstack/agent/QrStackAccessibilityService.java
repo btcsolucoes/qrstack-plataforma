@@ -239,18 +239,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             advance("opening_link_editor", "Sticker de link selecionado; aguardando campo de URL", 850);
             return;
         }
-        AccessibilityNodeInfo search = findStickerSearchEditor(root);
-        if (search == null) {
-            AccessibilityNodeInfo searchButton = findNode(root, "pesquisar", "search");
-            if (click(searchButton)) {
-                retry("opening_stickers", 500);
-                return;
-            }
-        } else if (setText(search, "LINK")) {
-            advance("searching_link_sticker", "Pesquisa pelo sticker LINK preenchida", 800);
-            return;
-        }
-        if (stepAttempts >= 8) fail("Sticker LINK não foi encontrado; nenhum outro sticker foi tocado");
+        if (stepAttempts >= 8) fail("Sticker LINK visível não foi reconhecido; a barra de pesquisa não foi tocada");
         else retry("opening_stickers", 650);
     }
 
@@ -409,10 +398,14 @@ public final class QrStackAccessibilityService extends AccessibilityService {
 
     private AccessibilityNodeInfo findStickerResult(AccessibilityNodeInfo root, String label) {
         if (root == null) return null;
-        String expected = normalize(label);
+        String expected = normalizeWords(label);
         AccessibilityNodeInfo search = findStickerSearchEditor(root);
         Rect searchBounds = new Rect();
         if (search != null) search.getBoundsInScreen(searchBounds);
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        AccessibilityNodeInfo best = null;
+        int bestScore = Integer.MIN_VALUE;
 
         ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
         queue.add(root);
@@ -422,15 +415,30 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             String description = normalize(node.getContentDescription());
             Rect bounds = new Rect();
             node.getBoundsInScreen(bounds);
-            boolean exactLabel = expected.equals(text) || expected.equals(description);
+            String textWords = normalizeWords(text);
+            String descriptionWords = normalizeWords(description);
+            boolean exactLabel = expected.equals(textWords) || expected.equals(descriptionWords);
+            boolean wordLabel = containsWord(textWords, expected) || containsWord(descriptionWords, expected);
             boolean belowSearch = search == null || searchBounds.isEmpty() || bounds.top >= searchBounds.bottom;
-            if (exactLabel && !bounds.isEmpty() && belowSearch && !hasEditableAncestor(node)) return node;
+            boolean stickerSized = bounds.width() > 24 && bounds.height() > 20
+                    && bounds.width() < screenWidth * 0.65f
+                    && bounds.height() < screenHeight * 0.22f;
+            if (wordLabel && stickerSized && belowSearch && !hasEditableAncestor(node)) {
+                int score = exactLabel ? 1000 : 500;
+                if (node.isClickable()) score += 120;
+                if (node.getChildCount() == 0) score += 80;
+                score -= Math.min(300, (bounds.width() * bounds.height()) / 1000);
+                if (score > bestScore) {
+                    best = node;
+                    bestScore = score;
+                }
+            }
             for (int index = 0; index < node.getChildCount(); index += 1) {
                 AccessibilityNodeInfo child = node.getChild(index);
                 if (child != null) queue.add(child);
             }
         }
-        return null;
+        return best;
     }
 
     private AccessibilityNodeInfo findStickerSearchEditor(AccessibilityNodeInfo root) {
@@ -502,6 +510,15 @@ public final class QrStackAccessibilityService extends AccessibilityService {
 
     private static boolean isEditable(AccessibilityNodeInfo node) {
         return node != null && (node.isEditable() || "android.widget.EditText".contentEquals(node.getClassName()));
+    }
+
+    private static String normalizeWords(CharSequence value) {
+        return normalize(value).replaceAll("[^a-z0-9]+", " ").trim();
+    }
+
+    private static boolean containsWord(String value, String expected) {
+        if (value.isEmpty() || expected.isEmpty()) return false;
+        return (" " + value + " ").contains(" " + expected + " ");
     }
 
     private AccessibilityNodeInfo findEditableByLabel(AccessibilityNodeInfo root, String... labels) {
