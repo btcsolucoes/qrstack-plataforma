@@ -40,6 +40,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     private boolean stepScheduled;
     private String lastStep = "";
     private int stepAttempts;
+    private String lastLinkTapDiagnostic = "";
     private static volatile QrStackAccessibilityService instance;
     private static volatile String foregroundPackage = "";
     private static volatile long foregroundSeenAt;
@@ -235,7 +236,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
 
     private void selectLinkSticker(AccessibilityNodeInfo root) {
         if (tapVisibleLinkSticker(root)) {
-            advance("opening_link_editor", "Sticker LINK tocado na posição validada da grade; aguardando campo de URL", 900);
+            advance("opening_link_editor", "Sticker LINK tocado com validação da grade (" + lastLinkTapDiagnostic + "); aguardando campo de URL", 900);
             return;
         }
         if (stepAttempts >= 8) fail("A grade de stickers não pôde ser validada; a barra de pesquisa não foi tocada");
@@ -253,6 +254,11 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private void verifyLinkEditor(AccessibilityNodeInfo root) {
+        if (isWrongStickerEditorScreen(root)) {
+            performGlobalAction(GLOBAL_ACTION_BACK);
+            fail("O Instagram abriu outro sticker em vez do LINK; operação parada antes de colar qualquer texto");
+            return;
+        }
         AccessibilityNodeInfo editor = findLinkEditor(root);
         if (editor != null) {
             advance("entering_link", "Campo de URL do sticker confirmado", 250);
@@ -554,13 +560,43 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 && searchBounds.bottom <= screenHeight * 0.42f;
         if (!validSearchBar) return false;
 
-        // Instagram 2026: LINK fica na sexta linha, primeira coluna da grade padrão.
-        float targetX = searchBounds.left + searchBounds.width() * 0.345f;
+        AccessibilityNodeInfo exposedLink = findStickerResult(root, "link");
+        Rect linkBounds = new Rect();
+        if (exposedLink != null) exposedLink.getBoundsInScreen(linkBounds);
+        boolean exposedLooksSafe = !linkBounds.isEmpty()
+                && linkBounds.top > searchBounds.bottom
+                && linkBounds.bottom < screenHeight * 0.78f
+                && linkBounds.left < screenWidth * 0.55f
+                && linkBounds.width() < screenWidth * 0.35f
+                && linkBounds.height() < screenHeight * 0.09f;
+        if (exposedLooksSafe && tapNodeCenter(exposedLink)) {
+            lastLinkTapDiagnostic = "node x=" + Math.round(linkBounds.exactCenterX())
+                    + " y=" + Math.round(linkBounds.exactCenterY());
+            return true;
+        }
+
+        // Instagram 2026 exposes two sticker-grid layouts. English keeps LINK in the
+        // first column; Portuguese can shift it to the second visual column.
+        boolean englishGrid = isEnglishStickerTray(root, search);
+        float targetX = searchBounds.left + searchBounds.width() * (englishGrid ? 0.165f : 0.345f);
         float targetY = searchBounds.top + screenWidth * 0.846f;
         if (targetX <= 0 || targetX >= screenWidth || targetY <= searchBounds.bottom || targetY >= screenHeight * 0.82f) {
             return false;
         }
+        lastLinkTapDiagnostic = (englishGrid ? "english-grid" : "pt-grid")
+                + " x=" + Math.round(targetX)
+                + " y=" + Math.round(targetY)
+                + " search=" + searchBounds.left + "," + searchBounds.top + "," + searchBounds.right + "," + searchBounds.bottom;
         return tapAbsolute(targetX, targetY);
+    }
+
+    private boolean isEnglishStickerTray(AccessibilityNodeInfo root, AccessibilityNodeInfo search) {
+        String searchText = normalize(search.getText()) + " "
+                + normalize(search.getContentDescription()) + " "
+                + normalize(search.getHintText());
+        if (containsWord(normalizeWords(searchText), "search")) return true;
+        return findNode(root, "location", "mention", "add yours", "frames", "cutouts", "notify", "poll", "countdown") != null
+                && findNode(root, "localizacao", "mencao", "sua vez", "quadros", "recortes", "enquete", "contagem regressiva") == null;
     }
 
     private boolean isStickerSearchField(AccessibilityNodeInfo node) {
