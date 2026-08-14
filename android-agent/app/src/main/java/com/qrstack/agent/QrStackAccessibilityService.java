@@ -40,6 +40,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     private boolean stepScheduled;
     private String lastStep = "";
     private int stepAttempts;
+    private int positioningCorrections;
     private String lastLinkTapDiagnostic = "";
     private static volatile QrStackAccessibilityService instance;
     private static volatile String foregroundPackage = "";
@@ -162,6 +163,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             activeJob = restored;
             lastStep = "";
             stepAttempts = 0;
+            positioningCorrections = 0;
             interrupted = "paused_interruption".equals(preferences.checkpoint());
         }
     }
@@ -206,7 +208,22 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 enterStoryLink(root);
                 break;
             case "positioning_link":
-                positionStickerAndShare(root);
+                selectPlacedLink(root);
+                break;
+            case "moving_link":
+                movePlacedLink(root);
+                break;
+            case "selecting_link_for_scale":
+                selectPlacedLinkForScale(root);
+                break;
+            case "scaling_link":
+                scalePlacedLink(root);
+                break;
+            case "recentering_link":
+                recenterPlacedLink(root);
+                break;
+            case "verifying_link":
+                verifyPlacedLinkAndShare(root);
                 break;
             case "awaiting_publish_confirmation":
                 verifyPublished(root);
@@ -281,60 +298,132 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             return;
         }
         if (tapDoneInLinkEditor(root)) {
+            positioningCorrections = 0;
             advance("positioning_link", "Link clicável inserido; preparando posição e tamanho do sticker", 1400);
         } else retryOrFail("entering_link", "Botão para concluir o link não apareceu", 8);
     }
 
-    private void positionStickerAndShare(AccessibilityNodeInfo root) {
-        if (stepAttempts == 1) {
-            AccessibilityNodeInfo linkSticker = findPlacedLinkSticker(root);
-            Rect source = new Rect();
-            if (linkSticker != null) linkSticker.getBoundsInScreen(source);
-            float fromX = source.isEmpty() ? 0.50f : source.exactCenterX() / getResources().getDisplayMetrics().widthPixels;
-            float fromY = source.isEmpty() ? 0.50f : source.exactCenterY() / getResources().getDisplayMetrics().heightPixels;
-            drag(fromX, fromY, 0.50f, 0.724f, 1200);
-            scheduleStep(1500);
+    private void selectPlacedLink(AccessibilityNodeInfo root) {
+        if (findLinkEditor(root) != null) {
+            retryOrFail("positioning_link", "O editor do link não fechou depois de tocar em Done", 6);
             return;
         }
-        if (stepAttempts == 2) {
-            AccessibilityNodeInfo linkSticker = findPlacedLinkSticker(root);
-            Rect source = new Rect();
-            if (linkSticker != null) linkSticker.getBoundsInScreen(source);
-            float centerX = source.isEmpty() ? 0.50f : source.exactCenterX() / getResources().getDisplayMetrics().widthPixels;
-            float centerY = source.isEmpty() ? 0.724f : source.exactCenterY() / getResources().getDisplayMetrics().heightPixels;
-            pinchOut(centerX, centerY, 0.055f, 0.185f, 1050);
-            scheduleStep(1400);
+        if (findStoryShareAction(root) == null) {
+            retryOrFail("positioning_link", "O editor do Story não reapareceu depois de concluir o link", 8);
             return;
         }
+        AccessibilityNodeInfo sticker = findPlacedLinkSticker(root);
+        boolean dispatched = sticker != null ? tapNodeCenter(sticker) : tap(0.50f, storyCenterYFraction());
+        if (dispatched) {
+            advance("moving_link", "Sticker LINK selecionado para posicionamento", 450);
+        } else retryOrFail("positioning_link", "O sticker LINK não respondeu ao toque de seleção", 6);
+    }
+
+    private void movePlacedLink(AccessibilityNodeInfo root) {
+        AccessibilityNodeInfo sticker = findPlacedLinkSticker(root);
+        Rect bounds = new Rect();
+        if (sticker != null) sticker.getBoundsInScreen(bounds);
+        int width = getResources().getDisplayMetrics().widthPixels;
+        int height = getResources().getDisplayMetrics().heightPixels;
+        float fromX = bounds.isEmpty() ? 0.50f : bounds.exactCenterX() / width;
+        float fromY = bounds.isEmpty() ? storyCenterYFraction() : bounds.exactCenterY() / height;
+        if (drag(fromX, fromY, 0.50f, storyStickerTargetYFraction(), 1450)) {
+            advance("selecting_link_for_scale", "Sticker movido para o centro da área pontilhada", 1650);
+        } else retryOrFail("moving_link", "O Android recusou o gesto de mover o sticker", 5);
+    }
+
+    private void selectPlacedLinkForScale(AccessibilityNodeInfo root) {
+        AccessibilityNodeInfo sticker = findPlacedLinkSticker(root);
+        boolean dispatched = sticker != null ? tapNodeCenter(sticker) : tap(0.50f, storyStickerTargetYFraction());
+        if (dispatched) {
+            advance("scaling_link", "Sticker selecionado para ampliação", 420);
+        } else retryOrFail("selecting_link_for_scale", "O sticker não respondeu antes da ampliação", 5);
+    }
+
+    private void scalePlacedLink(AccessibilityNodeInfo root) {
+        AccessibilityNodeInfo sticker = findPlacedLinkSticker(root);
+        Rect bounds = new Rect();
+        if (sticker != null) sticker.getBoundsInScreen(bounds);
+        int width = getResources().getDisplayMetrics().widthPixels;
+        int height = getResources().getDisplayMetrics().heightPixels;
+        float centerX = bounds.isEmpty() ? 0.50f : bounds.exactCenterX() / width;
+        float centerY = bounds.isEmpty() ? storyStickerTargetYFraction() : bounds.exactCenterY() / height;
+        if (pinchOutHorizontal(centerX, centerY, 0.075f, 0.145f, 1050)) {
+            advance("recentering_link", "Sticker LINK ampliado", 1350);
+        } else retryOrFail("scaling_link", "O Android recusou o gesto de ampliar o sticker", 5);
+    }
+
+    private void recenterPlacedLink(AccessibilityNodeInfo root) {
+        AccessibilityNodeInfo sticker = findPlacedLinkSticker(root);
+        Rect bounds = new Rect();
+        if (sticker != null) sticker.getBoundsInScreen(bounds);
+        int width = getResources().getDisplayMetrics().widthPixels;
+        int height = getResources().getDisplayMetrics().heightPixels;
+        float fromX = bounds.isEmpty() ? 0.50f : bounds.exactCenterX() / width;
+        float fromY = bounds.isEmpty() ? storyStickerTargetYFraction() : bounds.exactCenterY() / height;
+        if (drag(fromX, fromY, 0.50f, storyStickerTargetYFraction(), 900)) {
+            advance("verifying_link", "Sticker recentralizado após a ampliação", 1150);
+        } else retryOrFail("recentering_link", "O Android recusou o ajuste final do sticker", 5);
+    }
+
+    private void verifyPlacedLinkAndShare(AccessibilityNodeInfo root) {
         AccessibilityNodeInfo positioned = findPlacedLinkSticker(root);
-        if (positioned != null && stepAttempts <= 5) {
+        if (positioned != null) {
             Rect bounds = new Rect();
             positioned.getBoundsInScreen(bounds);
             int width = getResources().getDisplayMetrics().widthPixels;
             int height = getResources().getDisplayMetrics().heightPixels;
-            boolean insideReservedArea = bounds.exactCenterX() >= width * 0.28f
-                    && bounds.exactCenterX() <= width * 0.72f
-                    && bounds.exactCenterY() >= height * 0.65f
-                    && bounds.exactCenterY() <= height * 0.79f;
-            if (!insideReservedArea) {
-                drag(bounds.exactCenterX() / width, bounds.exactCenterY() / height, 0.50f, 0.724f, 1200);
-                scheduleStep(1500);
+            float targetY = storyStickerTargetYFraction();
+            boolean centered = Math.abs(bounds.exactCenterX() - width * 0.50f) <= width * 0.055f
+                    && Math.abs(bounds.exactCenterY() - height * targetY) <= height * 0.045f;
+            if (!centered && positioningCorrections < 2) {
+                positioningCorrections += 1;
+                advance("moving_link", "Sticker fora do centro; repetindo o ajuste de posição", 350);
                 return;
             }
-            boolean largeEnough = bounds.width() >= width * 0.34f || bounds.height() >= height * 0.06f;
+            if (!centered) {
+                fail("O sticker LINK continuou fora da área pontilhada; publicação interrompida para não postar errado");
+                return;
+            }
+            boolean largeEnough = bounds.width() >= width * 0.46f;
+            if (!largeEnough && positioningCorrections < 2) {
+                positioningCorrections += 1;
+                advance("selecting_link_for_scale", "Sticker ainda pequeno; repetindo a ampliação", 350);
+                return;
+            }
             if (!largeEnough) {
-                pinchOut(bounds.exactCenterX() / width, bounds.exactCenterY() / height, 0.045f, 0.165f, 950);
-                scheduleStep(1300);
+                fail("O sticker LINK continuou pequeno; publicação interrompida para não postar errado");
                 return;
             }
         }
-        AccessibilityNodeInfo share = findNode(root, "seu story", "your story", "compartilhar", "share", "publicar", "publish");
+        AccessibilityNodeInfo share = findStoryShareAction(root);
         if (click(share)) {
             advance("awaiting_publish_confirmation", "Link posicionado na área reservada e comando de publicação enviado", 5000);
             return;
         }
         if (stepAttempts >= 7) fail("Botão de publicar o Story não foi encontrado");
-        else retry("positioning_link", 800);
+        else retry("verifying_link", 800);
+    }
+
+    private AccessibilityNodeInfo findStoryShareAction(AccessibilityNodeInfo root) {
+        return findNode(root, "seu story", "your story", "compartilhar", "share", "publicar", "publish");
+    }
+
+    private float storyCenterYFraction() {
+        return storyCanvasYFraction(0.50f);
+    }
+
+    private float storyStickerTargetYFraction() {
+        // The dashed box is centered at y=1390 in the 1080x1920 story artwork.
+        return storyCanvasYFraction(1390f / 1920f);
+    }
+
+    private float storyCanvasYFraction(float canvasYFraction) {
+        int width = getResources().getDisplayMetrics().widthPixels;
+        int height = getResources().getDisplayMetrics().heightPixels;
+        float storyHeight = Math.min(height, width * (16f / 9f));
+        float storyTop = Math.max(0f, (height - storyHeight) / 2f);
+        return (storyTop + storyHeight * canvasYFraction) / height;
     }
 
     private void verifyPublished(AccessibilityNodeInfo root) {
@@ -789,46 +878,44 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         return null;
     }
 
-    private void tap(float xFraction, float yFraction) {
+    private boolean tap(float xFraction, float yFraction) {
         int width = getResources().getDisplayMetrics().widthPixels;
         int height = getResources().getDisplayMetrics().heightPixels;
         Path path = new Path();
         path.moveTo(width * xFraction, height * yFraction);
-        dispatchGesture(new GestureDescription.Builder()
+        return dispatchGesture(new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, 90))
                 .build(), null, null);
     }
 
-    private void drag(float fromX, float fromY, float toX, float toY, long duration) {
+    private boolean drag(float fromX, float fromY, float toX, float toY, long duration) {
         int width = getResources().getDisplayMetrics().widthPixels;
         int height = getResources().getDisplayMetrics().heightPixels;
         Path path = new Path();
         path.moveTo(width * fromX, height * fromY);
         path.lineTo(width * toX, height * toY);
-        dispatchGesture(new GestureDescription.Builder()
+        return dispatchGesture(new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, duration))
                 .build(), null, null);
     }
 
-    private void pinchOut(float centerX, float centerY, float startRadius, float endRadius, long duration) {
+    private boolean pinchOutHorizontal(float centerX, float centerY, float startRadius, float endRadius, long duration) {
         int width = getResources().getDisplayMetrics().widthPixels;
         int height = getResources().getDisplayMetrics().heightPixels;
         float centerPx = width * centerX;
         float centerPy = height * centerY;
         float startX = width * startRadius;
-        float startY = height * startRadius;
         float endX = width * endRadius;
-        float endY = height * endRadius;
 
         Path first = new Path();
-        first.moveTo(centerPx - startX, centerPy - startY);
-        first.lineTo(centerPx - endX, centerPy - endY);
+        first.moveTo(centerPx - startX, centerPy);
+        first.lineTo(centerPx - endX, centerPy);
 
         Path second = new Path();
-        second.moveTo(centerPx + startX, centerPy + startY);
-        second.lineTo(centerPx + endX, centerPy + endY);
+        second.moveTo(centerPx + startX, centerPy);
+        second.lineTo(centerPx + endX, centerPy);
 
-        dispatchGesture(new GestureDescription.Builder()
+        return dispatchGesture(new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(first, 0, duration))
                 .addStroke(new GestureDescription.StrokeDescription(second, 0, duration))
                 .build(), null, null);
