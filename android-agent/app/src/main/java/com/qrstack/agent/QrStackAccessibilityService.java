@@ -45,12 +45,16 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         instance = this;
         preferences = new AgentPreferences(this);
         restoreJob();
-        if (activeJob != null) scheduleStep(900);
+        if (preferences.shouldRun() && activeJob != null) scheduleStep(900);
     }
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (preferences == null) preferences = new AgentPreferences(this);
+        if (!preferences.shouldRun()) {
+            suspendAutomation();
+            return;
+        }
         restoreJob();
         if (activeJob == null) return;
         String packageName = event.getPackageName() == null ? "" : event.getPackageName().toString();
@@ -76,7 +80,9 @@ public final class QrStackAccessibilityService extends AccessibilityService {
 
     @Override
     public void onInterrupt() {
-        if (activeJob != null) pauseForInterruption("Serviço de acessibilidade interrompido pelo Android");
+        if (preferences != null && preferences.shouldRun() && activeJob != null) {
+            pauseForInterruption("Serviço de acessibilidade interrompido pelo Android");
+        }
     }
 
     @Override
@@ -86,18 +92,23 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         super.onDestroy();
     }
 
-    static boolean requestInstagramStoryCamera() {
+    static boolean requestInstagramStoryComposer(String mediaUri) {
         QrStackAccessibilityService service = instance;
-        if (service == null) return false;
-        service.handler.post(service::openInstagramStoryCamera);
+        if (service == null || mediaUri == null || mediaUri.isEmpty()) return false;
+        if (service.preferences == null) service.preferences = new AgentPreferences(service);
+        if (!service.preferences.shouldRun()) return false;
+        service.handler.post(() -> service.openInstagramStoryComposer(mediaUri));
         return true;
     }
 
-    private void openInstagramStoryCamera() {
-        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse("instagram://story-camera"));
+    private void openInstagramStoryComposer(String mediaUri) {
+        Uri asset = Uri.parse(mediaUri);
+        Intent intent = new Intent("com.instagram.share.ADD_TO_STORY");
         intent.setPackage(INSTAGRAM);
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        intent.setDataAndType(asset, "image/png");
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try {
+            grantUriPermission(INSTAGRAM, asset, Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(intent);
         } catch (RuntimeException error) {
             AgentService service = AgentService.current();
@@ -122,7 +133,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private void scheduleStep(long delayMs) {
-        if (stepScheduled || interrupted || activeJob == null) return;
+        if (stepScheduled || interrupted || activeJob == null || preferences == null || !preferences.shouldRun()) return;
         stepScheduled = true;
         handler.postDelayed(() -> {
             stepScheduled = false;
@@ -131,7 +142,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private void runCurrentStep() {
-        if (activeJob == null || interrupted) return;
+        if (activeJob == null || interrupted || !preferences.shouldRun()) return;
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) {
             retry("waiting_window", 700);
@@ -145,14 +156,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         stepAttempts += 1;
 
         switch (checkpoint) {
-            case "opening_instagram":
-            case "resuming_after_interruption":
-                openGallery(root);
-                break;
-            case "opening_gallery":
-                selectLatestMedia(root);
-                break;
-            case "selecting_media":
+            case "opening_story_composer":
                 openStickerTray(root);
                 break;
             case "opening_stickers":
@@ -171,35 +175,9 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 interrupted = true;
                 break;
             default:
-                preferences.setCheckpoint("opening_instagram");
+                preferences.setCheckpoint("opening_story_composer");
                 scheduleStep(500);
         }
-    }
-
-    private void openGallery(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo gallery = findNode(root, "galeria", "gallery", "rolo da camera", "camera roll", "fotos", "photos");
-        if (click(gallery)) {
-            advance("opening_gallery", "Galeria do Instagram aberta", 900);
-            return;
-        }
-        if (stepAttempts >= 3) {
-            tap(0.10f, 0.88f);
-            advance("opening_gallery", "Galeria aberta por posição adaptativa", 1000);
-        } else retry("opening_instagram", 650);
-    }
-
-    private void selectLatestMedia(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo recent = findNode(root, "qrstack", "recentes", "recents");
-        if (recent != null && !recent.isClickable()) recent = clickableParent(recent);
-        AccessibilityNodeInfo image = firstGalleryImage(root);
-        if (click(image)) {
-            advance("selecting_media", "Arte QrStack mais recente selecionada", 1500);
-            return;
-        }
-        if (stepAttempts >= 4) {
-            tap(0.18f, 0.34f);
-            advance("selecting_media", "Arte recente selecionada por grade adaptativa", 1600);
-        } else retry("opening_gallery", 800);
     }
 
     private void openStickerTray(AccessibilityNodeInfo root) {
@@ -211,7 +189,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         if (stepAttempts >= 4) {
             tap(0.62f, 0.08f);
             advance("opening_stickers", "Bandeja de stickers aberta por posição adaptativa", 1000);
-        } else retry("selecting_media", 700);
+        } else retry("opening_story_composer", 700);
     }
 
     private void selectLinkSticker(AccessibilityNodeInfo root) {
@@ -283,7 +261,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private void recoverAfterInterruption() {
-        if (activeJob == null) return;
+        if (activeJob == null || !preferences.shouldRun()) return;
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if ("awaiting_publish_confirmation".equals(lastStep) && root != null) {
             interrupted = false;
@@ -299,6 +277,13 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         interrupted = false;
         preferences.setCheckpoint("resuming_after_interruption");
         AgentService.resume(this);
+    }
+
+    private void suspendAutomation() {
+        handler.removeCallbacksAndMessages(null);
+        stepScheduled = false;
+        interrupted = true;
+        activeJob = null;
     }
 
     private void advance(String checkpoint, String detail, long nextDelay) {

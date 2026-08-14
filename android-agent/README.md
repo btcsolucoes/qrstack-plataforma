@@ -7,7 +7,7 @@ Agente privado para publicar o Story gerado pela plataforma QrStack no Instagram
 1. O restaurante envia o formulario na plataforma.
 2. A arte e salva temporariamente na Cloudflare e um job idempotente entra no D1.
 3. O agente pareado reivindica o job e baixa a arte.
-4. O agente abre o Instagram, seleciona a arte, inclui o link e publica.
+4. O agente entrega a arte diretamente ao compositor de Stories, inclui o link e publica.
 5. Cada etapa e persistida. Uma interrupcao retoma do ultimo checkpoint seguro.
 
 ## Protecao contra interrupcoes
@@ -17,6 +17,7 @@ Agente privado para publicar o Story gerado pela plataforma QrStack no Instagram
 - Mantem tela e CPU acordadas durante o fluxo.
 - Nao rejeita ligacoes e nao apaga notificacoes.
 - Se uma ligacao ou outro aplicativo tomar a tela, pausa o job e aguarda o Instagram voltar.
+- O botao `Parar agente` bloqueia retomadas ate um novo toque manual em `Iniciar agente`.
 - Depois de apertar publicar, exige confirmacao visual antes de concluir e nao dispara uma segunda tentativa no escuro.
 - A recuperacao automatica e limitada; depois de interrupcoes repetidas o job pede conferencia humana.
 
