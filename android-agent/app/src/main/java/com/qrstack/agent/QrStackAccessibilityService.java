@@ -287,8 +287,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             if (linkSticker != null) linkSticker.getBoundsInScreen(source);
             float fromX = source.isEmpty() ? 0.50f : source.exactCenterX() / getResources().getDisplayMetrics().widthPixels;
             float fromY = source.isEmpty() ? 0.50f : source.exactCenterY() / getResources().getDisplayMetrics().heightPixels;
-            drag(fromX, fromY, 0.50f, 0.724f, 850);
-            scheduleStep(1100);
+            drag(fromX, fromY, 0.50f, 0.724f, 1200);
+            scheduleStep(1500);
             return;
         }
         AccessibilityNodeInfo positioned = findPlacedLinkSticker(root);
@@ -302,8 +302,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                     && bounds.exactCenterY() >= height * 0.65f
                     && bounds.exactCenterY() <= height * 0.79f;
             if (!insideReservedArea) {
-                drag(bounds.exactCenterX() / width, bounds.exactCenterY() / height, 0.50f, 0.724f, 850);
-                scheduleStep(1100);
+                drag(bounds.exactCenterX() / width, bounds.exactCenterY() / height, 0.50f, 0.724f, 1200);
+                scheduleStep(1500);
                 return;
             }
         }
@@ -513,7 +513,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private AccessibilityNodeInfo findLinkEditor(AccessibilityNodeInfo root) {
-        if (root == null) return null;
+        if (root == null || !isConfirmedLinkEditorScreen(root) || isWrongStickerEditorScreen(root)) return null;
         ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
         queue.add(root);
         while (!queue.isEmpty()) {
@@ -525,6 +525,20 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             }
         }
         return null;
+    }
+
+    private boolean isConfirmedLinkEditorScreen(AccessibilityNodeInfo root) {
+        return findNode(root,
+                "adicionar link", "adicione um link", "inserir link", "link externo",
+                "url", "endereco da web", "personalizar texto do sticker",
+                "add link", "insert link", "enter url", "web address", "customize sticker text") != null;
+    }
+
+    private boolean isWrongStickerEditorScreen(AccessibilityNodeInfo root) {
+        return findNode(root,
+                "contagem regressiva", "nome da contagem", "data de termino", "countdown",
+                "localizacao", "location", "mencao", "mention", "musica", "music",
+                "perguntas", "questions", "enquete", "poll") != null;
     }
 
     private boolean tapVisibleLinkSticker(AccessibilityNodeInfo root) {
@@ -542,7 +556,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
 
         // Instagram 2026: LINK fica na sexta linha, primeira coluna da grade padrão.
         float targetX = searchBounds.left + searchBounds.width() * 0.345f;
-        float targetY = searchBounds.bottom + screenHeight * 0.347f;
+        float targetY = searchBounds.top + screenWidth * 0.846f;
         if (targetX <= 0 || targetX >= screenWidth || targetY <= searchBounds.bottom || targetY >= screenHeight * 0.82f) {
             return false;
         }
