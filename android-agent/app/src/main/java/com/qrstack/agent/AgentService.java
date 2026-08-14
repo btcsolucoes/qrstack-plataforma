@@ -37,6 +37,7 @@ public final class AgentService extends Service {
         super.onCreate();
         instance = this;
         preferences = new AgentPreferences(this);
+        preferences.migrateStateIfNeeded();
         api = new ApiClient(this);
         guard = new InterruptionGuard(this);
         if (!preferences.shouldRun() || preferences.activeJobJson().isEmpty()) guard.finish();
