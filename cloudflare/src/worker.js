@@ -73,12 +73,20 @@ export default {
       if (action === "getInsights") {
         assertOwner(url.searchParams, request, env);
         const slug = url.searchParams.get("slug") || "amaro";
+        const forceRefresh = url.searchParams.get("refresh") === "1";
         const filters = {
           slug,
           startDate: normalizeDate(url.searchParams.get("startDate") || url.searchParams.get("start_date")),
           endDate: normalizeDate(url.searchParams.get("endDate") || url.searchParams.get("end_date")),
         };
         const snapshotKey = insightsSnapshotKey(filters);
+        if (forceRefresh) {
+          const refreshedSnapshot = await refreshInsightsSnapshot(env, filters, snapshotKey);
+          return jsonp(url, {
+            ...refreshedSnapshot,
+            cache: { status: "forced_refreshed", generated_at: refreshedSnapshot.generated_at },
+          }, 200, JSON_HEADERS);
+        }
         const snapshot = await readInsightsSnapshot(env, snapshotKey);
         if (snapshot) {
           const ageMs = Date.now() - Date.parse(snapshot.generated_at || snapshot.insights?.collected_at || 0);

@@ -73,6 +73,7 @@ const DEFAULT_STATE = {
 
 const STORE_KEY = "qrstack-platform-v4-amaro";
 const INSIGHTS_CACHE_KEY = "qrstack-insights-html-cache-v2";
+const insightsOpenedThisSession = new Set();
 const app = document.getElementById("app");
 let state = loadState();
 let lastStoryDataUrl = "";
@@ -1061,7 +1062,12 @@ function renderHq(tab = "overview") {
       </main>
     </div>
   `;
-  if (tab === "insights") hydrateInsights(restaurants[0]);
+  if (tab === "insights") {
+    const restaurant = restaurants[0];
+    const shouldRefreshOnOpen = !insightsOpenedThisSession.has(restaurant.slug);
+    insightsOpenedThisSession.add(restaurant.slug);
+    hydrateInsights(restaurant, { refreshAfterLoad: shouldRefreshOnOpen });
+  }
 }
 
 function renderAdminHero(title, subtitle, logoUrl) {
@@ -1902,13 +1908,21 @@ function renderFullCatalog(restaurant) {
   `;
 }
 
-async function hydrateInsights(restaurant) {
+async function hydrateInsights(restaurant, options = {}) {
   const target = document.getElementById("insights-live");
   if (!target || !restaurant) return;
+  const forceRefresh = options.forceRefresh === true;
+  const refreshAfterLoad = options.refreshAfterLoad === true;
   const filters = getInsightsFilters();
   const cachedBeforeFetch = getCachedInsightsHtml(restaurant, filters);
-  if (cachedBeforeFetch?.html) {
+  if (cachedBeforeFetch?.html && !forceRefresh) {
     target.innerHTML = cachedBeforeFetch.html;
+  }
+  const applyButton = document.querySelector('[data-insights-filter] button[type="submit"]');
+  if (forceRefresh && applyButton) {
+    applyButton.disabled = true;
+    applyButton.dataset.originalLabel = applyButton.textContent;
+    applyButton.textContent = "Atualizando...";
   }
   try {
     const endpoint = restaurant.analyticsEndpoint || restaurant.liveMenuEndpoint || QRSTACK_API_URL;
@@ -1917,6 +1931,8 @@ async function hydrateInsights(restaurant) {
       key: OWNER_ACCESS_TOKEN,
       startDate: filters.startDate,
       endDate: filters.endDate,
+      refresh: forceRefresh ? "1" : "",
+      refresh_nonce: forceRefresh ? Date.now() : "",
     });
     const insights = data.insights || {};
     const sourceCounts = normalizeCountKeys(insights.source_counts || {}, normalizeSource);
@@ -2087,6 +2103,9 @@ async function hydrateInsights(restaurant) {
     `;
     saveCachedInsightsHtml(restaurant, filters, target.innerHTML);
     clearInsightsRetry(restaurant);
+    if (refreshAfterLoad && !forceRefresh && document.getElementById("insights-live")) {
+      hydrateInsights(restaurant, { forceRefresh: true });
+    }
   } catch (error) {
     console.warn("QrStack insights unavailable:", error);
     const cached = getCachedInsightsHtml(restaurant, filters);
@@ -2126,6 +2145,12 @@ async function hydrateInsights(restaurant) {
         ${insightKpi("Retry", "auto", "sem rua sem saída")}
       </div>
     `;
+  } finally {
+    if (forceRefresh && applyButton) {
+      applyButton.disabled = false;
+      applyButton.textContent = applyButton.dataset.originalLabel || "Aplicar";
+      delete applyButton.dataset.originalLabel;
+    }
   }
 }
 
@@ -3021,7 +3046,7 @@ document.addEventListener("submit", (event) => {
       button.classList.remove("is-active");
       button.setAttribute("aria-pressed", "false");
     });
-    hydrateInsights(getRestaurant(ACTIVE_CLIENT_SLUG));
+    hydrateInsights(getRestaurant(ACTIVE_CLIENT_SLUG), { forceRefresh: true });
     return;
   }
 
