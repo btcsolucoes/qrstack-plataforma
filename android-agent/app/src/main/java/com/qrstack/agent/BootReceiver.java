@@ -16,6 +16,8 @@ public final class BootReceiver extends BroadcastReceiver {
             } catch (RuntimeException ignored) {
                 // Android 15 may require one manual app opening after a full reboot.
             }
+        } else {
+            InterruptionGuard.restoreNormalState(context);
         }
     }
 }

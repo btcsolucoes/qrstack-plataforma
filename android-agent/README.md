@@ -14,6 +14,7 @@ Agente privado para publicar o Story gerado pela plataforma QrStack no Instagram
 
 - Ativa Nao Perturbe somente enquanto existe uma publicacao em andamento.
 - Restaura exatamente o filtro anterior ao terminar ou parar.
+- Persiste o filtro anterior e o recupera mesmo depois de encerramento inesperado do processo.
 - Mantem tela e CPU acordadas durante o fluxo.
 - Nao rejeita ligacoes e nao apaga notificacoes.
 - Se uma ligacao ou outro aplicativo tomar a tela, pausa o job e aguarda o Instagram voltar.
