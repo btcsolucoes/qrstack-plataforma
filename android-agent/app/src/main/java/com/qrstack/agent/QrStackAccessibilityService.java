@@ -33,6 +33,25 @@ import java.util.Set;
 
 public final class QrStackAccessibilityService extends AccessibilityService {
     private static final String INSTAGRAM = "com.instagram.android";
+    private static final String[] LINK_ICON_TEMPLATE = {
+            ".................",
+            ".........##......",
+            ".......######....",
+            "......###..###...",
+            "......##.....##..",
+            ".............##..",
+            ".........##..##..",
+            "...##...##...#...",
+            "..##...##...##...",
+            "..#...##....#....",
+            "..##..#..........",
+            "..##.....#.......",
+            "...##...##.......",
+            "...######........",
+            "......#..........",
+            ".................",
+            "................."
+    };
     private static final Set<String> TRANSIENT_PACKAGES = new HashSet<>(Arrays.asList(
             "com.android.systemui",
             "com.google.android.documentsui",
@@ -309,14 +328,19 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 recognizer.process(InputImage.fromBitmap(bitmap, 0))
                         .addOnSuccessListener(getMainExecutor(), visionText -> {
                             Rect linkBounds = findVisualLinkBounds(visionText, minY, maxY, screenWidth, screenHeight);
+                            String visualMethod = "ocr";
+                            if (linkBounds == null) {
+                                linkBounds = findVisualLinkIconBounds(bitmap, minY, maxY);
+                                visualMethod = "icone-corrente";
+                            }
                             bitmap.recycle();
                             visualScanInFlight = false;
                             if (!isCurrentCheckpoint("opening_stickers", "searching_link_sticker")) return;
                             if (linkBounds != null && tapAbsolute(linkBounds.exactCenterX(), linkBounds.exactCenterY())) {
-                                lastLinkTapDiagnostic = "visual-ocr x=" + Math.round(linkBounds.exactCenterX())
+                                lastLinkTapDiagnostic = "visual-" + visualMethod + " x=" + Math.round(linkBounds.exactCenterX())
                                         + " y=" + Math.round(linkBounds.exactCenterY());
                                 advance("opening_link_editor", "Sticker LINK localizado visualmente (" + lastLinkTapDiagnostic + ")", 900);
-                            } else finishVisualScanFailure("O leitor visual não encontrou a palavra LINK na grade atual");
+                            } else finishVisualScanFailure("O leitor visual não encontrou o texto nem o ícone de corrente do sticker LINK");
                         })
                         .addOnFailureListener(getMainExecutor(), error -> {
                             bitmap.recycle();
@@ -348,7 +372,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         for (Text.TextBlock block : visionText.getTextBlocks()) {
             for (Text.Line line : block.getLines()) {
                 for (Text.Element element : line.getElements()) {
-                    if (!"link".equals(normalizeWords(element.getText()))) continue;
+                    if (!isVisualLinkWord(element.getText())) continue;
                     Rect bounds = element.getBoundingBox();
                     if (bounds == null || bounds.isEmpty()) continue;
                     boolean insideTray = bounds.top >= minY && bounds.bottom <= maxY;
@@ -368,6 +392,185 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             }
         }
         return best;
+    }
+
+    private boolean isVisualLinkWord(String value) {
+        String word = normalizeWords(value)
+                .replace('1', 'i')
+                .replace('l', 'i');
+        if ("iink".equals(word) || "ink".equals(word) || "lnk".equals(word)) return true;
+        return editDistanceAtMostOne(word, "iink");
+    }
+
+    private boolean editDistanceAtMostOne(String left, String right) {
+        if (left == null || right == null || Math.abs(left.length() - right.length()) > 1) return false;
+        int row = 0;
+        int column = 0;
+        int differences = 0;
+        while (row < left.length() && column < right.length()) {
+            if (left.charAt(row) == right.charAt(column)) {
+                row += 1;
+                column += 1;
+                continue;
+            }
+            differences += 1;
+            if (differences > 1) return false;
+            if (left.length() > right.length()) row += 1;
+            else if (right.length() > left.length()) column += 1;
+            else {
+                row += 1;
+                column += 1;
+            }
+        }
+        if (row < left.length() || column < right.length()) differences += 1;
+        return differences <= 1;
+    }
+
+    private Rect findVisualLinkIconBounds(Bitmap bitmap, int minY, int maxY) {
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        int top = Math.max(0, Math.min(height - 1, minY));
+        int bottom = Math.max(top + 1, Math.min(height, maxY));
+        int[] pixels = new int[width * height];
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
+
+        int regionHeight = bottom - top;
+        byte[] blueMask = new byte[width * regionHeight];
+        for (int y = top; y < bottom; y += 1) {
+            int rowOffset = y * width;
+            int maskOffset = (y - top) * width;
+            for (int x = 0; x < width; x += 1) {
+                if (isInstagramLinkBlue(pixels[rowOffset + x])) blueMask[maskOffset + x] = 1;
+            }
+        }
+
+        Rect best = null;
+        float bestScore = 0f;
+        ArrayDeque<Integer> queue = new ArrayDeque<>();
+        int minComponentWidth = Math.max(7, Math.round(width * 0.012f));
+        int maxComponentWidth = Math.round(width * 0.10f);
+        int minComponentHeight = Math.max(9, Math.round(height * 0.008f));
+        int maxComponentHeight = Math.round(height * 0.07f);
+
+        for (int maskY = 0; maskY < regionHeight; maskY += 1) {
+            for (int x = 0; x < width; x += 1) {
+                int start = maskY * width + x;
+                if (blueMask[start] != 1) continue;
+                blueMask[start] = 2;
+                queue.add(start);
+                int left = x;
+                int right = x;
+                int componentTop = maskY;
+                int componentBottom = maskY;
+                int area = 0;
+
+                while (!queue.isEmpty()) {
+                    int current = queue.removeFirst();
+                    int currentY = current / width;
+                    int currentX = current - currentY * width;
+                    area += 1;
+                    left = Math.min(left, currentX);
+                    right = Math.max(right, currentX);
+                    componentTop = Math.min(componentTop, currentY);
+                    componentBottom = Math.max(componentBottom, currentY);
+                    for (int offsetY = -1; offsetY <= 1; offsetY += 1) {
+                        int nextY = currentY + offsetY;
+                        if (nextY < 0 || nextY >= regionHeight) continue;
+                        for (int offsetX = -1; offsetX <= 1; offsetX += 1) {
+                            if (offsetX == 0 && offsetY == 0) continue;
+                            int nextX = currentX + offsetX;
+                            if (nextX < 0 || nextX >= width) continue;
+                            int next = nextY * width + nextX;
+                            if (blueMask[next] != 1) continue;
+                            blueMask[next] = 2;
+                            queue.add(next);
+                        }
+                    }
+                }
+
+                int componentWidth = right - left + 1;
+                int componentHeight = componentBottom - componentTop + 1;
+                if (area < 24
+                        || componentWidth < minComponentWidth || componentWidth > maxComponentWidth
+                        || componentHeight < minComponentHeight || componentHeight > maxComponentHeight) continue;
+
+                Rect component = new Rect(left, componentTop + top, right + 1, componentBottom + top + 1);
+                float templateScore = scoreLinkIconTemplate(pixels, width, height, component);
+                float pillScore = scoreWhiteStickerPill(pixels, width, height, component);
+                float score = templateScore * 0.86f + pillScore * 0.14f;
+                if (templateScore >= 0.52f && pillScore >= 0.38f && score > bestScore) {
+                    best = linkStickerTapBounds(component, width, height);
+                    bestScore = score;
+                }
+            }
+        }
+        return best;
+    }
+
+    private boolean isInstagramLinkBlue(int color) {
+        int red = (color >> 16) & 0xff;
+        int green = (color >> 8) & 0xff;
+        int blue = color & 0xff;
+        return blue >= 120
+                && blue - red >= 28
+                && blue - green >= 7
+                && green >= red - 12;
+    }
+
+    private float scoreLinkIconTemplate(int[] pixels, int width, int height, Rect component) {
+        int padX = Math.max(3, Math.round(component.width() * 0.17f));
+        int padY = Math.max(3, Math.round(component.height() * 0.17f));
+        Rect sample = new Rect(
+                Math.max(0, component.left - padX),
+                Math.max(0, component.top - padY),
+                Math.min(width, component.right + padX),
+                Math.min(height, component.bottom + padY)
+        );
+        int intersection = 0;
+        int union = 0;
+        int size = LINK_ICON_TEMPLATE.length;
+        for (int row = 0; row < size; row += 1) {
+            for (int column = 0; column < size; column += 1) {
+                int x = Math.min(width - 1,
+                        sample.left + Math.round((column + 0.5f) * sample.width() / size));
+                int y = Math.min(height - 1,
+                        sample.top + Math.round((row + 0.5f) * sample.height() / size));
+                boolean expected = LINK_ICON_TEMPLATE[row].charAt(column) == '#';
+                boolean actual = isInstagramLinkBlue(pixels[y * width + x]);
+                if (expected && actual) intersection += 1;
+                if (expected || actual) union += 1;
+            }
+        }
+        return intersection / (float) Math.max(1, union);
+    }
+
+    private float scoreWhiteStickerPill(int[] pixels, int width, int height, Rect component) {
+        int pillTop = Math.max(0, component.top - Math.round(component.height() * 0.45f));
+        int pillBottom = Math.min(height, component.bottom + Math.round(component.height() * 0.45f));
+        int pillLeft = Math.max(0, component.left - Math.round(component.width() * 0.60f));
+        int pillRight = Math.min(width, component.right + Math.round(width * 0.14f));
+        int white = 0;
+        int sampled = 0;
+        int stride = Math.max(1, width / 720);
+        for (int y = pillTop; y < pillBottom; y += stride) {
+            for (int x = pillLeft; x < pillRight; x += stride) {
+                int color = pixels[y * width + x];
+                int red = (color >> 16) & 0xff;
+                int green = (color >> 8) & 0xff;
+                int blue = color & 0xff;
+                if (red >= 205 && green >= 205 && blue >= 205) white += 1;
+                sampled += 1;
+            }
+        }
+        return white / (float) Math.max(1, sampled);
+    }
+
+    private Rect linkStickerTapBounds(Rect icon, int width, int height) {
+        int left = Math.max(0, icon.left - Math.round(icon.width() * 0.60f));
+        int right = Math.min(width, icon.right + Math.round(width * 0.12f));
+        int top = Math.max(0, icon.top - Math.round(icon.height() * 0.45f));
+        int bottom = Math.min(height, icon.bottom + Math.round(icon.height() * 0.45f));
+        return new Rect(left, top, right, bottom);
     }
 
     private boolean isCurrentCheckpoint(String... checkpoints) {
