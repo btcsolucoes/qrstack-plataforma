@@ -2,17 +2,27 @@ package com.qrstack.agent;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.graphics.Bitmap;
 import android.graphics.Path;
 import android.graphics.Rect;
+import android.hardware.HardwareBuffer;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.content.ComponentName;
+import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+
+import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.text.Text;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
 import java.text.Normalizer;
 import java.util.ArrayDeque;
@@ -42,6 +52,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     private int stepAttempts;
     private int positioningCorrections;
     private String lastLinkTapDiagnostic = "";
+    private TextRecognizer textRecognizer;
+    private boolean visualScanInFlight;
     private static volatile QrStackAccessibilityService instance;
     private static volatile String foregroundPackage = "";
     private static volatile long foregroundSeenAt;
@@ -51,6 +63,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         super.onServiceConnected();
         instance = this;
         preferences = new AgentPreferences(this);
+        textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         restoreJob();
         if (preferences.shouldRun() && activeJob != null) {
             if ("awaiting_accessibility".equals(preferences.checkpoint())) AgentService.resume(this);
@@ -103,6 +116,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     public void onDestroy() {
         if (instance == this) instance = null;
         handler.removeCallbacksAndMessages(null);
+        if (textRecognizer != null) textRecognizer.close();
         super.onDestroy();
     }
 
@@ -199,7 +213,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 selectLinkSticker(root);
                 break;
             case "searching_link_sticker":
-                selectSearchedLinkSticker(root);
+                selectLinkSticker(root);
                 break;
             case "opening_link_editor":
                 verifyLinkEditor(root);
@@ -252,37 +266,122 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private void selectLinkSticker(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo search = findStickerSearchEditor(root);
-        if (search == null) {
-            retryOrFail("opening_stickers", "A busca de stickers não apareceu", 8);
-            return;
-        }
-        String currentText = normalizeWords(search.getText());
-        if (!"link".equals(currentText) && !setText(search, "link")) {
-            tapNodeCenter(search);
-            retryOrFail("opening_stickers", "O Instagram não aceitou a pesquisa pelo sticker LINK", 8);
-            return;
-        }
-        advance("searching_link_sticker", "Busca segura pelo sticker LINK preenchida", 950);
-    }
-
-    private void selectSearchedLinkSticker(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo search = findStickerSearchEditor(root);
-        if (search == null || !"link".equals(normalizeWords(search.getText()))) {
-            advance("opening_stickers", "Campo de busca mudou; repetindo a pesquisa pelo LINK", 350);
-            return;
-        }
         AccessibilityNodeInfo link = findStickerResult(root, "link");
         if (tapNodeCenter(link)) {
             Rect bounds = new Rect();
             link.getBoundsInScreen(bounds);
-            lastLinkTapDiagnostic = "searched-node x=" + Math.round(bounds.exactCenterX())
+            lastLinkTapDiagnostic = "accessibility x=" + Math.round(bounds.exactCenterX())
                     + " y=" + Math.round(bounds.exactCenterY());
-            advance("opening_link_editor", "Resultado LINK encontrado pela busca e validado (" + lastLinkTapDiagnostic + ")", 850);
+            advance("opening_link_editor", "Sticker LINK localizado pela interface (" + lastLinkTapDiagnostic + ")", 850);
             return;
         }
-        if (stepAttempts >= 10) fail("A pesquisa não expôs um resultado identificado como LINK; publicação interrompida sem tocar em outro sticker");
-        else retry("searching_link_sticker", 650);
+        findAndTapLinkStickerVisually(root);
+    }
+
+    private void findAndTapLinkStickerVisually(AccessibilityNodeInfo root) {
+        if (visualScanInFlight) return;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            fail("O Android deste aparelho não permite localizar visualmente o sticker LINK");
+            return;
+        }
+        Rect searchBounds = new Rect();
+        AccessibilityNodeInfo search = findStickerSearchEditor(root);
+        if (search != null) search.getBoundsInScreen(searchBounds);
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        int minY = searchBounds.isEmpty() ? Math.round(screenHeight * 0.18f) : searchBounds.bottom;
+        int maxY = Math.round(screenHeight * 0.90f);
+        visualScanInFlight = true;
+        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+            @Override
+            public void onSuccess(ScreenshotResult screenshot) {
+                Bitmap bitmap = copyScreenshotBitmap(screenshot);
+                if (bitmap == null) {
+                    finishVisualScanFailure("A captura da grade de stickers veio vazia");
+                    return;
+                }
+                TextRecognizer recognizer = textRecognizer;
+                if (recognizer == null) {
+                    bitmap.recycle();
+                    finishVisualScanFailure("O leitor visual do sticker LINK não iniciou");
+                    return;
+                }
+                recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                        .addOnSuccessListener(getMainExecutor(), visionText -> {
+                            Rect linkBounds = findVisualLinkBounds(visionText, minY, maxY, screenWidth, screenHeight);
+                            bitmap.recycle();
+                            visualScanInFlight = false;
+                            if (!isCurrentCheckpoint("opening_stickers", "searching_link_sticker")) return;
+                            if (linkBounds != null && tapAbsolute(linkBounds.exactCenterX(), linkBounds.exactCenterY())) {
+                                lastLinkTapDiagnostic = "visual-ocr x=" + Math.round(linkBounds.exactCenterX())
+                                        + " y=" + Math.round(linkBounds.exactCenterY());
+                                advance("opening_link_editor", "Sticker LINK localizado visualmente (" + lastLinkTapDiagnostic + ")", 900);
+                            } else finishVisualScanFailure("O leitor visual não encontrou a palavra LINK na grade atual");
+                        })
+                        .addOnFailureListener(getMainExecutor(), error -> {
+                            bitmap.recycle();
+                            finishVisualScanFailure("Falha ao ler visualmente a grade de stickers");
+                        });
+            }
+
+            @Override
+            public void onFailure(int errorCode) {
+                finishVisualScanFailure("O Android recusou a captura da grade de stickers (" + errorCode + ")");
+            }
+        });
+    }
+
+    @android.annotation.TargetApi(Build.VERSION_CODES.R)
+    private Bitmap copyScreenshotBitmap(ScreenshotResult screenshot) {
+        HardwareBuffer buffer = screenshot.getHardwareBuffer();
+        try {
+            Bitmap hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.getColorSpace());
+            return hardwareBitmap == null ? null : hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false);
+        } finally {
+            buffer.close();
+        }
+    }
+
+    private Rect findVisualLinkBounds(Text visionText, int minY, int maxY, int screenWidth, int screenHeight) {
+        Rect best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (Text.TextBlock block : visionText.getTextBlocks()) {
+            for (Text.Line line : block.getLines()) {
+                for (Text.Element element : line.getElements()) {
+                    if (!"link".equals(normalizeWords(element.getText()))) continue;
+                    Rect bounds = element.getBoundingBox();
+                    if (bounds == null || bounds.isEmpty()) continue;
+                    boolean insideTray = bounds.top >= minY && bounds.bottom <= maxY;
+                    boolean plausibleSize = bounds.width() >= screenWidth * 0.06f
+                            && bounds.width() <= screenWidth * 0.42f
+                            && bounds.height() >= screenHeight * 0.012f
+                            && bounds.height() <= screenHeight * 0.10f;
+                    if (!insideTray || !plausibleSize) continue;
+                    int score = 2000 - bounds.top;
+                    float ratio = bounds.width() / (float) Math.max(1, bounds.height());
+                    if (ratio >= 1.2f && ratio <= 6f) score += 500;
+                    if (score > bestScore) {
+                        best = new Rect(bounds);
+                        bestScore = score;
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    private boolean isCurrentCheckpoint(String... checkpoints) {
+        if (preferences == null || activeJob == null || !preferences.shouldRun()) return false;
+        String current = preferences.checkpoint();
+        for (String checkpoint : checkpoints) if (checkpoint.equals(current)) return true;
+        return false;
+    }
+
+    private void finishVisualScanFailure(String detail) {
+        visualScanInFlight = false;
+        if (!isCurrentCheckpoint("opening_stickers", "searching_link_sticker")) return;
+        if (stepAttempts >= 8) fail(detail + "; publicação interrompida sem tocar no sticker errado");
+        else retry(preferences.checkpoint(), 850);
     }
 
     private void verifyLinkEditor(AccessibilityNodeInfo root) {
