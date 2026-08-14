@@ -138,16 +138,16 @@ public final class MainActivity extends Activity {
             openAccessibilitySettings();
             return;
         }
-        AgentService.start(this);
         preferences.setShouldRun(true);
+        AgentService.start(this);
         toast("Agente iniciado.");
         refreshStatus();
     }
 
     private void stopAgent() {
         preferences.setShouldRun(false);
-        stopService(new Intent(this, AgentService.class));
-        toast("Agente parado.");
+        AgentService.stop(this);
+        toast("Agente pausado. Ele só voltará quando você tocar em Iniciar agente.");
         refreshStatus();
     }
 

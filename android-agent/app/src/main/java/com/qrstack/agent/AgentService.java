@@ -50,11 +50,32 @@ public final class AgentService extends Service {
         if (ACTION_STOP.equals(action)) {
             preferences.setShouldRun(false);
             guard.finish();
-            stopSelf();
+            StoryJob job = StoryJob.restore(preferences.activeJobJson());
+            if (job == null) {
+                stopSelf();
+            } else {
+                executor.execute(() -> {
+                    try {
+                        preferences.setCheckpoint("paused_by_operator");
+                        api.updateJob(job, "paused_interruption", "paused_by_operator", "Agente pausado manualmente no telefone");
+                    } catch (Exception ignored) {
+                    } finally {
+                        updateNotification("Agente pausado", "Só será retomado pelo botão Iniciar agente");
+                        stopSelf();
+                    }
+                });
+            }
             return START_NOT_STICKY;
         }
-        preferences.setShouldRun(true);
-        if (ACTION_RESUME.equals(action)) executor.execute(this::resumePersistedJob);
+        if (ACTION_START.equals(action)) preferences.setShouldRun(true);
+        if (ACTION_RESUME.equals(action)) {
+            if (!preferences.shouldRun()) {
+                guard.finish();
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+            executor.execute(this::resumePersistedJob);
+        }
         return START_STICKY;
     }
 
@@ -76,6 +97,7 @@ public final class AgentService extends Service {
     }
 
     private void prepare(StoryJob job) throws Exception {
+        if (!preferences.shouldRun()) return;
         preferences.setActiveJobJson(job.toJson().toString());
         preferences.setCheckpoint("downloading_media");
         guard.begin();
@@ -83,14 +105,15 @@ public final class AgentService extends Service {
         api.updateJob(job, "preparing", "downloading_media", "Arte sendo preparada no telefone");
         byte[] media = api.download(job.mediaUrl);
         Uri uri = MediaStoreHelper.saveStory(this, job, media);
+        if (!preferences.shouldRun()) return;
         preferences.setMediaUri(uri.toString());
-        preferences.setCheckpoint("opening_instagram");
-        api.updateJob(job, "publishing", "opening_instagram", "Arte salva e Instagram sendo aberto");
-        requestInstagramStoryCamera(job);
+        preferences.setCheckpoint("opening_story_composer");
+        api.updateJob(job, "publishing", "opening_story_composer", "Arte salva e compositor de Story sendo aberto");
+        requestInstagramStoryComposer(job);
     }
 
     private void resumePersistedJob() {
-        if (busy) return;
+        if (busy || !preferences.shouldRun()) return;
         StoryJob job = StoryJob.restore(preferences.activeJobJson());
         if (job == null) return;
         busy = true;
@@ -100,8 +123,8 @@ public final class AgentService extends Service {
                 prepare(job);
             } else {
                 api.updateJob(job, "publishing", "resuming_after_interruption", "Retomada automática no último ponto seguro");
-                preferences.setCheckpoint("opening_instagram");
-                requestInstagramStoryCamera(job);
+                preferences.setCheckpoint("opening_story_composer");
+                requestInstagramStoryComposer(job);
             }
         } catch (Exception error) {
             updateNotification("Publicação pausada", "Aguardando recuperação automática");
@@ -159,8 +182,9 @@ public final class AgentService extends Service {
         return instance;
     }
 
-    private void requestInstagramStoryCamera(StoryJob job) {
-        if (QrStackAccessibilityService.requestInstagramStoryCamera()) {
+    private void requestInstagramStoryComposer(StoryJob job) {
+        if (!preferences.shouldRun()) return;
+        if (QrStackAccessibilityService.requestInstagramStoryComposer(preferences.mediaUri())) {
             updateNotification("Publicando Story", "Não Perturbe ativo durante a operação");
             return;
         }
@@ -198,7 +222,16 @@ public final class AgentService extends Service {
     }
 
     static void resume(android.content.Context context) {
+        AgentPreferences preferences = new AgentPreferences(context);
+        if (!preferences.shouldRun()) return;
         Intent intent = new Intent(context, AgentService.class).setAction(ACTION_RESUME);
+        context.startForegroundService(intent);
+    }
+
+    static void stop(android.content.Context context) {
+        AgentPreferences preferences = new AgentPreferences(context);
+        preferences.setShouldRun(false);
+        Intent intent = new Intent(context, AgentService.class).setAction(ACTION_STOP);
         context.startForegroundService(intent);
     }
 
