@@ -311,13 +311,15 @@ function endpointJsonp(url, timeoutMs = 90000) {
 
 async function apiPost(payload) {
   if (!QRSTACK_API_URL) throw new Error("missing_api_url");
+  const body = JSON.stringify(payload);
+  const canKeepAlive = new Blob([body]).size <= 60 * 1024;
   const response = await fetchWithRetry(
     QRSTACK_API_URL,
     {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=UTF-8" },
-      body: JSON.stringify(payload),
-      keepalive: true,
+      body,
+      keepalive: canKeepAlive,
     },
     { timeoutMs: 20000, attempts: 2 }
   );
@@ -1758,7 +1760,10 @@ function attachClientHandlers(restaurant, menu) {
       toast(job?.duplicate ? "Publicação já estava na fila." : "Story enviado ao telefone QrStack.");
     } catch (error) {
       console.warn("QrStack automated Story queue unavailable:", error);
-      setStoryAutomationStatus("failed_attention", "A fila automática não respondeu. Use o compartilhamento manual como contingência.");
+      setStoryAutomationStatus(
+        "failed_attention",
+        `A resposta do formulário foi preservada, mas a fila não foi criada (${storyQueueErrorMessage(error)}). Tente enviar novamente.`
+      );
       toast("Não foi possível colocar o Story na fila automática.");
     } finally {
       delete event.currentTarget.dataset.submitting;
@@ -1786,6 +1791,18 @@ function attachClientHandlers(restaurant, menu) {
     await shareStory(restaurant, latestMenu);
     trackEvent(restaurant, "story_shared", "admin", latestMenu.id);
   });
+}
+
+function storyQueueErrorMessage(error) {
+  const code = String(error?.message || "").trim();
+  const messages = {
+    story_canvas_not_ready: "a arte ainda não terminou de carregar",
+    invalid_story_media_size: "a arte ultrapassou o limite de tamanho",
+    invalid_story_media: "a arte gerada ficou inválida",
+    invalid_restaurant_token: "o acesso do restaurante expirou",
+    api_timeout: "a conexão demorou além do limite",
+  };
+  return messages[code] || "falha temporária de conexão";
 }
 
 function syncUniqueMenuSelections(form) {
