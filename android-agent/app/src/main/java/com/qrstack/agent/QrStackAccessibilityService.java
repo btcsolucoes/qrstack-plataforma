@@ -198,6 +198,9 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             case "searching_link_sticker":
                 selectSearchedLinkSticker(root);
                 break;
+            case "opening_link_editor":
+                verifyLinkEditor(root);
+                break;
             case "entering_link":
                 enterStoryLink(root);
                 break;
@@ -231,12 +234,12 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private void selectLinkSticker(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo link = findExactNode(root, "link");
+        AccessibilityNodeInfo link = findStickerResult(root, "link");
         if (tapNodeCenter(link)) {
-            advance("entering_link", "Sticker de link selecionado", 850);
+            advance("opening_link_editor", "Sticker de link selecionado; aguardando campo de URL", 850);
             return;
         }
-        AccessibilityNodeInfo search = findEditableByLabel(root, "pesquisar", "pesquisar stickers", "search", "search stickers");
+        AccessibilityNodeInfo search = findStickerSearchEditor(root);
         if (search == null) {
             AccessibilityNodeInfo searchButton = findNode(root, "pesquisar", "search");
             if (click(searchButton)) {
@@ -252,19 +255,30 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private void selectSearchedLinkSticker(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo link = findExactNode(root, "link");
+        AccessibilityNodeInfo link = findStickerResult(root, "link");
         if (tapNodeCenter(link)) {
-            advance("entering_link", "Sticker LINK validado e selecionado", 850);
+            advance("opening_link_editor", "Resultado LINK validado; aguardando campo de URL", 850);
             return;
         }
         if (stepAttempts >= 8) fail("A pesquisa não retornou o sticker LINK; publicação interrompida com segurança");
         else retry("searching_link_sticker", 650);
     }
 
+    private void verifyLinkEditor(AccessibilityNodeInfo root) {
+        AccessibilityNodeInfo editor = findLinkEditor(root);
+        if (editor != null) {
+            advance("entering_link", "Campo de URL do sticker confirmado", 250);
+            return;
+        }
+        if (stepAttempts >= 7) {
+            fail("O sticker LINK não abriu o campo de URL; nenhum texto foi colado na busca de stickers");
+        } else retry("opening_link_editor", 650);
+    }
+
     private void enterStoryLink(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo editor = findEditable(root);
+        AccessibilityNodeInfo editor = findLinkEditor(root);
         if (editor == null) {
-            retryOrFail("entering_link", "Campo do link não apareceu", 8);
+            retryOrFail("entering_link", "Campo de URL seguro não apareceu; a busca de stickers foi ignorada", 8);
             return;
         }
         if (!setText(editor, activeJob.storyLink)
@@ -393,24 +407,101 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         return null;
     }
 
-    private AccessibilityNodeInfo findExactNode(AccessibilityNodeInfo root, String... labels) {
+    private AccessibilityNodeInfo findStickerResult(AccessibilityNodeInfo root, String label) {
         if (root == null) return null;
-        Set<String> expected = new HashSet<>();
-        for (String label : labels) expected.add(normalize(label));
+        String expected = normalize(label);
+        AccessibilityNodeInfo search = findStickerSearchEditor(root);
+        Rect searchBounds = new Rect();
+        if (search != null) search.getBoundsInScreen(searchBounds);
+
         ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
         queue.add(root);
         while (!queue.isEmpty()) {
             AccessibilityNodeInfo node = queue.removeFirst();
             String text = normalize(node.getText());
             String description = normalize(node.getContentDescription());
-            boolean editable = node.isEditable() || "android.widget.EditText".contentEquals(node.getClassName());
-            if (!editable && (expected.contains(text) || expected.contains(description))) return node;
+            Rect bounds = new Rect();
+            node.getBoundsInScreen(bounds);
+            boolean exactLabel = expected.equals(text) || expected.equals(description);
+            boolean belowSearch = search == null || searchBounds.isEmpty() || bounds.top >= searchBounds.bottom;
+            if (exactLabel && !bounds.isEmpty() && belowSearch && !hasEditableAncestor(node)) return node;
             for (int index = 0; index < node.getChildCount(); index += 1) {
                 AccessibilityNodeInfo child = node.getChild(index);
                 if (child != null) queue.add(child);
             }
         }
         return null;
+    }
+
+    private AccessibilityNodeInfo findStickerSearchEditor(AccessibilityNodeInfo root) {
+        AccessibilityNodeInfo search = findEditableByLabel(root,
+                "pesquisar", "pesquisar stickers", "pesquisar figurinhas",
+                "search", "search stickers", "search gifs and stickers");
+        if (search != null) return search;
+
+        if (findNode(root, "stickers", "figurinhas", "adesivos") == null) return null;
+        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
+        queue.add(root);
+        while (!queue.isEmpty()) {
+            AccessibilityNodeInfo node = queue.removeFirst();
+            if (isEditable(node) && "link".equals(normalize(node.getText()))) return node;
+            for (int index = 0; index < node.getChildCount(); index += 1) {
+                AccessibilityNodeInfo child = node.getChild(index);
+                if (child != null) queue.add(child);
+            }
+        }
+        return null;
+    }
+
+    private AccessibilityNodeInfo findLinkEditor(AccessibilityNodeInfo root) {
+        if (root == null || !isLinkEditorScreen(root)) return null;
+        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
+        queue.add(root);
+        while (!queue.isEmpty()) {
+            AccessibilityNodeInfo node = queue.removeFirst();
+            if (isEditable(node) && !isStickerSearchField(node)) {
+                String text = normalize(node.getText());
+                if (!"link".equals(text)) return node;
+            }
+            for (int index = 0; index < node.getChildCount(); index += 1) {
+                AccessibilityNodeInfo child = node.getChild(index);
+                if (child != null) queue.add(child);
+            }
+        }
+        return null;
+    }
+
+    private boolean isLinkEditorScreen(AccessibilityNodeInfo root) {
+        return findNode(root,
+                "adicionar link", "adicione um link", "insira a url", "url do link",
+                "add link", "enter url", "link url", "web address") != null;
+    }
+
+    private boolean isStickerSearchField(AccessibilityNodeInfo node) {
+        AccessibilityNodeInfo current = node;
+        for (int depth = 0; current != null && depth < 7; depth += 1) {
+            String combined = normalize(current.getText()) + " "
+                    + normalize(current.getContentDescription()) + " "
+                    + normalize(current.getHintText());
+            if (combined.contains("pesquisar") || combined.contains("pesquisa")
+                    || combined.contains("search") || combined.contains("sticker")
+                    || combined.contains("figurinha") || combined.contains("adesivo")) return true;
+            current = current.getParent();
+        }
+        return false;
+    }
+
+    private boolean hasEditableAncestor(AccessibilityNodeInfo node) {
+        AccessibilityNodeInfo current = node;
+        for (int depth = 0; current != null && depth < 8; depth += 1) {
+            if (isEditable(current) || isStickerSearchField(current)) return true;
+            current = current.getParent();
+        }
+        return false;
+    }
+
+    private static boolean isEditable(AccessibilityNodeInfo node) {
+        return node != null && (node.isEditable() || "android.widget.EditText".contentEquals(node.getClassName()));
     }
 
     private AccessibilityNodeInfo findEditableByLabel(AccessibilityNodeInfo root, String... labels) {
@@ -421,7 +512,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         queue.add(root);
         while (!queue.isEmpty()) {
             AccessibilityNodeInfo node = queue.removeFirst();
-            boolean editable = node.isEditable() || "android.widget.EditText".contentEquals(node.getClassName());
+            boolean editable = isEditable(node);
             String text = normalize(node.getText());
             String description = normalize(node.getContentDescription());
             String hint = normalize(node.getHintText());
@@ -462,21 +553,6 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             if (exact ? value.equals(label) : value.contains(label)) return true;
         }
         return false;
-    }
-
-    private AccessibilityNodeInfo findEditable(AccessibilityNodeInfo root) {
-        if (root == null) return null;
-        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
-        queue.add(root);
-        while (!queue.isEmpty()) {
-            AccessibilityNodeInfo node = queue.removeFirst();
-            if (node.isEditable() || "android.widget.EditText".contentEquals(node.getClassName())) return node;
-            for (int index = 0; index < node.getChildCount(); index += 1) {
-                AccessibilityNodeInfo child = node.getChild(index);
-                if (child != null) queue.add(child);
-            }
-        }
-        return null;
     }
 
     private AccessibilityNodeInfo firstGalleryImage(AccessibilityNodeInfo root) {
