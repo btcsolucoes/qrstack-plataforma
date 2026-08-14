@@ -421,9 +421,10 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     private float storyCanvasYFraction(float canvasYFraction) {
         int width = getResources().getDisplayMetrics().widthPixels;
         int height = getResources().getDisplayMetrics().heightPixels;
+        // Instagram anchors a 9:16 Story canvas to the top of the editor and
+        // reserves the remaining lower screen area for its sharing controls.
         float storyHeight = Math.min(height, width * (16f / 9f));
-        float storyTop = Math.max(0f, (height - storyHeight) / 2f);
-        return (storyTop + storyHeight * canvasYFraction) / height;
+        return storyHeight * canvasYFraction / height;
     }
 
     private void verifyPublished(AccessibilityNodeInfo root) {
