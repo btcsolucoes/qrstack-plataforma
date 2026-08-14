@@ -1700,7 +1700,14 @@ function renderAmaroOriginalForm(menuItems) {
 }
 
 function attachClientHandlers(restaurant, menu) {
-  document.getElementById("menu-form").addEventListener("submit", (event) => {
+  const menuForm = document.getElementById("menu-form");
+  if (restaurant.slug === "amaro") {
+    syncUniqueMenuSelections(menuForm);
+    menuForm.addEventListener("change", (event) => {
+      if (event.target.matches('select[name^="prato_"]')) syncUniqueMenuSelections(menuForm);
+    });
+  }
+  menuForm.addEventListener("submit", (event) => {
     event.preventDefault();
     if (event.currentTarget.dataset.submitting === "true") return;
     event.currentTarget.dataset.submitting = "true";
@@ -1708,6 +1715,15 @@ function attachClientHandlers(restaurant, menu) {
     if (submitButton) {
       submitButton.disabled = true;
       submitButton.textContent = "Abrindo Instagram...";
+    }
+    if (restaurant.slug === "amaro" && hasRepeatedMenuSelections(event.currentTarget)) {
+      delete event.currentTarget.dataset.submitting;
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.textContent = "Enviar e abrir Instagram";
+      }
+      toast("Cada prato pode ser escolhido apenas uma vez.");
+      return;
     }
     const formData = new FormData(event.currentTarget);
     const storyLinkInput = document.querySelector('[name="storyLink"]');
@@ -1761,6 +1777,23 @@ function attachClientHandlers(restaurant, menu) {
     await shareStory(restaurant, latestMenu);
     trackEvent(restaurant, "story_shared", "admin", latestMenu.id);
   });
+}
+
+function syncUniqueMenuSelections(form) {
+  const selects = [...form.querySelectorAll('select[name^="prato_"]')];
+  const selected = new Set(selects.map((select) => select.value).filter(Boolean));
+  selects.forEach((select) => {
+    [...select.options].forEach((option) => {
+      option.disabled = Boolean(option.value && option.value !== select.value && selected.has(option.value));
+    });
+  });
+}
+
+function hasRepeatedMenuSelections(form) {
+  const values = [...form.querySelectorAll('select[name^="prato_"]')]
+    .map((select) => select.value)
+    .filter(Boolean);
+  return new Set(values).size !== values.length;
 }
 
 function getMenuSubmission(restaurant, formData) {
