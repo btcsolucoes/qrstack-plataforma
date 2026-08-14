@@ -32,6 +32,7 @@ public final class MainActivity extends Activity {
     private TextView status;
     private EditText apiUrl;
     private EditText ownerKey;
+    private Button agentControl;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -87,12 +88,8 @@ public final class MainActivity extends Activity {
         content.addView(button("2. Permitir Não Perturbe", view -> openNotificationPolicy()));
         content.addView(button("3. Ativar acessibilidade QrStack", view -> openAccessibilitySettings()));
         content.addView(button("4. Remover restrição de bateria", view -> requestBatteryExemption()));
-        content.addView(button("5. Iniciar agente", view -> startAgent()));
-
-        Button stop = button("Parar agente", view -> stopAgent());
-        stop.setTextColor(Color.rgb(137, 37, 37));
-        stop.setBackgroundColor(Color.TRANSPARENT);
-        content.addView(stop);
+        agentControl = button("5. INICIAR AGENTE", view -> toggleAgent());
+        content.addView(agentControl);
 
         TextView warning = text(
                 "Importante: é um APK privado. Ele não lê mensagens, não captura senhas e não atende nem rejeita ligações. Uma mudança na interface do Instagram pode exigir ajuste do motor antes de uma nova publicação.",
@@ -146,6 +143,11 @@ public final class MainActivity extends Activity {
         refreshStatus();
     }
 
+    private void toggleAgent() {
+        if (preferences.shouldRun()) stopAgent();
+        else startAgent();
+    }
+
     private void stopAgent() {
         preferences.setShouldRun(false);
         InterruptionGuard.restoreNormalState(this);
@@ -189,6 +191,12 @@ public final class MainActivity extends Activity {
                 + "\nAgente: " + (preferences.shouldRun() ? "em execução" : "parado")
                 + "  ·  Etapa: " + preferences.checkpoint();
         status.setText(value);
+        if (agentControl != null) {
+            boolean running = preferences.shouldRun();
+            agentControl.setText(running ? "PARAR AGENTE AGORA" : "5. INICIAR AGENTE");
+            agentControl.setTextColor(Color.WHITE);
+            agentControl.setBackgroundColor(running ? Color.rgb(180, 36, 36) : Color.rgb(7, 67, 91));
+        }
     }
 
     private boolean isAccessibilityEnabled() {

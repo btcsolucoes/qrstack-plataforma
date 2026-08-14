@@ -27,6 +27,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             "com.android.documentsui",
             "com.android.permissioncontroller",
             "com.samsung.android.app.sharelive",
+            "com.samsung.android.honeyboard",
             "com.qrstack.agent"
     ));
 
@@ -38,6 +39,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     private String lastStep = "";
     private int stepAttempts;
     private static volatile QrStackAccessibilityService instance;
+    private static volatile String foregroundPackage = "";
+    private static volatile long foregroundSeenAt;
 
     @Override
     protected void onServiceConnected() {
@@ -51,13 +54,17 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (preferences == null) preferences = new AgentPreferences(this);
+        String packageName = event.getPackageName() == null ? "" : event.getPackageName().toString();
+        if (!packageName.isEmpty() && !TRANSIENT_PACKAGES.contains(packageName)) {
+            foregroundPackage = packageName;
+            foregroundSeenAt = System.currentTimeMillis();
+        }
         if (!preferences.shouldRun()) {
             suspendAutomation();
             return;
         }
         restoreJob();
         if (activeJob == null) return;
-        String packageName = event.getPackageName() == null ? "" : event.getPackageName().toString();
 
         if (InterruptionGuard.isCallPackage(packageName)) {
             pauseForInterruption("Ligação tomou a tela; publicação pausada sem confirmar envio");
@@ -99,6 +106,16 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         if (!service.preferences.shouldRun()) return false;
         service.handler.post(() -> service.openInstagramStoryComposer(mediaUri));
         return true;
+    }
+
+    static boolean isInstagramForeground() {
+        QrStackAccessibilityService service = instance;
+        if (service != null) {
+            AccessibilityNodeInfo root = service.getRootInActiveWindow();
+            if (root != null && INSTAGRAM.contentEquals(root.getPackageName())) return true;
+        }
+        return INSTAGRAM.equals(foregroundPackage)
+                && System.currentTimeMillis() - foregroundSeenAt < 30_000L;
     }
 
     private void openInstagramStoryComposer(String mediaUri) {
@@ -162,6 +179,9 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             case "opening_stickers":
                 selectLinkSticker(root);
                 break;
+            case "searching_link_sticker":
+                selectSearchedLinkSticker(root);
+                break;
             case "entering_link":
                 enterStoryLink(root);
                 break;
@@ -193,13 +213,34 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private void selectLinkSticker(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo link = findNode(root, "link", "ligacao", "enlace");
-        if (click(link)) {
+        AccessibilityNodeInfo link = findExactNode(root, "link");
+        if (tapNodeCenter(link)) {
             advance("entering_link", "Sticker de link selecionado", 850);
             return;
         }
-        if (stepAttempts >= 8) fail("Sticker de link não foi encontrado na interface atual do Instagram");
+        AccessibilityNodeInfo search = findEditableByLabel(root, "pesquisar", "pesquisar stickers", "search", "search stickers");
+        if (search == null) {
+            AccessibilityNodeInfo searchButton = findNode(root, "pesquisar", "search");
+            if (click(searchButton)) {
+                retry("opening_stickers", 500);
+                return;
+            }
+        } else if (setText(search, "LINK")) {
+            advance("searching_link_sticker", "Pesquisa pelo sticker LINK preenchida", 800);
+            return;
+        }
+        if (stepAttempts >= 8) fail("Sticker LINK não foi encontrado; nenhum outro sticker foi tocado");
         else retry("opening_stickers", 650);
+    }
+
+    private void selectSearchedLinkSticker(AccessibilityNodeInfo root) {
+        AccessibilityNodeInfo link = findExactNode(root, "link");
+        if (tapNodeCenter(link)) {
+            advance("entering_link", "Sticker LINK validado e selecionado", 850);
+            return;
+        }
+        if (stepAttempts >= 8) fail("A pesquisa não retornou o sticker LINK; publicação interrompida com segurança");
+        else retry("searching_link_sticker", 650);
     }
 
     private void enterStoryLink(AccessibilityNodeInfo root) {
@@ -208,10 +249,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             retryOrFail("entering_link", "Campo do link não apareceu", 8);
             return;
         }
-        Bundle text = new Bundle();
-        text.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, activeJob.storyLink);
-        editor.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
-        if (!editor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, text)) {
+        if (!setText(editor, activeJob.storyLink)
+                && !editor.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
             retryOrFail("entering_link", "Instagram recusou o preenchimento do link", 8);
             return;
         }
@@ -334,6 +373,77 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             }
         }
         return null;
+    }
+
+    private AccessibilityNodeInfo findExactNode(AccessibilityNodeInfo root, String... labels) {
+        if (root == null) return null;
+        Set<String> expected = new HashSet<>();
+        for (String label : labels) expected.add(normalize(label));
+        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
+        queue.add(root);
+        while (!queue.isEmpty()) {
+            AccessibilityNodeInfo node = queue.removeFirst();
+            String text = normalize(node.getText());
+            String description = normalize(node.getContentDescription());
+            boolean editable = node.isEditable() || "android.widget.EditText".contentEquals(node.getClassName());
+            if (!editable && (expected.contains(text) || expected.contains(description))) return node;
+            for (int index = 0; index < node.getChildCount(); index += 1) {
+                AccessibilityNodeInfo child = node.getChild(index);
+                if (child != null) queue.add(child);
+            }
+        }
+        return null;
+    }
+
+    private AccessibilityNodeInfo findEditableByLabel(AccessibilityNodeInfo root, String... labels) {
+        if (root == null) return null;
+        Set<String> expected = new HashSet<>();
+        for (String label : labels) expected.add(normalize(label));
+        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
+        queue.add(root);
+        while (!queue.isEmpty()) {
+            AccessibilityNodeInfo node = queue.removeFirst();
+            boolean editable = node.isEditable() || "android.widget.EditText".contentEquals(node.getClassName());
+            String text = normalize(node.getText());
+            String description = normalize(node.getContentDescription());
+            String hint = normalize(node.getHintText());
+            if (editable && (matchesAny(text, expected, false)
+                    || matchesAny(description, expected, false)
+                    || matchesAny(hint, expected, false))) return node;
+            for (int index = 0; index < node.getChildCount(); index += 1) {
+                AccessibilityNodeInfo child = node.getChild(index);
+                if (child != null) queue.add(child);
+            }
+        }
+        return null;
+    }
+
+    private boolean setText(AccessibilityNodeInfo node, String value) {
+        if (node == null) return false;
+        Bundle text = new Bundle();
+        text.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value);
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, text);
+    }
+
+    private boolean tapNodeCenter(AccessibilityNodeInfo node) {
+        if (node == null) return false;
+        Rect bounds = new Rect();
+        node.getBoundsInScreen(bounds);
+        if (bounds.isEmpty()) return false;
+        Path path = new Path();
+        path.moveTo(bounds.exactCenterX(), bounds.exactCenterY());
+        return dispatchGesture(new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, 90))
+                .build(), null, null);
+    }
+
+    private static boolean matchesAny(String value, Set<String> expected, boolean exact) {
+        if (value.isEmpty()) return false;
+        for (String label : expected) {
+            if (exact ? value.equals(label) : value.contains(label)) return true;
+        }
+        return false;
     }
 
     private AccessibilityNodeInfo findEditable(AccessibilityNodeInfo root) {
