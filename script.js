@@ -1757,7 +1757,13 @@ function attachClientHandlers(restaurant, menu) {
       const job = await queueStoryPublication(restaurant, updatedMenu, submission.signature);
       trackEvent(restaurant, "story_queued", "admin", updatedMenu.id);
       document.getElementById("story-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
-      toast(job?.duplicate ? "Publicação já estava na fila." : "Story enviado ao telefone QrStack.");
+      toast(
+        job?.retriedFrom
+          ? "Nova tentativa criada; a falha anterior foi preservada no histórico."
+          : job?.duplicate
+            ? "Publicação já estava na fila."
+            : "Story enviado ao telefone QrStack."
+      );
     } catch (error) {
       console.warn("QrStack automated Story queue unavailable:", error);
       setStoryAutomationStatus(
@@ -1899,12 +1905,18 @@ async function queueStoryPublication(restaurant, menu, submissionSignature) {
     content_type: "image/png",
     image_base64: imageBase64,
     client_request_id: `${restaurant.slug}:${menu.date}:${submissionSignature}`,
+    retry_failed: true,
   });
   const job = response.job;
   if (!job?.id) throw new Error("story_job_missing");
   setStoryAutomationStatus(job.status, storyJobMessage(job));
   pollStoryPublication(restaurant, job.id);
-  return { ...job, duplicate: response.duplicate === true };
+  return {
+    ...job,
+    duplicate: response.duplicate === true,
+    retriedFrom: response.retried_from || "",
+    historical: response.historical === true,
+  };
 }
 
 function pollStoryPublication(restaurant, jobId, attempt = 0) {
@@ -1957,6 +1969,10 @@ function setStoryAutomationStatus(status, message) {
 
 function storyJobMessage(job) {
   const checkpoint = String(job?.checkpoint || "").replaceAll("_", " ");
+  const updatedAt = job?.updated_at ? new Date(job.updated_at) : null;
+  const historySuffix = updatedAt && !Number.isNaN(updatedAt.getTime())
+    ? ` Tentativa registrada em ${updatedAt.toLocaleDateString("pt-BR")} às ${updatedAt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}.`
+    : "";
   const messages = {
     pending: "Arte recebida. Aguardando o telefone QrStack assumir a publicação.",
     claimed: "O telefone recebeu a publicação e vai preparar a arte.",
@@ -1965,7 +1981,7 @@ function storyJobMessage(job) {
     paused_interruption: "Uma ligação ou outra tela interrompeu o fluxo. A retomada será automática, sem duplicar a postagem.",
     retry: "O telefone está retomando do último ponto seguro.",
     completed: "Story publicado e confirmado visualmente no Instagram.",
-    failed_attention: job?.last_error || "O Instagram mudou de tela e precisa de conferência manual.",
+    failed_attention: `${job?.last_error || "O Instagram mudou de tela e precisa de conferência manual."}${historySuffix}`,
   };
   return messages[job?.status] || "Acompanhando a publicação no telefone QrStack.";
 }

@@ -45,7 +45,7 @@ export default {
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v6-story-agent",
+          version: "archive-live-v7-story-retry-history",
           fallback_storage: "google_sheets",
           story_automation: true,
         });
@@ -482,16 +482,27 @@ async function createStoryJob(env, payload) {
   const menuDayId = String(payload.menu_day_id || payload.menuDayId || "").trim().slice(0, 160);
   const storyLink = String(payload.story_link || payload.storyLink || restaurant.story_link || "").trim();
   const clientRequestId = cleanIdentifier(payload.client_request_id || payload.clientRequestId, 160);
+  const retryFailed = payload.retry_failed === true || payload.retryFailed === true;
   const base64 = String(payload.image_base64 || payload.imageBase64 || "").replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "");
   if (!storyLink || !base64) throw httpError("missing_story_payload", 400);
 
+  let effectiveClientRequestId = clientRequestId;
+  let retriedFrom = "";
   if (clientRequestId) {
     const existing = await env.DB.prepare(`
       SELECT * FROM story_publish_jobs
-      WHERE restaurant_id = ? AND client_request_id = ?
+      WHERE restaurant_id = ?
+        AND (client_request_id = ? OR client_request_id LIKE ?)
+      ORDER BY created_at DESC
       LIMIT 1
-    `).bind(restaurant.id, clientRequestId).first();
-    if (existing) return { job: publicStoryJob(existing), duplicate: true };
+    `).bind(restaurant.id, clientRequestId, `${clientRequestId}:retry:%`).first();
+    if (existing) {
+      if (existing.status !== "failed_attention" || !retryFailed) {
+        return { job: publicStoryJob(existing), duplicate: true, historical: existing.status === "failed_attention" };
+      }
+      retriedFrom = existing.id;
+      effectiveClientRequestId = `${clientRequestId}:retry:${crypto.randomUUID().slice(0, 8)}`;
+    }
   }
 
   const media = decodeBase64(base64);
@@ -517,14 +528,23 @@ async function createStoryJob(env, payload) {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'queued', ?, ?, ?, ?)
     `).bind(
       jobId, restaurant.id, slug, menuDayId, storyLink,
-      mediaKey, mediaToken, clientRequestId || null, now, now, now
+      mediaKey, mediaToken, effectiveClientRequestId || null, now, now, now
     ),
     env.DB.prepare(`
       INSERT INTO story_job_events (id, job_id, event_type, checkpoint, detail, created_at)
-      VALUES (?, ?, 'queued', 'queued', 'Story recebido pela plataforma', ?)
-    `).bind(`story_event_${crypto.randomUUID()}`, jobId, now),
+      VALUES (?, ?, 'queued', 'queued', ?, ?)
+    `).bind(
+      `story_event_${crypto.randomUUID()}`,
+      jobId,
+      retriedFrom ? `Nova tentativa solicitada após falha do job ${retriedFrom}` : "Story recebido pela plataforma",
+      now
+    ),
   ]);
-  return { job: publicStoryJob(await getStoryJobById(env.DB, jobId)), duplicate: false };
+  return {
+    job: publicStoryJob(await getStoryJobById(env.DB, jobId)),
+    duplicate: false,
+    retried_from: retriedFrom || null,
+  };
 }
 
 async function claimNextStoryJob(db, request, url) {
