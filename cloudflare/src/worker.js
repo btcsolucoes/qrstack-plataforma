@@ -15,8 +15,9 @@ const CORS_HEADERS = {
 };
 
 const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec";
-const ANALYTICS_CACHE_VERSION = "v4-recife-calendar";
+const ANALYTICS_CACHE_VERSION = "v5-persistent-snapshot";
 const BUSINESS_TIME_ZONE = "America/Recife";
+const INSIGHTS_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 1000;
 
 const EVENT_COLUMNS = [
   "id", "restaurant_id", "restaurant_slug", "menu_day_id", "event_type", "source",
@@ -41,7 +42,7 @@ export default {
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v4-recife-calendar",
+          version: "archive-live-v5-fast-insights",
           fallback_storage: "google_sheets",
         });
       }
@@ -71,24 +72,32 @@ export default {
 
       if (action === "getInsights") {
         assertOwner(url.searchParams, request, env);
-        const cacheRequest = insightsCacheRequest(request);
-        const cachedResponse = cacheRequest ? await caches.default.match(cacheRequest) : null;
-        if (cachedResponse) return cachedResponse;
         const slug = url.searchParams.get("slug") || "amaro";
-        const insights = await getCombinedInsights(env, {
+        const filters = {
           slug,
           startDate: normalizeDate(url.searchParams.get("startDate") || url.searchParams.get("start_date")),
           endDate: normalizeDate(url.searchParams.get("endDate") || url.searchParams.get("end_date")),
-        });
-        const response = jsonp(url, {
-          ok: true,
-          restaurant: { slug, name: insights.restaurant_name || slug },
-          insights,
-        }, 200, READ_CACHE_HEADERS);
-        if (cacheRequest && request.method === "GET" && !url.searchParams.get("callback")) {
-          ctx.waitUntil(caches.default.put(cacheRequest, response.clone()));
+        };
+        const snapshotKey = insightsSnapshotKey(filters);
+        const snapshot = await readInsightsSnapshot(env, snapshotKey);
+        if (snapshot) {
+          const ageMs = Date.now() - Date.parse(snapshot.generated_at || snapshot.insights?.collected_at || 0);
+          if (!Number.isFinite(ageMs) || ageMs > INSIGHTS_SNAPSHOT_MAX_AGE_MS) {
+            ctx.waitUntil(refreshInsightsSnapshot(env, filters, snapshotKey));
+          }
+          return jsonp(url, {
+            ...snapshot,
+            cache: {
+              status: ageMs <= INSIGHTS_SNAPSHOT_MAX_AGE_MS ? "fresh" : "stale_while_refresh",
+              generated_at: snapshot.generated_at || snapshot.insights?.collected_at || "",
+            },
+          }, 200, READ_CACHE_HEADERS);
         }
-        return response;
+        const freshSnapshot = await refreshInsightsSnapshot(env, filters, snapshotKey);
+        return jsonp(url, {
+          ...freshSnapshot,
+          cache: { status: "miss_refreshed", generated_at: freshSnapshot.generated_at },
+        }, 200, READ_CACHE_HEADERS);
       }
 
       if (action === "getRestaurant") {
@@ -116,6 +125,15 @@ export default {
     } catch (error) {
       return json({ ok: false, error: error.message || String(error) }, error.status || 500);
     }
+  },
+
+  async scheduled(controller, env, ctx) {
+    const today = todayIso();
+    ctx.waitUntil(Promise.allSettled([
+      refreshInsightsSnapshot(env, { slug: "amaro", startDate: "", endDate: "" }),
+      refreshInsightsSnapshot(env, { slug: "amaro", startDate: today, endDate: today }),
+      refreshInsightsSnapshot(env, { slug: "amaro", startDate: daysAgoIso(6), endDate: today }),
+    ]));
   },
 };
 
@@ -184,21 +202,39 @@ function assertOwner(params, request, env) {
   }
 }
 
-function insightsCacheRequest(request) {
-  if (request.method !== "GET") return null;
-  const url = new URL(request.url);
-  if (url.searchParams.get("callback")) return null;
-  const action = url.searchParams.get("action") || "health";
-  if (action !== "getInsights") return null;
-  const cacheUrl = new URL(url.origin + url.pathname);
-  cacheUrl.searchParams.set("action", "getInsights");
-  cacheUrl.searchParams.set("slug", normalizeSlug(url.searchParams.get("slug") || "amaro"));
-  cacheUrl.searchParams.set("cache_version", ANALYTICS_CACHE_VERSION);
-  const startDate = normalizeDate(url.searchParams.get("startDate") || url.searchParams.get("start_date"));
-  const endDate = normalizeDate(url.searchParams.get("endDate") || url.searchParams.get("end_date"));
-  if (startDate) cacheUrl.searchParams.set("startDate", startDate);
-  if (endDate) cacheUrl.searchParams.set("endDate", endDate);
-  return new Request(cacheUrl.toString(), { method: "GET" });
+function insightsSnapshotKey(filters) {
+  return [
+    "insights",
+    ANALYTICS_CACHE_VERSION,
+    normalizeSlug(filters.slug || "amaro"),
+    normalizeDate(filters.startDate) || "all",
+    normalizeDate(filters.endDate) || "all",
+  ].join(":");
+}
+
+async function readInsightsSnapshot(env, key) {
+  if (!env.INSIGHTS_CACHE) return null;
+  try {
+    return await env.INSIGHTS_CACHE.get(key, "json");
+  } catch (error) {
+    console.warn("QrStack insights snapshot read failed", { key, error: error?.message || String(error) });
+    return null;
+  }
+}
+
+async function refreshInsightsSnapshot(env, filters, key = insightsSnapshotKey(filters)) {
+  const insights = await getCombinedInsights(env, filters);
+  const slug = normalizeSlug(filters.slug || "amaro");
+  const snapshot = {
+    ok: true,
+    restaurant: { slug, name: insights.restaurant_name || slug },
+    insights,
+    generated_at: insights.collected_at || new Date().toISOString(),
+  };
+  if (env.INSIGHTS_CACHE) {
+    await env.INSIGHTS_CACHE.put(key, JSON.stringify(snapshot));
+  }
+  return snapshot;
 }
 
 async function getRestaurant(db, slug) {

@@ -111,3 +111,7 @@ O D1 e o armazenamento primario dos eventos. Se uma gravacao falhar por banco ch
 ## 10. Calendario dos Insights
 
 Os indicadores diarios usam o fuso `America/Recife`. Cada data cobre as 24 horas locais, de `00:00:00` ate o instante anterior a `00:00:00` do dia seguinte. Eventos tecnicos recuperados permanecem armazenados, mas nao sao contados duas vezes quando o `page_view` real da mesma sessao existe.
+
+## 11. Carregamento rapido dos Insights
+
+O Worker salva o ultimo snapshot real dos Insights no KV `INSIGHTS_CACHE`. Um Cron Trigger atualiza o painel padrao do Amaro a cada cinco minutos. A plataforma recebe o snapshot pronto imediatamente; se ele estiver atrasado, continua exibindo a leitura valida enquanto o Worker recalcula os D1 em segundo plano.

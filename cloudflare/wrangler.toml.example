@@ -7,6 +7,13 @@ workers_dev = true
 OWNER_ACCESS_TOKEN = "troque-por-sua-chave-da-central"
 SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/SEU_DEPLOY_DO_APPS_SCRIPT/exec"
 
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[kv_namespaces]]
+binding = "INSIGHTS_CACHE"
+id = "cole-o-namespace-id-do-kv-aqui"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "qrstack-db"
