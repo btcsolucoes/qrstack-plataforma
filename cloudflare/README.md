@@ -107,3 +107,7 @@ O D1 e o armazenamento primario dos eventos. Se uma gravacao falhar por banco ch
 - O `id` original do navegador e anexado a `source_detail` como `qrstack_event_id=<id>` para permitir deduplicacao em uma importacao futura.
 - Erros de validacao e falhas comuns nao acionam o fallback; nesses casos, a fila local do cardapio continua tentando.
 - Nenhuma linha existente no D1 ou no Google Sheets e removida pelo mecanismo.
+
+## 10. Calendario dos Insights
+
+Os indicadores diarios usam o fuso `America/Recife`. Cada data cobre as 24 horas locais, de `00:00:00` ate o instante anterior a `00:00:00` do dia seguinte. Eventos tecnicos recuperados permanecem armazenados, mas nao sao contados duas vezes quando o `page_view` real da mesma sessao existe.

@@ -15,6 +15,8 @@ const CORS_HEADERS = {
 };
 
 const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec";
+const ANALYTICS_CACHE_VERSION = "v4-recife-calendar";
+const BUSINESS_TIME_ZONE = "America/Recife";
 
 const EVENT_COLUMNS = [
   "id", "restaurant_id", "restaurant_slug", "menu_day_id", "event_type", "source",
@@ -39,7 +41,7 @@ export default {
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v3-sheet-fallback",
+          version: "archive-live-v4-recife-calendar",
           fallback_storage: "google_sheets",
         });
       }
@@ -191,6 +193,7 @@ function insightsCacheRequest(request) {
   const cacheUrl = new URL(url.origin + url.pathname);
   cacheUrl.searchParams.set("action", "getInsights");
   cacheUrl.searchParams.set("slug", normalizeSlug(url.searchParams.get("slug") || "amaro"));
+  cacheUrl.searchParams.set("cache_version", ANALYTICS_CACHE_VERSION);
   const startDate = normalizeDate(url.searchParams.get("startDate") || url.searchParams.get("start_date"));
   const endDate = normalizeDate(url.searchParams.get("endDate") || url.searchParams.get("end_date"));
   if (startDate) cacheUrl.searchParams.set("startDate", startDate);
@@ -857,14 +860,19 @@ function periodLabel(startDate, endDate) {
   return `${startDate || "início"} até ${endDate || todayIso()}`;
 }
 
-function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+function todayIso(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: BUSINESS_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 function daysAgoIso(days) {
-  const date = new Date();
-  date.setUTCDate(date.getUTCDate() - Number(days || 0));
-  return date.toISOString().slice(0, 10);
+  return addDays(todayIso(), -Number(days || 0));
 }
 
 function addDays(isoDate, days) {
