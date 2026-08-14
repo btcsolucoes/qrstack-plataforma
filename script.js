@@ -1569,7 +1569,7 @@ async function renderClientPortal(slug, version) {
               <textarea id="notes" name="notes" placeholder="Observações do dia">${menu.notes || ""}</textarea>
             </div>
             <div class="actions field--full">
-              <button type="submit">Enviar e abrir Instagram</button>
+              <button type="submit">Enviar e publicar Story</button>
             </div>
           </form>
         </section>
@@ -1581,6 +1581,10 @@ async function renderClientPortal(slug, version) {
           </div>
           <div class="story-workbench">
             <div class="card">
+              <div class="story-automation-status" id="story-automation-status" aria-live="polite">
+                <span class="status-pill">Automação pronta</span>
+                <p>Ao enviar o formulário, a arte entra na fila segura do telefone QrStack.</p>
+              </div>
               <h3>Link do Story</h3>
               <div class="field">
                 <label for="storyLink">Hyperlink</label>
@@ -1588,7 +1592,7 @@ async function renderClientPortal(slug, version) {
               </div>
               <div class="actions">
                 <button type="button" id="download-story">Baixar Story</button>
-                <button type="button" class="secondary" id="share-story">Compartilhar Story</button>
+                <button type="button" class="secondary" id="share-story">Compartilhar manualmente</button>
                 <button type="button" class="ghost" data-copy-input="storyLink">Copiar link do Story</button>
               </div>
             </div>
@@ -1710,20 +1714,20 @@ function attachClientHandlers(restaurant, menu) {
       if (event.target.matches('select[name^="prato_"]')) syncUniqueMenuSelections(menuForm);
     });
   }
-  menuForm.addEventListener("submit", (event) => {
+  menuForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (event.currentTarget.dataset.submitting === "true") return;
     event.currentTarget.dataset.submitting = "true";
     const submitButton = event.currentTarget.querySelector('button[type="submit"]');
     if (submitButton) {
       submitButton.disabled = true;
-      submitButton.textContent = "Abrindo Instagram...";
+      submitButton.textContent = "Preparando publicação...";
     }
     if (restaurant.slug === "amaro" && hasRepeatedMenuSelections(event.currentTarget)) {
       delete event.currentTarget.dataset.submitting;
       if (submitButton) {
         submitButton.disabled = false;
-        submitButton.textContent = "Enviar e abrir Instagram";
+        submitButton.textContent = "Enviar e publicar Story";
       }
       toast("Cada prato pode ser escolhido apenas uma vez.");
       return;
@@ -1732,34 +1736,36 @@ function attachClientHandlers(restaurant, menu) {
     const storyLinkInput = document.querySelector('[name="storyLink"]');
     formData.set("storyLink", storyLinkInput?.value || restaurantStoryLink(restaurant));
     const submission = getMenuSubmission(restaurant, formData);
-    if (submission.isRepeated) {
-      toast("Esta resposta já foi enviada. Abrindo o Story sem duplicar o formulário.");
-      const latestMenu = getLatestMenu(restaurant.id);
-      shareStory(restaurant, latestMenu).finally(() => {
-        delete event.currentTarget.dataset.submitting;
-        if (!submitButton || !document.body.contains(submitButton)) return;
-        submitButton.disabled = false;
-        submitButton.textContent = "Enviar e abrir Instagram";
-      });
-      return;
-    }
-    rememberMenuSubmission(submission.storageKey, submission.signature, "pending");
-    const saveRequest = saveMenuForm(restaurant, menu.id, formData);
-    const updatedMenu = getLatestMenu(restaurant.id);
-    drawStory(restaurant, updatedMenu, getMenuItems(updatedMenu.id));
-    saveStoryPreview(restaurant, updatedMenu);
-    trackEvent(restaurant, "story_shared", "admin", updatedMenu.id);
-    const shareRequest = shareStory(restaurant, updatedMenu);
-    saveRequest.then((result) => {
-      if (result?.ok) rememberMenuSubmission(submission.storageKey, submission.signature, "saved");
-      else forgetMenuSubmission(submission.storageKey, submission.signature);
-    });
-    Promise.allSettled([saveRequest, shareRequest]).finally(() => {
+    try {
+      if (!submission.isRepeated) {
+        rememberMenuSubmission(submission.storageKey, submission.signature, "pending");
+        const saveResult = await saveMenuForm(restaurant, menu.id, formData);
+        if (!saveResult?.ok) {
+          forgetMenuSubmission(submission.storageKey, submission.signature);
+          throw new Error("menu_save_failed");
+        }
+        rememberMenuSubmission(submission.storageKey, submission.signature, "saved");
+      } else {
+        toast("Esta resposta já foi salva. A fila não criará uma publicação duplicada.");
+      }
+
+      const updatedMenu = getLatestMenu(restaurant.id);
+      await drawStory(restaurant, updatedMenu, getMenuItems(updatedMenu.id));
+      saveStoryPreview(restaurant, updatedMenu);
+      const job = await queueStoryPublication(restaurant, updatedMenu, submission.signature);
+      trackEvent(restaurant, "story_queued", "admin", updatedMenu.id);
+      document.getElementById("story-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      toast(job?.duplicate ? "Publicação já estava na fila." : "Story enviado ao telefone QrStack.");
+    } catch (error) {
+      console.warn("QrStack automated Story queue unavailable:", error);
+      setStoryAutomationStatus("failed_attention", "A fila automática não respondeu. Use o compartilhamento manual como contingência.");
+      toast("Não foi possível colocar o Story na fila automática.");
+    } finally {
       delete event.currentTarget.dataset.submitting;
       if (!submitButton || !document.body.contains(submitButton)) return;
       submitButton.disabled = false;
-      submitButton.textContent = "Enviar e abrir Instagram";
-    });
+      submitButton.textContent = "Enviar e publicar Story";
+    }
   });
 
   document.querySelector('[name="storyLink"]').addEventListener("input", (event) => {
@@ -1861,6 +1867,90 @@ function saveStoryPreview(restaurant, menu) {
   }).catch((error) => console.warn("QrStack story API unavailable:", error.message));
   trackEvent(restaurant, "story_generated", "admin", menu.id);
   saveState();
+}
+
+async function queueStoryPublication(restaurant, menu, submissionSignature) {
+  const imageBase64 = String(lastStoryDataUrl || "").split(",")[1] || "";
+  if (!imageBase64) throw new Error("story_canvas_not_ready");
+  setStoryAutomationStatus("pending", "Enviando a arte para o telefone QrStack...");
+  const response = await apiPost({
+    action: "createStoryJob",
+    slug: restaurant.slug,
+    token: restaurant.adminToken || ACTIVE_CLIENT_TOKEN,
+    menu_day_id: menu.id,
+    story_link: menu.storyLink || restaurantStoryLink(restaurant),
+    content_type: "image/png",
+    image_base64: imageBase64,
+    client_request_id: `${restaurant.slug}:${menu.date}:${submissionSignature}`,
+  });
+  const job = response.job;
+  if (!job?.id) throw new Error("story_job_missing");
+  setStoryAutomationStatus(job.status, storyJobMessage(job));
+  pollStoryPublication(restaurant, job.id);
+  return { ...job, duplicate: response.duplicate === true };
+}
+
+function pollStoryPublication(restaurant, jobId, attempt = 0) {
+  window.setTimeout(async () => {
+    if (!document.getElementById("story-automation-status")) return;
+    try {
+      const data = await apiGet("getStoryJob", {
+        slug: restaurant.slug,
+        token: restaurant.adminToken || ACTIVE_CLIENT_TOKEN,
+        job: jobId,
+      });
+      const job = data.job;
+      if (!job) throw new Error("story_job_not_found");
+      setStoryAutomationStatus(job.status, storyJobMessage(job));
+      if (job.status === "completed") {
+        trackEvent(restaurant, "story_published", "agent", job.menu_day_id);
+        toast("Story publicado pelo telefone QrStack.");
+        return;
+      }
+      if (job.status === "failed_attention") return;
+      pollStoryPublication(restaurant, jobId, 0);
+    } catch (error) {
+      const nextAttempt = attempt + 1;
+      setStoryAutomationStatus("syncing", "Telefone trabalhando. Reconectando ao acompanhamento...");
+      if (nextAttempt < 20) pollStoryPublication(restaurant, jobId, nextAttempt);
+    }
+  }, attempt ? Math.min(15000, 2500 + attempt * 800) : 2500);
+}
+
+function setStoryAutomationStatus(status, message) {
+  const target = document.getElementById("story-automation-status");
+  if (!target) return;
+  const labels = {
+    pending: "Na fila",
+    claimed: "Telefone conectado",
+    preparing: "Preparando",
+    publishing: "Publicando",
+    paused_interruption: "Pausado com segurança",
+    retry: "Retomando",
+    completed: "Publicado",
+    failed_attention: "Conferência necessária",
+    syncing: "Sincronizando",
+  };
+  target.dataset.status = status || "pending";
+  target.innerHTML = `
+    <span class="status-pill">${labels[status] || "Automação"}</span>
+    <p>${message || "Aguardando atualização do telefone QrStack."}</p>
+  `;
+}
+
+function storyJobMessage(job) {
+  const checkpoint = String(job?.checkpoint || "").replaceAll("_", " ");
+  const messages = {
+    pending: "Arte recebida. Aguardando o telefone QrStack assumir a publicação.",
+    claimed: "O telefone recebeu a publicação e vai preparar a arte.",
+    preparing: "Arte sendo salva com segurança na galeria do telefone.",
+    publishing: `Instagram em operação${checkpoint ? `: ${checkpoint}` : ""}.`,
+    paused_interruption: "Uma ligação ou outra tela interrompeu o fluxo. A retomada será automática, sem duplicar a postagem.",
+    retry: "O telefone está retomando do último ponto seguro.",
+    completed: "Story publicado e confirmado visualmente no Instagram.",
+    failed_attention: job?.last_error || "O Instagram mudou de tela e precisa de conferência manual.",
+  };
+  return messages[job?.status] || "Acompanhando a publicação no telefone QrStack.";
 }
 
 async function saveMenuForm(restaurant, menuId, formData) {

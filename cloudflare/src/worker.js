@@ -18,6 +18,9 @@ const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm
 const ANALYTICS_CACHE_VERSION = "v5-persistent-snapshot";
 const BUSINESS_TIME_ZONE = "America/Recife";
 const INSIGHTS_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 1000;
+const STORY_MEDIA_TTL_SECONDS = 48 * 60 * 60;
+const STORY_MEDIA_MAX_BYTES = 6 * 1024 * 1024;
+const STORY_ACTIVE_STATUSES = ["claimed", "preparing", "publishing", "paused_interruption"];
 
 const EVENT_COLUMNS = [
   "id", "restaurant_id", "restaurant_slug", "menu_day_id", "event_type", "source",
@@ -42,8 +45,9 @@ export default {
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v5-fast-insights",
+          version: "archive-live-v6-story-agent",
           fallback_storage: "google_sheets",
+          story_automation: true,
         });
       }
 
@@ -129,6 +133,36 @@ export default {
         return json({ ok: true, ...(await saveMenuDay(env.DB, payload)) });
       }
 
+      if (action === "registerStoryAgent") {
+        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+        assertOwner(url.searchParams, request, env, payload.owner_key || payload.ownerKey);
+        return json({ ok: true, agent: await registerStoryAgent(env.DB, payload) }, 201);
+      }
+
+      if (action === "createStoryJob") {
+        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+        return json({ ok: true, ...(await createStoryJob(env, payload, request)) }, 201);
+      }
+
+      if (action === "getNextStoryJob") {
+        const result = await claimNextStoryJob(env.DB, request, url);
+        return jsonp(url, { ok: true, ...result }, 200, JSON_HEADERS);
+      }
+
+      if (action === "updateStoryJob") {
+        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+        return json({ ok: true, job: await updateStoryJob(env.DB, payload, request) });
+      }
+
+      if (action === "getStoryJob") {
+        const job = await getStoryJobForRestaurant(env.DB, url.searchParams);
+        return jsonp(url, { ok: true, job }, 200, JSON_HEADERS);
+      }
+
+      if (action === "getStoryMedia") {
+        return getStoryMedia(env, url);
+      }
+
       return jsonp(url, { ok: false, error: "unknown_action", action }, 404);
     } catch (error) {
       return json({ ok: false, error: error.message || String(error) }, error.status || 500);
@@ -201,9 +235,9 @@ async function readPayload(request) {
   }
 }
 
-function assertOwner(params, request, env) {
+function assertOwner(params, request, env, bodyKey = "") {
   const expected = env.OWNER_ACCESS_TOKEN || "qrstack-berna-2026";
-  const received = params.get("key") || params.get("owner_key") || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+  const received = bodyKey || params.get("key") || params.get("owner_key") || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
   if (!received || received !== expected) {
     const error = new Error("unauthorized");
     error.status = 401;
@@ -577,6 +611,238 @@ function mergeNumberMaps(maps) {
     });
     return merged;
   }, {});
+}
+
+async function registerStoryAgent(db, payload) {
+  const deviceId = cleanIdentifier(payload.device_id || payload.deviceId, 100);
+  const deviceToken = String(payload.device_token || payload.deviceToken || "").trim();
+  const label = String(payload.label || "Telefone QrStack").trim().slice(0, 120);
+  const appVersion = String(payload.app_version || payload.appVersion || "").trim().slice(0, 40);
+  if (!deviceId || deviceToken.length < 32) throw httpError("invalid_agent_credentials", 400);
+  const now = new Date().toISOString();
+  const tokenHash = await sha256Hex(deviceToken);
+  await db.prepare(`
+    INSERT INTO story_agents (
+      device_id, label, token_hash, platform, app_version, is_active,
+      last_seen_at, created_at, updated_at
+    ) VALUES (?, ?, ?, 'android', ?, 1, ?, ?, ?)
+    ON CONFLICT(device_id) DO UPDATE SET
+      label = excluded.label,
+      token_hash = excluded.token_hash,
+      app_version = excluded.app_version,
+      is_active = 1,
+      last_seen_at = excluded.last_seen_at,
+      updated_at = excluded.updated_at
+  `).bind(deviceId, label, tokenHash, appVersion, now, now, now).run();
+  return { device_id: deviceId, label, platform: "android", app_version: appVersion, registered_at: now };
+}
+
+async function createStoryJob(env, payload) {
+  const slug = normalizeSlug(payload.slug || "amaro");
+  const restaurant = await requireRestaurant(env.DB, slug);
+  assertRestaurantToken(restaurant, payload.token);
+  const menuDayId = String(payload.menu_day_id || payload.menuDayId || "").trim().slice(0, 160);
+  const storyLink = String(payload.story_link || payload.storyLink || restaurant.story_link || "").trim();
+  const clientRequestId = cleanIdentifier(payload.client_request_id || payload.clientRequestId, 160);
+  const base64 = String(payload.image_base64 || payload.imageBase64 || "").replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "");
+  if (!storyLink || !base64) throw httpError("missing_story_payload", 400);
+
+  if (clientRequestId) {
+    const existing = await env.DB.prepare(`
+      SELECT * FROM story_publish_jobs
+      WHERE restaurant_id = ? AND client_request_id = ?
+      LIMIT 1
+    `).bind(restaurant.id, clientRequestId).first();
+    if (existing) return { job: publicStoryJob(existing), duplicate: true };
+  }
+
+  const media = decodeBase64(base64);
+  if (!media.byteLength || media.byteLength > STORY_MEDIA_MAX_BYTES) throw httpError("invalid_story_media_size", 413);
+  const contentType = String(payload.content_type || payload.contentType || "image/png").toLowerCase();
+  if (!/^image\/(png|jpeg|webp)$/.test(contentType)) throw httpError("invalid_story_media_type", 415);
+
+  const jobId = `story_${crypto.randomUUID()}`;
+  const mediaToken = crypto.randomUUID().replaceAll("-", "") + crypto.randomUUID().replaceAll("-", "");
+  const mediaKey = `story-media/${slug}/${jobId}`;
+  const now = new Date().toISOString();
+  await env.INSIGHTS_CACHE.put(mediaKey, media, {
+    expirationTtl: STORY_MEDIA_TTL_SECONDS,
+    metadata: { contentType, restaurant: slug, jobId },
+  });
+
+  await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO story_publish_jobs (
+        id, restaurant_id, restaurant_slug, menu_day_id, story_link,
+        media_key, media_token, status, checkpoint, client_request_id,
+        queued_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'queued', ?, ?, ?, ?)
+    `).bind(
+      jobId, restaurant.id, slug, menuDayId, storyLink,
+      mediaKey, mediaToken, clientRequestId || null, now, now, now
+    ),
+    env.DB.prepare(`
+      INSERT INTO story_job_events (id, job_id, event_type, checkpoint, detail, created_at)
+      VALUES (?, ?, 'queued', 'queued', 'Story recebido pela plataforma', ?)
+    `).bind(`story_event_${crypto.randomUUID()}`, jobId, now),
+  ]);
+  return { job: publicStoryJob(await getStoryJobById(env.DB, jobId)), duplicate: false };
+}
+
+async function claimNextStoryJob(db, request, url) {
+  const deviceId = cleanIdentifier(url.searchParams.get("device_id") || url.searchParams.get("deviceId"), 100);
+  const agent = await assertStoryAgent(db, deviceId, bearerToken(request));
+  const activePlaceholders = STORY_ACTIVE_STATUSES.map(() => "?").join(", ");
+  let job = await db.prepare(`
+    SELECT * FROM story_publish_jobs
+    WHERE assigned_device_id = ? AND status IN (${activePlaceholders})
+    ORDER BY updated_at DESC LIMIT 1
+  `).bind(deviceId, ...STORY_ACTIVE_STATUSES).first();
+
+  if (!job) {
+    const candidate = await db.prepare(`
+      SELECT * FROM story_publish_jobs
+      WHERE status IN ('pending', 'retry')
+      ORDER BY queued_at ASC LIMIT 1
+    `).first();
+    if (candidate) {
+      const now = new Date().toISOString();
+      const claim = await db.prepare(`
+        UPDATE story_publish_jobs
+        SET status = 'claimed', checkpoint = 'claimed', assigned_device_id = ?,
+            attempts = attempts + 1, claimed_at = COALESCE(claimed_at, ?), updated_at = ?
+        WHERE id = ? AND status IN ('pending', 'retry')
+      `).bind(deviceId, now, now, candidate.id).run();
+      if (Number(claim.meta?.changes || 0) > 0) {
+        await appendStoryJobEvent(db, candidate.id, deviceId, "claimed", "claimed", `Agente ${agent.label} assumiu a publicação`);
+        job = await getStoryJobById(db, candidate.id);
+      }
+    }
+  }
+
+  await db.prepare("UPDATE story_agents SET last_seen_at = ?, updated_at = ? WHERE device_id = ?")
+    .bind(new Date().toISOString(), new Date().toISOString(), deviceId).run();
+  if (!job) return { job: null, poll_after_seconds: 12 };
+  const mediaUrl = new URL(request.url);
+  mediaUrl.search = "";
+  mediaUrl.searchParams.set("action", "getStoryMedia");
+  mediaUrl.searchParams.set("job", job.id);
+  mediaUrl.searchParams.set("token", job.media_token);
+  return { job: { ...publicStoryJob(job), media_url: mediaUrl.toString() }, poll_after_seconds: 3 };
+}
+
+async function updateStoryJob(db, payload, request) {
+  const deviceId = cleanIdentifier(payload.device_id || payload.deviceId, 100);
+  await assertStoryAgent(db, deviceId, bearerToken(request));
+  const jobId = cleanIdentifier(payload.job_id || payload.jobId, 160);
+  const status = String(payload.status || "").trim().toLowerCase();
+  const checkpoint = cleanIdentifier(payload.checkpoint || status, 100) || "unknown";
+  const detail = String(payload.detail || payload.error || "").trim().slice(0, 1000);
+  const allowed = new Set(["claimed", "preparing", "publishing", "paused_interruption", "retry", "completed", "failed_attention"]);
+  if (!jobId || !allowed.has(status)) throw httpError("invalid_story_job_update", 400);
+  const current = await getStoryJobById(db, jobId);
+  if (!current || current.assigned_device_id !== deviceId) throw httpError("story_job_not_assigned", 409);
+  const now = new Date().toISOString();
+  const startedAt = ["preparing", "publishing"].includes(status) ? now : current.started_at;
+  const completedAt = status === "completed" ? now : current.completed_at;
+  await db.prepare(`
+    UPDATE story_publish_jobs
+    SET status = ?, checkpoint = ?, last_error = ?,
+        interruption_count = interruption_count + ?,
+        started_at = COALESCE(started_at, ?), completed_at = ?, updated_at = ?
+    WHERE id = ? AND assigned_device_id = ?
+  `).bind(
+    status, checkpoint, status === "failed_attention" ? detail : null,
+    status === "paused_interruption" ? 1 : 0,
+    startedAt || null, completedAt || null, now, jobId, deviceId
+  ).run();
+  await appendStoryJobEvent(db, jobId, deviceId, status, checkpoint, detail);
+  return publicStoryJob(await getStoryJobById(db, jobId));
+}
+
+async function getStoryJobForRestaurant(db, params) {
+  const slug = normalizeSlug(params.get("slug") || "amaro");
+  const restaurant = await requireRestaurant(db, slug);
+  assertRestaurantToken(restaurant, params.get("token"));
+  const jobId = cleanIdentifier(params.get("job") || params.get("job_id"), 160);
+  const row = jobId
+    ? await db.prepare("SELECT * FROM story_publish_jobs WHERE id = ? AND restaurant_id = ? LIMIT 1").bind(jobId, restaurant.id).first()
+    : await db.prepare("SELECT * FROM story_publish_jobs WHERE restaurant_id = ? ORDER BY created_at DESC LIMIT 1").bind(restaurant.id).first();
+  return row ? publicStoryJob(row) : null;
+}
+
+async function getStoryMedia(env, url) {
+  const jobId = cleanIdentifier(url.searchParams.get("job"), 160);
+  const token = String(url.searchParams.get("token") || "");
+  const job = jobId ? await getStoryJobById(env.DB, jobId) : null;
+  if (!job || !token || token !== job.media_token) return json({ ok: false, error: "unauthorized" }, 401);
+  const object = await env.INSIGHTS_CACHE.getWithMetadata(job.media_key, "arrayBuffer");
+  if (!object?.value) return json({ ok: false, error: "story_media_expired" }, 410);
+  return new Response(object.value, {
+    headers: {
+      "content-type": object.metadata?.contentType || "image/png",
+      "cache-control": "private, max-age=300",
+      "content-disposition": `inline; filename="${job.restaurant_slug}-${job.id}.png"`,
+    },
+  });
+}
+
+async function assertStoryAgent(db, deviceId, token) {
+  if (!deviceId || !token) throw httpError("unauthorized_agent", 401);
+  const agent = await db.prepare("SELECT * FROM story_agents WHERE device_id = ? AND is_active = 1 LIMIT 1")
+    .bind(deviceId).first();
+  if (!agent || (await sha256Hex(token)) !== agent.token_hash) throw httpError("unauthorized_agent", 401);
+  return agent;
+}
+
+async function appendStoryJobEvent(db, jobId, deviceId, eventType, checkpoint, detail = "") {
+  await db.prepare(`
+    INSERT INTO story_job_events (id, job_id, device_id, event_type, checkpoint, detail, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    `story_event_${crypto.randomUUID()}`, jobId, deviceId || null,
+    eventType, checkpoint || null, String(detail || "").slice(0, 1000), new Date().toISOString()
+  ).run();
+}
+
+function getStoryJobById(db, jobId) {
+  return db.prepare("SELECT * FROM story_publish_jobs WHERE id = ? LIMIT 1").bind(jobId).first();
+}
+
+function publicStoryJob(job) {
+  if (!job) return null;
+  const { media_key, media_token, ...safe } = job;
+  return safe;
+}
+
+function decodeBase64(value) {
+  try {
+    const binary = atob(value.replace(/\s/g, ""));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  } catch {
+    throw httpError("invalid_story_media", 400);
+  }
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value)));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function bearerToken(request) {
+  return String(request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
+}
+
+function cleanIdentifier(value, maxLength = 160) {
+  return String(value || "").trim().replace(/[^a-zA-Z0-9._:-]/g, "").slice(0, maxLength);
+}
+
+function httpError(message, status) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
 }
 
 async function getCatalog(db, slug) {

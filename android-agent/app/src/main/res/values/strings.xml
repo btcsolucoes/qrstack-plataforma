@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">QrStack Agent</string>
+    <string name="accessibility_description">Publica a arte já aprovada no Story do Instagram e pausa quando outra tela interrompe a operação. Não lê mensagens nem o conteúdo de notificações.</string>
+</resources>

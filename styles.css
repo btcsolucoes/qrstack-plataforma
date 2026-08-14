@@ -1457,6 +1457,42 @@ textarea {
   align-items: start;
 }
 
+.story-automation-status {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 22px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--primary) 18%, transparent);
+  border-left: 4px solid var(--primary);
+  background: color-mix(in srgb, var(--primary) 5%, white);
+}
+
+.story-automation-status .status-pill {
+  width: fit-content;
+}
+
+.story-automation-status p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.story-automation-status[data-status="completed"] {
+  border-left-color: #168668;
+  background: #eefaf6;
+}
+
+.story-automation-status[data-status="paused_interruption"],
+.story-automation-status[data-status="syncing"] {
+  border-left-color: #d68d1f;
+  background: #fff8e9;
+}
+
+.story-automation-status[data-status="failed_attention"] {
+  border-left-color: #b84747;
+  background: #fff2f2;
+}
+
 .story-frame {
   width: min(100%, 390px);
   aspect-ratio: 9 / 16;
