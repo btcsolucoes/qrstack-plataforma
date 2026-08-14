@@ -75,6 +75,7 @@ const DEFAULT_STATE = {
 
 const STORE_KEY = "qrstack-platform-v4-amaro";
 const INSIGHTS_CACHE_KEY = "qrstack-insights-html-cache-v2";
+const MENU_SUBMISSION_PREFIX = "qrstack:menu-submission:";
 const insightsOpenedThisSession = new Set();
 const app = document.getElementById("app");
 let state = loadState();
@@ -1701,6 +1702,8 @@ function renderAmaroOriginalForm(menuItems) {
 function attachClientHandlers(restaurant, menu) {
   document.getElementById("menu-form").addEventListener("submit", (event) => {
     event.preventDefault();
+    if (event.currentTarget.dataset.submitting === "true") return;
+    event.currentTarget.dataset.submitting = "true";
     const submitButton = event.currentTarget.querySelector('button[type="submit"]');
     if (submitButton) {
       submitButton.disabled = true;
@@ -1709,13 +1712,31 @@ function attachClientHandlers(restaurant, menu) {
     const formData = new FormData(event.currentTarget);
     const storyLinkInput = document.querySelector('[name="storyLink"]');
     formData.set("storyLink", storyLinkInput?.value || restaurantStoryLink(restaurant));
+    const submission = getMenuSubmission(restaurant, formData);
+    if (submission.isRepeated) {
+      toast("Esta resposta já foi enviada. Abrindo o Story sem duplicar o formulário.");
+      const latestMenu = getLatestMenu(restaurant.id);
+      shareStory(restaurant, latestMenu).finally(() => {
+        delete event.currentTarget.dataset.submitting;
+        if (!submitButton || !document.body.contains(submitButton)) return;
+        submitButton.disabled = false;
+        submitButton.textContent = "Enviar e abrir Instagram";
+      });
+      return;
+    }
+    rememberMenuSubmission(submission.storageKey, submission.signature, "pending");
     const saveRequest = saveMenuForm(restaurant, menu.id, formData);
     const updatedMenu = getLatestMenu(restaurant.id);
     drawStory(restaurant, updatedMenu, getMenuItems(updatedMenu.id));
     saveStoryPreview(restaurant, updatedMenu);
     trackEvent(restaurant, "story_shared", "admin", updatedMenu.id);
     const shareRequest = shareStory(restaurant, updatedMenu);
+    saveRequest.then((result) => {
+      if (result?.ok) rememberMenuSubmission(submission.storageKey, submission.signature, "saved");
+      else forgetMenuSubmission(submission.storageKey, submission.signature);
+    });
     Promise.allSettled([saveRequest, shareRequest]).finally(() => {
+      delete event.currentTarget.dataset.submitting;
       if (!submitButton || !document.body.contains(submitButton)) return;
       submitButton.disabled = false;
       submitButton.textContent = "Enviar e abrir Instagram";
@@ -1740,6 +1761,49 @@ function attachClientHandlers(restaurant, menu) {
     await shareStory(restaurant, latestMenu);
     trackEvent(restaurant, "story_shared", "admin", latestMenu.id);
   });
+}
+
+function getMenuSubmission(restaurant, formData) {
+  const date = String(formData.get("date") || todayIso()).slice(0, 10);
+  const storageKey = `${MENU_SUBMISSION_PREFIX}${restaurant.slug}:${date}`;
+  const values = [...formData.entries()]
+    .map(([key, value]) => [String(key), String(value || "").trim()])
+    .sort(([keyA], [keyB]) => keyA.localeCompare(keyB));
+  const signature = simpleHash(JSON.stringify(values));
+  let previous = null;
+  try {
+    previous = JSON.parse(localStorage.getItem(storageKey) || "null");
+  } catch {
+    previous = null;
+  }
+  const pendingIsCurrent = previous?.status !== "pending" || Date.now() - Number(previous.savedAt || 0) < 120000;
+  return {
+    storageKey,
+    signature,
+    isRepeated: previous?.signature === signature && pendingIsCurrent,
+  };
+}
+
+function rememberMenuSubmission(storageKey, signature, status) {
+  localStorage.setItem(storageKey, JSON.stringify({ signature, status, savedAt: Date.now() }));
+}
+
+function forgetMenuSubmission(storageKey, signature) {
+  try {
+    const current = JSON.parse(localStorage.getItem(storageKey) || "null");
+    if (current?.signature === signature) localStorage.removeItem(storageKey);
+  } catch {
+    localStorage.removeItem(storageKey);
+  }
+}
+
+function simpleHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function saveStoryPreview(restaurant, menu) {
@@ -1785,7 +1849,7 @@ async function saveMenuForm(restaurant, menuId, formData) {
   saveState();
 
   try {
-    await apiPost({
+    const response = await apiPost({
       action: "saveMenuDay",
       slug: restaurant.slug,
       token: restaurant.adminToken || ACTIVE_CLIENT_TOKEN,
@@ -1806,8 +1870,10 @@ async function saveMenuForm(restaurant, menuId, formData) {
           price: menuItem.price,
         })),
     });
+    return { ok: true, duplicate: response.duplicate === true };
   } catch (error) {
     console.warn("QrStack save API unavailable:", error.message);
+    return { ok: false, error };
   }
 }
 

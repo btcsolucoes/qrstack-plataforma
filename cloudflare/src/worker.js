@@ -616,6 +616,32 @@ async function saveMenuDay(db, payload) {
   const now = new Date().toISOString();
   const rawItems = Array.isArray(payload.items) ? payload.items : [];
   const items = rawItems.slice(0, 30).filter((item) => item && String(item.name || "").trim());
+  const incomingMenu = {
+    title: String(payload.title || "Cardápio de hoje"),
+    price: String(payload.price || ""),
+    service_hours: String(payload.service_hours || payload.serviceHours || ""),
+    story_link: String(payload.story_link || payload.storyLink || restaurant.story_link || ""),
+    notes: String(payload.notes || ""),
+  };
+  const incomingItems = items.map((item, index) => ({
+    name: String(item.name),
+    category: String(item.category || "Executivo"),
+    description: String(item.description || ""),
+    price: String(item.price || ""),
+    image_url: String(item.image_url || item.imageUrl || ""),
+    is_highlight: toBooleanInteger(item.is_highlight ?? item.isHighlight),
+    sort_order: Number(item.sort_order || item.sortOrder || index + 1),
+  }));
+  const existingMenu = await db.prepare("SELECT * FROM menu_days WHERE id = ? AND restaurant_id = ? LIMIT 1")
+    .bind(menuId, restaurant.id).first();
+  if (existingMenu) {
+    const existingItemsResult = await db.prepare("SELECT * FROM menu_items WHERE menu_day_id = ? ORDER BY sort_order, name")
+      .bind(menuId).all();
+    const existingItems = existingItemsResult.results || [];
+    if (menuContentFingerprint(existingMenu, existingItems) === menuContentFingerprint(incomingMenu, incomingItems)) {
+      return { ...(await getMenu(db, slug, date)), duplicate: true };
+    }
+  }
 
   const statements = [
     db.prepare(`
@@ -637,17 +663,17 @@ async function saveMenuDay(db, payload) {
       menuId,
       restaurant.id,
       date,
-      String(payload.title || "Cardápio de hoje"),
-      String(payload.price || ""),
-      String(payload.service_hours || payload.serviceHours || ""),
-      String(payload.story_link || payload.storyLink || restaurant.story_link || ""),
-      String(payload.notes || ""),
+      incomingMenu.title,
+      incomingMenu.price,
+      incomingMenu.service_hours,
+      incomingMenu.story_link,
+      incomingMenu.notes,
       now,
       now,
       now
     ),
     db.prepare("DELETE FROM menu_items WHERE menu_day_id = ?").bind(menuId),
-    ...items.map((item, index) => db.prepare(`
+    ...incomingItems.map((item, index) => db.prepare(`
       INSERT INTO menu_items (
         id, menu_day_id, name, category, description, price, image_url,
         is_highlight, sort_order, created_at
@@ -655,18 +681,38 @@ async function saveMenuDay(db, payload) {
     `).bind(
       `item_${menuId}_${index + 1}_${normalizeKey(item.name).slice(0, 40)}`,
       menuId,
-      String(item.name),
-      String(item.category || "Executivo"),
-      String(item.description || ""),
-      String(item.price || ""),
-      String(item.image_url || item.imageUrl || ""),
-      toBooleanInteger(item.is_highlight ?? item.isHighlight),
-      Number(item.sort_order || item.sortOrder || index + 1),
+      item.name,
+      item.category,
+      item.description,
+      item.price,
+      item.image_url,
+      item.is_highlight,
+      item.sort_order,
       now
     )),
   ];
   await db.batch(statements);
-  return getMenu(db, slug, date);
+  return { ...(await getMenu(db, slug, date)), duplicate: false };
+}
+
+function menuContentFingerprint(menu, items) {
+  const clean = (value) => String(value || "").trim();
+  return JSON.stringify({
+    title: clean(menu.title),
+    price: clean(menu.price),
+    service_hours: clean(menu.service_hours),
+    story_link: clean(menu.story_link),
+    notes: clean(menu.notes),
+    items: (items || []).map((item, index) => ({
+      name: clean(item.name),
+      category: clean(item.category || "Executivo"),
+      description: clean(item.description),
+      price: clean(item.price),
+      image_url: clean(item.image_url),
+      is_highlight: toBooleanInteger(item.is_highlight),
+      sort_order: Number(item.sort_order || index + 1),
+    })),
+  });
 }
 
 function assertRestaurantToken(restaurant, receivedToken) {
