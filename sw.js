@@ -1,4 +1,4 @@
-const CACHE_PURGE_VERSION = "qrstack-platform-network-first-20260709";
+const CACHE_PURGE_VERSION = "qrstack-platform-network-first-20260814-story-retry";
 
 self.addEventListener("install", () => {
   self.skipWaiting();
