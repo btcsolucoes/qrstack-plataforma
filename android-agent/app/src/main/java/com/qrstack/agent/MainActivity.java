@@ -3,7 +3,6 @@ package com.qrstack.agent;
 import android.Manifest;
 import android.app.Activity;
 import android.app.NotificationManager;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -200,10 +199,7 @@ public final class MainActivity extends Activity {
     }
 
     private boolean isAccessibilityEnabled() {
-        ComponentName component = new ComponentName(this, QrStackAccessibilityService.class);
-        String expected = component.flattenToString();
-        String enabled = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-        return enabled != null && enabled.contains(expected);
+        return QrStackAccessibilityService.isEnabled(this);
     }
 
     private void requestNotificationPermission() {
