@@ -14,6 +14,7 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
+import android.provider.Settings;
 
 import org.json.JSONObject;
 
@@ -30,6 +31,7 @@ public final class AgentService extends Service {
     private static final String ALERT_CHANNEL = "qrstack_story_ready";
     private static final int NOTIFICATION_ID = 8142;
     private static final int ALERT_NOTIFICATION_ID = 8143;
+    private static final int ACCESSIBILITY_NOTIFICATION_ID = 8144;
 
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
     private AgentPreferences preferences;
@@ -59,6 +61,7 @@ public final class AgentService extends Service {
             preferences.setShouldRun(false);
             guard.finish();
             cancelReadyAlert();
+            cancelAccessibilityAlert();
             StoryJob job = StoryJob.restore(preferences.activeJobJson());
             if (job == null) {
                 stopSelf();
@@ -162,6 +165,7 @@ public final class AgentService extends Service {
                 preferences.resetJobState();
                 guard.finish();
                 cancelReadyAlert();
+                cancelAccessibilityAlert();
                 updateNotification("Story publicado", job.restaurantSlug);
             }
         });
@@ -187,6 +191,7 @@ public final class AgentService extends Service {
                 preferences.resetJobState();
                 guard.finish();
                 cancelReadyAlert();
+                cancelAccessibilityAlert();
                 updateNotification("Atenção necessária", detail);
             }
         });
@@ -206,12 +211,35 @@ public final class AgentService extends Service {
     }
 
     private void requestInstagramStoryComposer(StoryJob job) {
+        requestInstagramStoryComposer(job, 0);
+    }
+
+    private void requestInstagramStoryComposer(StoryJob job, int attempt) {
         if (!preferences.shouldRun()) return;
         if (QrStackAccessibilityService.requestInstagramStoryComposer(preferences.mediaUri())) {
+            cancelAccessibilityAlert();
             updateNotification("Publicando Story", "Não Perturbe ativo durante a operação");
             return;
         }
-        failForAttention(job, "Ative o serviço de acessibilidade QrStack para abrir o Instagram");
+        if (QrStackAccessibilityService.isEnabled(this) && attempt < 12) {
+            updateNotification("Conectando acessibilidade", "Aguardando o Android liberar o serviço QrStack");
+            executor.schedule(() -> requestInstagramStoryComposer(job, attempt + 1), 750, TimeUnit.MILLISECONDS);
+            return;
+        }
+        pauseForAccessibility(job, QrStackAccessibilityService.isEnabled(this)
+                ? "O Android não reconectou a acessibilidade QrStack"
+                : "A acessibilidade QrStack está desativada");
+    }
+
+    private void pauseForAccessibility(StoryJob job, String detail) {
+        guard.finish();
+        preferences.setCheckpoint("awaiting_accessibility");
+        try {
+            api.updateJob(job, "paused_interruption", "awaiting_accessibility", detail);
+        } catch (Exception ignored) {
+        }
+        showAccessibilityAlert();
+        updateNotification("Acessibilidade aguardando", "Toque em ATIVAR E CONTINUAR");
     }
 
     private void publishPersistedJobNow() {
@@ -298,6 +326,32 @@ public final class AgentService extends Service {
     private void cancelReadyAlert() {
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) manager.cancel(ALERT_NOTIFICATION_ID);
+    }
+
+    private void showAccessibilityAlert() {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager == null) return;
+        Intent settingsIntent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+        settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        PendingIntent settings = PendingIntent.getActivity(this, 5, settingsIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        Intent stopIntent = new Intent(this, AgentService.class).setAction(ACTION_STOP);
+        PendingIntent stop = PendingIntent.getService(this, 6, stopIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        Notification alert = new Notification.Builder(this, ALERT_CHANNEL)
+                .setSmallIcon(R.drawable.ic_qrstack)
+                .setContentTitle("Acessibilidade QrStack precisa reconectar")
+                .setContentText("Ative o serviço e o Story continuará sem criar outro envio.")
+                .setPriority(Notification.PRIORITY_HIGH)
+                .setCategory(Notification.CATEGORY_ERROR)
+                .setOngoing(true)
+                .addAction(0, "ATIVAR E CONTINUAR", settings)
+                .addAction(0, "PARAR", stop)
+                .build();
+        manager.notify(ACCESSIBILITY_NOTIFICATION_ID, alert);
+    }
+
+    private void cancelAccessibilityAlert() {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) manager.cancel(ACCESSIBILITY_NOTIFICATION_ID);
     }
 
     private void updateNotification(String title, String detail) {

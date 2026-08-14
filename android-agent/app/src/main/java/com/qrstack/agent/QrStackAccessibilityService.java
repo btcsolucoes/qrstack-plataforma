@@ -9,6 +9,8 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
+import android.content.ComponentName;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
@@ -48,7 +50,10 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         instance = this;
         preferences = new AgentPreferences(this);
         restoreJob();
-        if (preferences.shouldRun() && activeJob != null) scheduleStep(900);
+        if (preferences.shouldRun() && activeJob != null) {
+            if ("awaiting_accessibility".equals(preferences.checkpoint())) AgentService.resume(this);
+            else scheduleStep(900);
+        }
     }
 
     @Override
@@ -106,6 +111,17 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         if (!service.preferences.shouldRun()) return false;
         service.handler.post(() -> service.openInstagramStoryComposer(mediaUri));
         return true;
+    }
+
+    static boolean isConnected() {
+        return instance != null;
+    }
+
+    static boolean isEnabled(android.content.Context context) {
+        ComponentName component = new ComponentName(context, QrStackAccessibilityService.class);
+        String expected = component.flattenToString();
+        String enabled = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+        return enabled != null && enabled.contains(expected);
     }
 
     static boolean isInstagramForeground() {
@@ -193,6 +209,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 break;
             case "paused_interruption":
                 interrupted = true;
+                break;
+            case "awaiting_accessibility":
                 break;
             default:
                 preferences.setCheckpoint("opening_story_composer");
