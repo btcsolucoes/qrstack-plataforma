@@ -234,12 +234,11 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private void selectLinkSticker(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo link = findStickerResult(root, "link");
-        if (tapNodeCenter(link)) {
-            advance("opening_link_editor", "Sticker de link selecionado; aguardando campo de URL", 850);
+        if (tapVisibleLinkSticker(root)) {
+            advance("opening_link_editor", "Sticker LINK tocado na posição validada da grade; aguardando campo de URL", 900);
             return;
         }
-        if (stepAttempts >= 8) fail("Sticker LINK visível não foi reconhecido; a barra de pesquisa não foi tocada");
+        if (stepAttempts >= 8) fail("A grade de stickers não pôde ser validada; a barra de pesquisa não foi tocada");
         else retry("opening_stickers", 650);
     }
 
@@ -462,15 +461,12 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private AccessibilityNodeInfo findLinkEditor(AccessibilityNodeInfo root) {
-        if (root == null || !isLinkEditorScreen(root)) return null;
+        if (root == null) return null;
         ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
         queue.add(root);
         while (!queue.isEmpty()) {
             AccessibilityNodeInfo node = queue.removeFirst();
-            if (isEditable(node) && !isStickerSearchField(node)) {
-                String text = normalize(node.getText());
-                if (!"link".equals(text)) return node;
-            }
+            if (isEditable(node) && !isStickerSearchField(node)) return node;
             for (int index = 0; index < node.getChildCount(); index += 1) {
                 AccessibilityNodeInfo child = node.getChild(index);
                 if (child != null) queue.add(child);
@@ -479,10 +475,26 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         return null;
     }
 
-    private boolean isLinkEditorScreen(AccessibilityNodeInfo root) {
-        return findNode(root,
-                "adicionar link", "adicione um link", "insira a url", "url do link",
-                "add link", "enter url", "link url", "web address") != null;
+    private boolean tapVisibleLinkSticker(AccessibilityNodeInfo root) {
+        AccessibilityNodeInfo search = findStickerSearchEditor(root);
+        if (search == null) return false;
+        Rect searchBounds = new Rect();
+        search.getBoundsInScreen(searchBounds);
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        boolean validSearchBar = !searchBounds.isEmpty()
+                && searchBounds.width() >= screenWidth * 0.70f
+                && searchBounds.top >= screenHeight * 0.15f
+                && searchBounds.bottom <= screenHeight * 0.42f;
+        if (!validSearchBar) return false;
+
+        // Instagram 2026: LINK fica na sexta linha, primeira coluna da grade padrão.
+        float targetX = searchBounds.left + searchBounds.width() * 0.345f;
+        float targetY = searchBounds.bottom + screenHeight * 0.347f;
+        if (targetX <= 0 || targetX >= screenWidth || targetY <= searchBounds.bottom || targetY >= screenHeight * 0.82f) {
+            return false;
+        }
+        return tapAbsolute(targetX, targetY);
     }
 
     private boolean isStickerSearchField(AccessibilityNodeInfo node) {
@@ -561,6 +573,14 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         path.moveTo(bounds.exactCenterX(), bounds.exactCenterY());
         return dispatchGesture(new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, 90))
+                .build(), null, null);
+    }
+
+    private boolean tapAbsolute(float x, float y) {
+        Path path = new Path();
+        path.moveTo(x, y);
+        return dispatchGesture(new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, 110))
                 .build(), null, null);
     }
 
