@@ -39,6 +39,7 @@ public final class AgentService extends Service {
         preferences = new AgentPreferences(this);
         api = new ApiClient(this);
         guard = new InterruptionGuard(this);
+        if (!preferences.shouldRun() || preferences.activeJobJson().isEmpty()) guard.finish();
         createChannel();
         startForeground(NOTIFICATION_ID, notification("Agente pronto", "Aguardando uma publicação"));
         executor.scheduleWithFixedDelay(this::pollSafely, 1, 12, TimeUnit.SECONDS);

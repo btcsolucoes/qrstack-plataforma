@@ -7,6 +7,7 @@ import android.os.PowerManager;
 final class InterruptionGuard {
     private final Context context;
     private final NotificationManager notificationManager;
+    private final AgentPreferences preferences;
     private PowerManager.WakeLock wakeLock;
     private int previousFilter = NotificationManager.INTERRUPTION_FILTER_ALL;
     private boolean active;
@@ -14,6 +15,7 @@ final class InterruptionGuard {
     InterruptionGuard(Context context) {
         this.context = context.getApplicationContext();
         notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        preferences = new AgentPreferences(context);
     }
 
     @SuppressWarnings("deprecation")
@@ -21,7 +23,12 @@ final class InterruptionGuard {
         if (active) return;
         active = true;
         if (notificationManager != null && notificationManager.isNotificationPolicyAccessGranted()) {
-            previousFilter = notificationManager.getCurrentInterruptionFilter();
+            if (preferences.interruptionGuardActive()) {
+                previousFilter = preferences.previousInterruptionFilter();
+            } else {
+                previousFilter = notificationManager.getCurrentInterruptionFilter();
+                preferences.saveInterruptionGuard(previousFilter);
+            }
             notificationManager.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_NONE);
         }
         PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
@@ -33,13 +40,19 @@ final class InterruptionGuard {
     }
 
     synchronized void finish() {
-        if (!active) return;
         active = false;
         if (notificationManager != null && notificationManager.isNotificationPolicyAccessGranted()) {
+            if (preferences.interruptionGuardActive()) previousFilter = preferences.previousInterruptionFilter();
             notificationManager.setInterruptionFilter(previousFilter);
         }
+        preferences.clearInterruptionGuard();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         wakeLock = null;
+    }
+
+    static void restoreNormalState(Context context) {
+        InterruptionGuard guard = new InterruptionGuard(context);
+        guard.finish();
     }
 
     static boolean isCallPackage(String packageName) {

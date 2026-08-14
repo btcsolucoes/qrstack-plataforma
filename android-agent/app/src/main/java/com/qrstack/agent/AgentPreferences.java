@@ -56,6 +56,28 @@ final class AgentPreferences {
         preferences.edit().putBoolean("should_run", value).apply();
     }
 
+    boolean interruptionGuardActive() {
+        return preferences.getBoolean("interruption_guard_active", false);
+    }
+
+    int previousInterruptionFilter() {
+        return preferences.getInt("previous_interruption_filter", 1);
+    }
+
+    void saveInterruptionGuard(int previousFilter) {
+        preferences.edit()
+                .putBoolean("interruption_guard_active", true)
+                .putInt("previous_interruption_filter", previousFilter)
+                .commit();
+    }
+
+    void clearInterruptionGuard() {
+        preferences.edit()
+                .putBoolean("interruption_guard_active", false)
+                .remove("previous_interruption_filter")
+                .commit();
+    }
+
     String activeJobJson() {
         return preferences.getString("active_job", "");
     }

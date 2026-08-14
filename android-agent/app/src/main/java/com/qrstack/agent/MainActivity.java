@@ -38,6 +38,7 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         preferences = new AgentPreferences(this);
+        if (!preferences.shouldRun()) InterruptionGuard.restoreNormalState(this);
         setContentView(buildScreen());
         requestNotificationPermission();
     }
@@ -146,6 +147,7 @@ public final class MainActivity extends Activity {
 
     private void stopAgent() {
         preferences.setShouldRun(false);
+        InterruptionGuard.restoreNormalState(this);
         AgentService.stop(this);
         toast("Agente pausado. Ele só voltará quando você tocar em Iniciar agente.");
         refreshStatus();
