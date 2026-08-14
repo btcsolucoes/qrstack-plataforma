@@ -10,6 +10,10 @@ public final class BootReceiver extends BroadcastReceiver {
         String action = intent == null ? "" : intent.getAction();
         if (!Intent.ACTION_BOOT_COMPLETED.equals(action) && !Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) return;
         AgentPreferences preferences = new AgentPreferences(context);
+        if (preferences.migrateStateIfNeeded()) {
+            InterruptionGuard.restoreNormalState(context);
+            return;
+        }
         if (preferences.shouldRun() && preferences.isEnrolled()) {
             try {
                 AgentService.start(context);

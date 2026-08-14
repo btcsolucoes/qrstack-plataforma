@@ -9,6 +9,7 @@ import java.util.Base64;
 
 final class AgentPreferences {
     private static final String FILE = "qrstack_agent";
+    private static final int STATE_SCHEMA_VERSION = 2;
     private final SharedPreferences preferences;
 
     AgentPreferences(Context context) {
@@ -76,6 +77,20 @@ final class AgentPreferences {
                 .putBoolean("interruption_guard_active", false)
                 .remove("previous_interruption_filter")
                 .commit();
+    }
+
+    boolean migrateStateIfNeeded() {
+        int current = preferences.getInt("state_schema_version", 1);
+        if (current >= STATE_SCHEMA_VERSION) return false;
+        preferences.edit()
+                .putInt("state_schema_version", STATE_SCHEMA_VERSION)
+                .putBoolean("should_run", false)
+                .putString("active_job", "")
+                .putString("checkpoint", "idle")
+                .putString("media_uri", "")
+                .putInt("recovery_attempts", 0)
+                .commit();
+        return true;
     }
 
     String activeJobJson() {

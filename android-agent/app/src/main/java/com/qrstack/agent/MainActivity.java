@@ -38,6 +38,7 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         preferences = new AgentPreferences(this);
+        preferences.migrateStateIfNeeded();
         if (!preferences.shouldRun()) InterruptionGuard.restoreNormalState(this);
         setContentView(buildScreen());
         requestNotificationPermission();
