@@ -15,12 +15,12 @@ Plataforma QrStack para gerenciar clientes, formulários, cardápios dinâmicos,
 ## Escopo atual
 
 - Cliente real Amaro cadastrado como base inicial.
-- Dados persistidos em `localStorage` enquanto a camada definitiva de banco/API evolui.
+- Dados gerenciais e analytics persistidos no Cloudflare D1, com fallback preservado para Google Sheets.
 - Formulário próprio para cardápio do dia.
 - Publicação automática do cardápio público.
 - Geração de Story 1080x1920 em canvas.
-- Download e compartilhamento nativo do Story.
-- Tentativa de abertura do Instagram após compartilhamento.
+- Fila transacional e idempotente para publicacao de Story.
+- Agente Android privado com retomada por checkpoint, protecao contra interrupcoes e confirmacao visual de publicacao.
 - Eventos e insights internos para a central QrStack, sem dados de demonstração.
 - Schema legado Supabase preservado em `supabase/schema.sql`.
 - Nova migração gratuita Cloudflare D1 em `cloudflare/`.
@@ -38,6 +38,18 @@ No produto QrStack, esse fluxo pode continuar para clientes que já usam Forms/S
 3. Cloudflare D1 salva clientes, catálogo, fotos indexadas e analytics.
 4. Dashboard QrStack consulta D1, não a planilha pesada.
 5. Story usa a identidade, o catálogo e o link definidos na base QrStack.
+
+## Publicacao automatica de Story
+
+O envio do formulario cria um job unico em `story_publish_jobs`. A arte fica temporariamente no KV por 48 horas, enquanto metadados, estado e historico permanecem no D1. O agente Android pareado reivindica o job e atualiza a plataforma em cada etapa.
+
+- `story_agents`: aparelhos pareados.
+- `story_publish_jobs`: fila e estado atual.
+- `story_job_events`: historico auditavel de checkpoints.
+- `cloudflare/migrations/0007_story_automation.sql`: migracao aditiva, sem exclusao de analytics.
+- `android-agent/`: projeto Android instalavel sem conexao USB permanente.
+
+O agente nunca rejeita chamadas nem apaga notificacoes. Durante a publicacao ele ativa temporariamente Nao Perturbe, mantem a tela acordada e, se outro aplicativo tomar a tela, pausa e retoma do ultimo ponto seguro.
 
 ## Analytics
 

@@ -4,3 +4,7 @@ cloudflare/import/*.sql
 cloudflare/import/logs/
 cloudflare/backups/
 .wrangler/
+android-agent/.gradle/
+android-agent/local.properties
+android-agent/**/build/
+*.apk
