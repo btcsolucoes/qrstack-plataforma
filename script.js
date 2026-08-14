@@ -1,6 +1,7 @@
 const ASSETS = {
   qrstackMark: "assets/qrstack-mark.png",
   qrstackWordmark: "assets/qrstack-wordmark.png",
+  pointDownEmoji: "assets/story/emoji-point-down-apple.png",
 };
 
 const QRSTACK_D1_API_URL = "https://qrstack-api.qrstack.workers.dev";
@@ -21,6 +22,7 @@ const DEFAULT_STATE = {
       slug: "amaro",
       logoUrl: `${AMARO_ASSETS_BASE_URL}assets/amaro/amaro-logo-transparent.png`,
       originalLogoUrl: `${AMARO_ASSETS_BASE_URL}assets/amaro/amaro-logo-original.jpg`,
+      storyLogoUrl: "assets/amaro/amaro-story-logo-original.png",
       storyBackgroundColor: "#bf8836",
       symbolUrl: "",
       primaryColor: "#0b3422",
@@ -418,6 +420,7 @@ function fromSheetRestaurant(row) {
     slug: row.slug || defaults.slug,
     logoUrl: row.logo_url || defaults.logoUrl || ASSETS.qrstackWordmark,
     originalLogoUrl: row.original_logo_url || defaults.originalLogoUrl || "",
+    storyLogoUrl: row.story_logo_url || defaults.storyLogoUrl || "",
     storyBackgroundColor: row.story_background_color || defaults.storyBackgroundColor || "",
     symbolUrl: row.symbol_url || defaults.symbolUrl || "",
     primaryColor: row.primary_color || defaults.primaryColor || "#4a1f16",
@@ -2576,7 +2579,14 @@ function drawAmaroStory(canvas, restaurant) {
   const background = restaurant.storyBackgroundColor || "#bf8836";
   const ink = restaurant.primaryColor || "#0b3422";
 
-  return loadCanvasImage(restaurant.logoUrl).then((logo) => {
+  return Promise.all([
+    loadCanvasImage(restaurant.storyLogoUrl),
+    loadCanvasImage(restaurant.originalLogoUrl),
+    loadCanvasImage(restaurant.logoUrl),
+    loadCanvasImage(ASSETS.qrstackMark),
+    loadCanvasImage(ASSETS.qrstackWordmark),
+    loadCanvasImage(ASSETS.pointDownEmoji),
+  ]).then(([storyLogo, originalLogo, transparentLogo, qrstackMark, qrstackWordmark, pointDownEmoji]) => {
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = background;
     ctx.fillRect(0, 0, w, h);
@@ -2586,39 +2596,104 @@ function drawAmaroStory(canvas, restaurant) {
     roundRect(ctx, 70, 70, w - 140, h - 140, 24);
     ctx.stroke();
 
-    if (logo) {
-      drawImageContain(ctx, logo, 100, 520, w - 200, 430);
+    if (storyLogo) {
+      const smoothLogo = createAmaroLogoMask(storyLogo, ink);
+      const sourceX = Math.round(smoothLogo.width * 0.035);
+      const sourceY = Math.round(smoothLogo.height * 0.38);
+      const sourceWidth = Math.round(smoothLogo.width * 0.93);
+      const sourceHeight = Math.round(smoothLogo.height * 0.23);
+      ctx.drawImage(smoothLogo, sourceX, sourceY, sourceWidth, sourceHeight, 90, 460, w - 180, 225);
+    } else if (originalLogo) {
+      const smoothLogo = createAmaroLogoMask(originalLogo, ink);
+      const sourceX = Math.round(smoothLogo.width * 0.13);
+      const sourceY = Math.round(smoothLogo.height * 0.32);
+      const sourceWidth = Math.round(smoothLogo.width * 0.74);
+      const sourceHeight = Math.round(smoothLogo.height * 0.36);
+      ctx.drawImage(smoothLogo, sourceX, sourceY, sourceWidth, sourceHeight, 100, 460, w - 200, 250);
+    } else if (transparentLogo) {
+      drawImageContain(ctx, transparentLogo, 100, 475, w - 200, 310);
     } else {
       ctx.textAlign = "center";
       ctx.fillStyle = ink;
       ctx.font = "400 150px Georgia";
-      ctx.fillText("AMARO", w / 2, 780);
+      ctx.fillText("AMARO", w / 2, 690);
     }
 
     ctx.textAlign = "center";
     ctx.fillStyle = ink;
-    ctx.font = "700 26px Manrope";
-    ctx.fillText("CARDÁPIO DO DIA", w / 2, 1080);
+    ctx.font = "600 55px 'Bodoni Moda', Georgia, serif";
+    ctx.fillText("Confira o cardápio do dia", w / 2, 995);
+    ctx.font = "500 52px 'Bodoni Moda', Georgia, serif";
+    const ctaLine = "clicando no link abaixo!";
+    const emojiSize = 60;
+    const emojiGap = 14;
+    const ctaWidth = ctx.measureText(ctaLine).width;
+    const ctaStart = (w - ctaWidth - emojiGap - emojiSize) / 2;
+    ctx.textAlign = "left";
+    ctx.fillText(ctaLine, ctaStart, 1065);
+    if (pointDownEmoji) drawImageContain(ctx, pointDownEmoji, ctaStart + ctaWidth + emojiGap, 1014, emojiSize, emojiSize);
+    ctx.textAlign = "center";
 
     ctx.strokeStyle = "rgba(11, 52, 34, 0.58)";
     ctx.lineWidth = 4;
     ctx.setLineDash([14, 12]);
-    roundRect(ctx, 170, 1320, w - 340, 260, 28);
+    roundRect(ctx, 150, 1240, w - 300, 300, 28);
     ctx.stroke();
     ctx.setLineDash([]);
 
     ctx.fillStyle = ink;
-    ctx.font = "700 24px Manrope";
-    ctx.fillText("ESPAÇO PARA O LINK DO CARDÁPIO", w / 2, 1385);
-    ctx.globalAlpha = 0.62;
-    ctx.font = "600 28px Manrope";
-    ctx.fillText(formatStoryLink(AMARO_STORY_LINK), w / 2, 1530);
+    ctx.font = "700 14px Sora";
+    ctx.fillText("UM PRODUTO", w / 2, 1742);
+    ctx.globalAlpha = 0.82;
+    if (qrstackMark) drawImageContain(ctx, qrstackMark, 408, 1758, 64, 64);
+    if (qrstackWordmark) drawImageContain(ctx, qrstackWordmark, 484, 1768, 190, 44);
     ctx.globalAlpha = 1;
-
-    ctx.font = "700 20px Manrope";
-    ctx.fillText("UM PRODUTO QRSTACK", w / 2, 1810);
     cacheStoryCanvas(canvas, restaurant.slug);
   });
+}
+
+function createAmaroLogoMask(image, ink) {
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(image, 0, 0);
+
+  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = pixels.data;
+  const fallback = hexToRgb(ink) || { r: 11, g: 52, b: 34 };
+  const sampled = { r: 0, g: 0, b: 0, count: 0 };
+  for (let index = 0; index < data.length; index += 4) {
+    const r = data[index];
+    const g = data[index + 1];
+    const b = data[index + 2];
+    if (g > r + 5 && g > b + 5 && (r + g + b) / 3 < 120) {
+      sampled.r += r;
+      sampled.g += g;
+      sampled.b += b;
+      sampled.count += 1;
+    }
+  }
+  const foreground = sampled.count
+    ? {
+        r: Math.round(sampled.r / sampled.count),
+        g: Math.round(sampled.g / sampled.count),
+        b: Math.round(sampled.b / sampled.count),
+      }
+    : fallback;
+
+  for (let index = 0; index < data.length; index += 4) {
+    const dominance = data[index + 1] - Math.max(data[index], data[index + 2]);
+    const alpha = Math.max(0, Math.min(1, (dominance - 1) / 16));
+    data[index] = foreground.r;
+    data[index + 1] = foreground.g;
+    data[index + 2] = foreground.b;
+    data[index + 3] = Math.round(alpha * 255);
+  }
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.putImageData(pixels, 0, 0);
+  return canvas;
 }
 
 function cacheStoryCanvas(canvas, slug) {
