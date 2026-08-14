@@ -20,6 +20,8 @@ const DEFAULT_STATE = {
       name: "Amaro Café",
       slug: "amaro",
       logoUrl: `${AMARO_ASSETS_BASE_URL}assets/amaro/amaro-logo-transparent.png`,
+      originalLogoUrl: `${AMARO_ASSETS_BASE_URL}assets/amaro/amaro-logo-original.jpg`,
+      storyBackgroundColor: "#bf8836",
       symbolUrl: "",
       primaryColor: "#0b3422",
       secondaryColor: "#bd8732",
@@ -77,6 +79,8 @@ const insightsOpenedThisSession = new Set();
 const app = document.getElementById("app");
 let state = loadState();
 let lastStoryDataUrl = "";
+let lastStoryBlob = null;
+let lastStorySlug = "";
 let routeVersion = 0;
 const runtimeCatalogs = new Map();
 const insightsRetryTimers = new Map();
@@ -310,6 +314,7 @@ async function apiPost(payload) {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=UTF-8" },
       body: JSON.stringify(payload),
+      keepalive: true,
     },
     { timeoutMs: 20000, attempts: 2 }
   );
@@ -411,6 +416,8 @@ function fromSheetRestaurant(row) {
     name: row.name || defaults.name,
     slug: row.slug || defaults.slug,
     logoUrl: row.logo_url || defaults.logoUrl || ASSETS.qrstackWordmark,
+    originalLogoUrl: row.original_logo_url || defaults.originalLogoUrl || "",
+    storyBackgroundColor: row.story_background_color || defaults.storyBackgroundColor || "",
     symbolUrl: row.symbol_url || defaults.symbolUrl || "",
     primaryColor: row.primary_color || defaults.primaryColor || "#4a1f16",
     secondaryColor: row.secondary_color || defaults.secondaryColor || "#d59b52",
@@ -1558,7 +1565,7 @@ async function renderClientPortal(slug, version) {
               <textarea id="notes" name="notes" placeholder="Observações do dia">${menu.notes || ""}</textarea>
             </div>
             <div class="actions field--full">
-              <button type="submit">Enviar e gerar Story</button>
+              <button type="submit">Enviar e abrir Instagram</button>
             </div>
           </form>
         </section>
@@ -1692,17 +1699,27 @@ function renderAmaroOriginalForm(menuItems) {
 }
 
 function attachClientHandlers(restaurant, menu) {
-  document.getElementById("menu-form").addEventListener("submit", async (event) => {
+  document.getElementById("menu-form").addEventListener("submit", (event) => {
     event.preventDefault();
+    const submitButton = event.currentTarget.querySelector('button[type="submit"]');
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.textContent = "Abrindo Instagram...";
+    }
     const formData = new FormData(event.currentTarget);
     const storyLinkInput = document.querySelector('[name="storyLink"]');
     formData.set("storyLink", storyLinkInput?.value || restaurantStoryLink(restaurant));
-    await saveMenuForm(restaurant, menu.id, formData);
+    const saveRequest = saveMenuForm(restaurant, menu.id, formData);
     const updatedMenu = getLatestMenu(restaurant.id);
     drawStory(restaurant, updatedMenu, getMenuItems(updatedMenu.id));
     saveStoryPreview(restaurant, updatedMenu);
-    toast("Enviado. Story pronto abaixo.");
-    document.getElementById("story-panel").scrollIntoView({ behavior: "smooth" });
+    trackEvent(restaurant, "story_shared", "admin", updatedMenu.id);
+    const shareRequest = shareStory(restaurant, updatedMenu);
+    Promise.allSettled([saveRequest, shareRequest]).finally(() => {
+      if (!submitButton || !document.body.contains(submitButton)) return;
+      submitButton.disabled = false;
+      submitButton.textContent = "Enviar e abrir Instagram";
+    });
   });
 
   document.querySelector('[name="storyLink"]').addEventListener("input", (event) => {
@@ -2361,13 +2378,14 @@ function renderOriginalPublicMenu(restaurant, source) {
 function drawStory(restaurant, menu, menuItems) {
   const canvas = document.getElementById("story-canvas");
   if (!canvas) return;
+  if (restaurant.slug === "amaro") return drawAmaroStory(canvas, restaurant);
   const ctx = canvas.getContext("2d");
   const w = canvas.width;
   const h = canvas.height;
   const highlights = menuItems.filter((menuItem) => menuItem.isHighlight).slice(0, 6);
   const storyLink = menu.storyLink || restaurantStoryLink(restaurant);
   const storyLinkLabel = formatStoryLink(storyLink);
-  Promise.all([loadCanvasImage(restaurant.logoUrl), loadCanvasImage(restaurant.symbolUrl)]).then(([logo, mark]) => {
+  return Promise.all([loadCanvasImage(restaurant.logoUrl), loadCanvasImage(restaurant.symbolUrl)]).then(([logo, mark]) => {
     const primary = restaurant.primaryColor || "#0b3422";
     const secondary = restaurant.secondaryColor || "#bd8732";
     const cream = restaurant.slug === "amaro" ? "#f5f0e6" : "rgba(255,255,255,0.9)";
@@ -2448,8 +2466,68 @@ function drawStory(restaurant, menu, menuItems) {
     ctx.fillStyle = ink;
     ctx.font = "700 28px Manrope";
     wrapCanvasText(ctx, storyLinkLabel, w / 2, 1772, w - 220, 34, 2);
-    lastStoryDataUrl = canvas.toDataURL("image/png");
+    cacheStoryCanvas(canvas, restaurant.slug);
   });
+}
+
+function drawAmaroStory(canvas, restaurant) {
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+  const background = restaurant.storyBackgroundColor || "#bf8836";
+  const ink = restaurant.primaryColor || "#0b3422";
+
+  return loadCanvasImage(restaurant.logoUrl).then((logo) => {
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.strokeStyle = "rgba(11, 52, 34, 0.26)";
+    ctx.lineWidth = 3;
+    roundRect(ctx, 70, 70, w - 140, h - 140, 24);
+    ctx.stroke();
+
+    if (logo) {
+      drawImageContain(ctx, logo, 100, 520, w - 200, 430);
+    } else {
+      ctx.textAlign = "center";
+      ctx.fillStyle = ink;
+      ctx.font = "400 150px Georgia";
+      ctx.fillText("AMARO", w / 2, 780);
+    }
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = ink;
+    ctx.font = "700 26px Manrope";
+    ctx.fillText("CARDÁPIO DO DIA", w / 2, 1080);
+
+    ctx.strokeStyle = "rgba(11, 52, 34, 0.58)";
+    ctx.lineWidth = 4;
+    ctx.setLineDash([14, 12]);
+    roundRect(ctx, 170, 1320, w - 340, 260, 28);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = ink;
+    ctx.font = "700 24px Manrope";
+    ctx.fillText("ESPAÇO PARA O LINK DO CARDÁPIO", w / 2, 1385);
+    ctx.globalAlpha = 0.62;
+    ctx.font = "600 28px Manrope";
+    ctx.fillText(formatStoryLink(AMARO_STORY_LINK), w / 2, 1530);
+    ctx.globalAlpha = 1;
+
+    ctx.font = "700 20px Manrope";
+    ctx.fillText("UM PRODUTO QRSTACK", w / 2, 1810);
+    cacheStoryCanvas(canvas, restaurant.slug);
+  });
+}
+
+function cacheStoryCanvas(canvas, slug) {
+  lastStoryDataUrl = canvas.toDataURL("image/png");
+  lastStorySlug = slug;
+  canvas.toBlob((blob) => {
+    if (blob && lastStorySlug === slug) lastStoryBlob = blob;
+  }, "image/png");
 }
 
 function formatStoryLink(value) {
@@ -2523,32 +2601,41 @@ function priceSummary(menu, menuItems = []) {
 
 async function shareStory(restaurant, menu = null) {
   const storyLink = menu?.storyLink || document.querySelector('[name="storyLink"]')?.value || restaurantStoryLink(restaurant);
-  await copyToClipboard(storyLink);
-  toast("Link copiado. Cole no sticker do Instagram.");
   const canvas = document.getElementById("story-canvas");
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  const copyRequest = copyToClipboard(storyLink);
+  const blob = lastStorySlug === restaurant.slug && lastStoryBlob
+    ? lastStoryBlob
+    : await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
   const file = new File([blob], `story-${restaurant.slug}.png`, { type: "image/png" });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    const shareRequest = navigator.share({
+      files: [file],
+      title: `Story ${restaurant.name}`,
+      text: `Story do cardápio do dia. O link ${storyLink} já está copiado para o sticker.`,
+    });
     try {
-      await navigator.share({
-        files: [file],
-        title: `Story ${restaurant.name}`,
-        text: `Story do cardápio do dia pronto para publicar. Link: ${storyLink}`,
-      });
+      await Promise.all([copyRequest, shareRequest]);
+      toast("Link copiado. Escolha Instagram Stories.");
     } catch {
+      await copyRequest.catch(() => undefined);
       downloadStory(restaurant);
+      openInstagramStories();
+      return;
     }
-    window.location.href = "instagram://story-camera";
+    window.setTimeout(openInstagramStories, 120);
     return;
   }
+  await copyRequest.catch(() => undefined);
   downloadStory(restaurant);
   toast("Link copiado. Cole no sticker de link do Instagram.");
-  setTimeout(() => {
-    window.location.href = "instagram://story-camera";
-  }, 400);
-  setTimeout(() => {
+  openInstagramStories();
+}
+
+function openInstagramStories() {
+  window.location.href = "instagram://story-camera";
+  window.setTimeout(() => {
     window.location.href = "https://www.instagram.com/";
-  }, 900);
+  }, 1100);
 }
 
 function metric(label, value) {
