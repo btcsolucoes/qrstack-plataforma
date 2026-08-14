@@ -19,6 +19,10 @@ Agente privado para publicar o Story gerado pela plataforma QrStack no Instagram
 - Nao rejeita ligacoes e nao apaga notificacoes.
 - Se uma ligacao ou outro aplicativo tomar a tela, pausa o job e aguarda o Instagram voltar.
 - O botao `Parar agente` bloqueia retomadas ate um novo toque manual em `Iniciar agente`.
+- A notificacao permanente e a tela principal exibem `PARAR` durante a execucao.
+- Se o Instagram ja estiver em uso quando chegar uma arte, o agente avisa em alta prioridade e aguarda `PUBLICAR AGORA`, evitando publicar na conta errada.
+- Antes de abrir o compositor, o link do cardapio e copiado para a area de transferencia.
+- O sticker `LINK` e pesquisado e validado pelo nome exato; o agente nunca usa a posicao do sticker `Localizacao`.
 - Depois de apertar publicar, exige confirmacao visual antes de concluir e nao dispara uma segunda tentativa no escuro.
 - A recuperacao automatica e limitada; depois de interrupcoes repetidas o job pede conferencia humana.
 

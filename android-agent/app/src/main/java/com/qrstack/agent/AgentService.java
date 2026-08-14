@@ -6,6 +6,9 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
@@ -22,8 +25,11 @@ public final class AgentService extends Service {
     static final String ACTION_START = "com.qrstack.agent.START";
     static final String ACTION_STOP = "com.qrstack.agent.STOP";
     static final String ACTION_RESUME = "com.qrstack.agent.RESUME";
+    static final String ACTION_PUBLISH_PENDING = "com.qrstack.agent.PUBLISH_PENDING";
     private static final String CHANNEL = "qrstack_agent";
+    private static final String ALERT_CHANNEL = "qrstack_story_ready";
     private static final int NOTIFICATION_ID = 8142;
+    private static final int ALERT_NOTIFICATION_ID = 8143;
 
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
     private AgentPreferences preferences;
@@ -52,6 +58,7 @@ public final class AgentService extends Service {
         if (ACTION_STOP.equals(action)) {
             preferences.setShouldRun(false);
             guard.finish();
+            cancelReadyAlert();
             StoryJob job = StoryJob.restore(preferences.activeJobJson());
             if (job == null) {
                 stopSelf();
@@ -68,6 +75,12 @@ public final class AgentService extends Service {
                 });
             }
             return START_NOT_STICKY;
+        }
+        if (ACTION_PUBLISH_PENDING.equals(action)) {
+            if (!preferences.shouldRun()) return START_NOT_STICKY;
+            cancelReadyAlert();
+            executor.execute(this::publishPersistedJobNow);
+            return START_STICKY;
         }
         if (ACTION_START.equals(action)) preferences.setShouldRun(true);
         if (ACTION_RESUME.equals(action)) {
@@ -102,16 +115,20 @@ public final class AgentService extends Service {
         if (!preferences.shouldRun()) return;
         preferences.setActiveJobJson(job.toJson().toString());
         preferences.setCheckpoint("downloading_media");
-        guard.begin();
         updateNotification("Preparando Story", job.restaurantSlug);
         api.updateJob(job, "preparing", "downloading_media", "Arte sendo preparada no telefone");
         byte[] media = api.download(job.mediaUrl);
         Uri uri = MediaStoreHelper.saveStory(this, job, media);
         if (!preferences.shouldRun()) return;
         preferences.setMediaUri(uri.toString());
-        preferences.setCheckpoint("opening_story_composer");
-        api.updateJob(job, "publishing", "opening_story_composer", "Arte salva e compositor de Story sendo aberto");
-        requestInstagramStoryComposer(job);
+        copyStoryLink(job.storyLink);
+        if (QrStackAccessibilityService.isInstagramForeground()) {
+            preferences.setCheckpoint("awaiting_operator_confirmation");
+            api.updateJob(job, "publishing", "awaiting_operator_confirmation", "Instagram já estava em uso; aguardando confirmação pelo telefone");
+            showStoryReadyAlert(job);
+            return;
+        }
+        publishNow(job, "Arte salva, link copiado e compositor de Story sendo aberto");
     }
 
     private void resumePersistedJob() {
@@ -120,13 +137,14 @@ public final class AgentService extends Service {
         if (job == null) return;
         busy = true;
         try {
-            guard.begin();
             if (preferences.mediaUri().isEmpty() && !job.mediaUrl.isEmpty()) {
                 prepare(job);
+            } else if ("awaiting_operator_confirmation".equals(preferences.checkpoint())) {
+                copyStoryLink(job.storyLink);
+                showStoryReadyAlert(job);
             } else {
-                api.updateJob(job, "publishing", "resuming_after_interruption", "Retomada automática no último ponto seguro");
-                preferences.setCheckpoint("opening_story_composer");
-                requestInstagramStoryComposer(job);
+                copyStoryLink(job.storyLink);
+                publishNow(job, "Retomada automática no último ponto seguro");
             }
         } catch (Exception error) {
             updateNotification("Publicação pausada", "Aguardando recuperação automática");
@@ -143,6 +161,7 @@ public final class AgentService extends Service {
             } finally {
                 preferences.resetJobState();
                 guard.finish();
+                cancelReadyAlert();
                 updateNotification("Story publicado", job.restaurantSlug);
             }
         });
@@ -165,7 +184,9 @@ public final class AgentService extends Service {
                 api.updateJob(job, "failed_attention", "manual_attention", detail);
             } catch (Exception ignored) {
             } finally {
+                preferences.resetJobState();
                 guard.finish();
+                cancelReadyAlert();
                 updateNotification("Atenção necessária", detail);
             }
         });
@@ -193,24 +214,90 @@ public final class AgentService extends Service {
         failForAttention(job, "Ative o serviço de acessibilidade QrStack para abrir o Instagram");
     }
 
+    private void publishPersistedJobNow() {
+        if (busy || !preferences.shouldRun()) return;
+        StoryJob job = StoryJob.restore(preferences.activeJobJson());
+        if (job == null || preferences.mediaUri().isEmpty()) return;
+        busy = true;
+        try {
+            copyStoryLink(job.storyLink);
+            publishNow(job, "Publicação confirmada no telefone; link copiado");
+        } catch (Exception error) {
+            failForAttention(job, "Não foi possível abrir o Story após a confirmação");
+        } finally {
+            busy = false;
+        }
+    }
+
+    private void publishNow(StoryJob job, String detail) throws Exception {
+        if (!preferences.shouldRun()) return;
+        guard.begin();
+        preferences.setCheckpoint("opening_story_composer");
+        api.updateJob(job, "publishing", "opening_story_composer", detail);
+        requestInstagramStoryComposer(job);
+    }
+
+    private void copyStoryLink(String link) {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboard != null && link != null && !link.isEmpty()) {
+            clipboard.setPrimaryClip(ClipData.newPlainText("Link do cardápio", link));
+        }
+    }
+
     private void createChannel() {
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
         NotificationChannel channel = new NotificationChannel(CHANNEL, "Publicação QrStack", NotificationManager.IMPORTANCE_LOW);
         channel.setDescription("Mantém a fila de Stories ativa");
         manager.createNotificationChannel(channel);
+        NotificationChannel alerts = new NotificationChannel(ALERT_CHANNEL, "Story pronto para publicar", NotificationManager.IMPORTANCE_HIGH);
+        alerts.setDescription("Avisa quando um formulário foi preenchido durante o uso do Instagram");
+        alerts.enableVibration(true);
+        manager.createNotificationChannel(alerts);
     }
 
     private Notification notification(String title, String detail) {
         Intent open = new Intent(this, MainActivity.class);
         PendingIntent pending = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        return new Notification.Builder(this, CHANNEL)
+        Notification.Builder builder = new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_qrstack)
                 .setContentTitle(title)
                 .setContentText(detail)
                 .setContentIntent(pending)
+                .setOngoing(true);
+        if (preferences != null && preferences.shouldRun()) {
+            Intent stopIntent = new Intent(this, AgentService.class).setAction(ACTION_STOP);
+            PendingIntent stop = PendingIntent.getService(this, 2, stopIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+            builder.addAction(0, "PARAR", stop);
+        }
+        return builder.build();
+    }
+
+    private void showStoryReadyAlert(StoryJob job) {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager == null) return;
+        Intent publishIntent = new Intent(this, AgentService.class).setAction(ACTION_PUBLISH_PENDING);
+        PendingIntent publish = PendingIntent.getService(this, 3, publishIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        Intent stopIntent = new Intent(this, AgentService.class).setAction(ACTION_STOP);
+        PendingIntent stop = PendingIntent.getService(this, 4, stopIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        Notification alert = new Notification.Builder(this, ALERT_CHANNEL)
+                .setSmallIcon(R.drawable.ic_qrstack)
+                .setContentTitle("Formulário preenchido: " + job.restaurantSlug)
+                .setContentText("Arte pronta e link copiado. Confirme a conta e publique o Story.")
+                .setPriority(Notification.PRIORITY_HIGH)
+                .setCategory(Notification.CATEGORY_REMINDER)
+                .setAutoCancel(false)
                 .setOngoing(true)
+                .addAction(0, "PUBLICAR AGORA", publish)
+                .addAction(0, "PARAR", stop)
                 .build();
+        manager.notify(ALERT_NOTIFICATION_ID, alert);
+        updateNotification("Story aguardando confirmação", "O Instagram já estava em uso");
+    }
+
+    private void cancelReadyAlert() {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) manager.cancel(ALERT_NOTIFICATION_ID);
     }
 
     private void updateNotification(String title, String detail) {
