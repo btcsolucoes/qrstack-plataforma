@@ -80,6 +80,7 @@ let lastStoryDataUrl = "";
 let routeVersion = 0;
 const runtimeCatalogs = new Map();
 const insightsRetryTimers = new Map();
+const insightsRefreshJobs = new Map();
 persistRuntimeStateMigrations();
 
 function item(menuDayId, name, category, isHighlight, sortOrder, description = "", price = "") {
@@ -1913,13 +1914,14 @@ async function hydrateInsights(restaurant, options = {}) {
   if (!target || !restaurant) return;
   const forceRefresh = options.forceRefresh === true;
   const refreshAfterLoad = options.refreshAfterLoad === true;
+  const silentRefresh = options.silentRefresh === true;
   const filters = getInsightsFilters();
   const cachedBeforeFetch = getCachedInsightsHtml(restaurant, filters);
   if (cachedBeforeFetch?.html && !forceRefresh) {
     target.innerHTML = cachedBeforeFetch.html;
   }
   const applyButton = document.querySelector('[data-insights-filter] button[type="submit"]');
-  if (forceRefresh && applyButton) {
+  if (forceRefresh && !silentRefresh && applyButton) {
     applyButton.disabled = true;
     applyButton.dataset.originalLabel = applyButton.textContent;
     applyButton.textContent = "Atualizando...";
@@ -2104,7 +2106,7 @@ async function hydrateInsights(restaurant, options = {}) {
     saveCachedInsightsHtml(restaurant, filters, target.innerHTML);
     clearInsightsRetry(restaurant);
     if (refreshAfterLoad && !forceRefresh && document.getElementById("insights-live")) {
-      hydrateInsights(restaurant, { forceRefresh: true });
+      scheduleInsightsRefresh(restaurant);
     }
   } catch (error) {
     console.warn("QrStack insights unavailable:", error);
@@ -2146,12 +2148,26 @@ async function hydrateInsights(restaurant, options = {}) {
       </div>
     `;
   } finally {
-    if (forceRefresh && applyButton) {
+    if (forceRefresh && !silentRefresh && applyButton) {
       applyButton.disabled = false;
       applyButton.textContent = applyButton.dataset.originalLabel || "Aplicar";
       delete applyButton.dataset.originalLabel;
     }
   }
+}
+
+function scheduleInsightsRefresh(restaurant, delay = 180) {
+  if (!restaurant) return;
+  const filters = getInsightsFilters();
+  const jobKey = `${restaurant.slug}|${filters.startDate}|${filters.endDate}`;
+  if (insightsRefreshJobs.has(jobKey)) return;
+
+  const timer = window.setTimeout(() => {
+    const job = hydrateInsights(restaurant, { forceRefresh: true, silentRefresh: true });
+    insightsRefreshJobs.set(jobKey, job);
+    Promise.resolve(job).finally(() => insightsRefreshJobs.delete(jobKey));
+  }, delay);
+  insightsRefreshJobs.set(jobKey, timer);
 }
 
 function getInsightsFilters() {
@@ -2571,13 +2587,13 @@ function renderInsightBars(title, counts, options = {}) {
                   const numeric = Number(count) || 0;
                   const width = Math.max(6, Math.round((numeric / max) * 100));
                   return `
-                    <div class="insight-bar">
+                    <button class="insight-bar" type="button" data-chart-point data-chart-label="${escapeAttr(labeler(key))}" data-chart-value="${escapeAttr(valueFormatter(numeric))}">
                       <div class="insight-bar__label">
                         <span>${labeler(key)}</span>
                         <strong>${valueFormatter(numeric)}</strong>
                       </div>
                       <div class="insight-bar__track"><i style="width:${width}%"></i></div>
-                    </div>
+                    </button>
                   `;
                 })
                 .join("")}
@@ -2616,7 +2632,12 @@ function renderAreaChart(title, counts, options = {}) {
       <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${title}">
         <polygon points="${area}" class="area-fill"></polygon>
         <polyline points="${line}" class="area-line"></polyline>
-        ${points.map((point) => `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="3.2"></circle>`).join("")}
+        ${points.map((point, index) => `
+          <g class="chart-point" tabindex="0" role="button" data-chart-point data-chart-label="${escapeAttr(labeler(entries[index][0]))}" data-chart-value="${escapeAttr(formatNumber(point.value))}" aria-label="${escapeAttr(`${labeler(entries[index][0])}: ${formatNumber(point.value)}`)}">
+            <circle class="chart-point__hit" cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="10"></circle>
+            <circle class="chart-point__dot" cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="3.6"></circle>
+          </g>
+        `).join("")}
         <text x="${left}" y="${height - 5}">${labeler(entries[0][0])}</text>
         <text x="${width - right}" y="${height - 5}" text-anchor="end">${labeler(entries[entries.length - 1][0])}</text>
         <text x="${Math.min(width - right, last.x + 8)}" y="${Math.max(14, last.y - 8)}" text-anchor="${last.x > width - 78 ? "end" : "start"}">${formatNumber(last.value)}</text>
@@ -2639,10 +2660,10 @@ function renderColumnChart(title, counts, options = {}) {
         const height = Math.max(4, Math.round((numeric / max) * 100));
         const showLabel = entries.length <= 12 || index % 4 === 0 || index === entries.length - 1;
         return `
-          <div class="column-bar" title="${labeler(key)}: ${formatNumber(numeric)}">
+          <button class="column-bar" type="button" data-chart-point data-chart-label="${escapeAttr(labeler(key))}" data-chart-value="${escapeAttr(formatNumber(numeric))}" aria-label="${escapeAttr(`${labeler(key)}: ${formatNumber(numeric)}`)}">
             <i style="height:${height}%"></i>
             <span>${showLabel ? labeler(key).replace("h", "") : ""}</span>
-          </div>
+          </button>
         `;
       }).join("")}
     </div>
@@ -2666,10 +2687,10 @@ function renderDonutChart(title, counts, options = {}) {
   }).join(", ");
   return chartShell(title, `
     <div class="donut-layout">
-      <div class="donut-chart" style="background:conic-gradient(${gradient});">
+      <div class="donut-chart" data-donut-chart style="background:conic-gradient(${gradient});">
         <div class="donut-chart__value">
-          <span>${formatNumber(total)}</span>
-          <small>Total</small>
+          <span data-donut-total>${formatNumber(total)}</span>
+          <small data-donut-caption>Total</small>
         </div>
       </div>
       <div class="donut-legend">
@@ -2677,11 +2698,11 @@ function renderDonutChart(title, counts, options = {}) {
           const numeric = Number(value) || 0;
           const percent = Math.round((numeric / total) * 100);
           return `
-            <div>
+            <button type="button" class="donut-legend__item" data-donut-segment data-chart-point data-chart-label="${escapeAttr(labeler(key))}" data-chart-value="${escapeAttr(`${formatNumber(numeric)} · ${percent}%`)}" data-donut-value="${numeric}" data-donut-color="${colors[index % colors.length]}" aria-pressed="true">
               <i style="background:${colors[index % colors.length]}"></i>
               <span>${labeler(key)}</span>
               <strong>${percent}%</strong>
-            </div>
+            </button>
           `;
         }).join("")}
       </div>
@@ -2695,8 +2716,48 @@ function chartShell(title, body) {
       <p class="eyebrow">Gráfico</p>
       <h3>${title}</h3>
       ${body}
+      <output class="chart-tooltip" data-chart-tooltip aria-live="polite">Toque ou passe sobre o gráfico para ver os valores.</output>
     </article>
   `;
+}
+
+function showChartPointDetails(point) {
+  const chart = point?.closest(".insight-chart");
+  const tooltip = chart?.querySelector("[data-chart-tooltip]");
+  if (!tooltip) return;
+  chart.querySelectorAll("[data-chart-point].is-active").forEach((entry) => entry.classList.remove("is-active"));
+  point.classList.add("is-active");
+  tooltip.textContent = `${point.dataset.chartLabel || "Valor"}: ${point.dataset.chartValue || "0"}`;
+  tooltip.classList.add("is-visible");
+}
+
+function toggleDonutSegment(segment) {
+  const layout = segment.closest(".donut-layout");
+  const donut = layout?.querySelector("[data-donut-chart]");
+  const segments = [...(layout?.querySelectorAll("[data-donut-segment]") || [])];
+  if (!donut || !segments.length) return;
+
+  const isPressed = segment.getAttribute("aria-pressed") === "true";
+  const activeCount = segments.filter((entry) => entry.getAttribute("aria-pressed") === "true").length;
+  if (!(isPressed && activeCount === 1)) {
+    segment.setAttribute("aria-pressed", String(!isPressed));
+  }
+
+  const active = segments.filter((entry) => entry.getAttribute("aria-pressed") === "true");
+  const total = active.reduce((sum, entry) => sum + Number(entry.dataset.donutValue || 0), 0);
+  let cursor = 0;
+  const gradient = active.map((entry) => {
+    const percent = total ? (Number(entry.dataset.donutValue || 0) / total) * 100 : 0;
+    const start = cursor;
+    cursor += percent;
+    return `${entry.dataset.donutColor} ${start.toFixed(2)}% ${cursor.toFixed(2)}%`;
+  }).join(", ");
+
+  donut.style.background = gradient ? `conic-gradient(${gradient})` : "var(--line)";
+  const totalNode = donut.querySelector("[data-donut-total]");
+  const captionNode = donut.querySelector("[data-donut-caption]");
+  if (totalNode) totalNode.textContent = formatNumber(total);
+  if (captionNode) captionNode.textContent = active.length === segments.length ? "Total" : "Selecionado";
 }
 
 function orderedChartEntries(counts, order) {
@@ -3046,7 +3107,7 @@ document.addEventListener("submit", (event) => {
       button.classList.remove("is-active");
       button.setAttribute("aria-pressed", "false");
     });
-    hydrateInsights(getRestaurant(ACTIVE_CLIENT_SLUG), { forceRefresh: true });
+    hydrateInsights(getRestaurant(ACTIVE_CLIENT_SLUG), { refreshAfterLoad: true });
     return;
   }
 
@@ -3081,6 +3142,12 @@ document.addEventListener("submit", (event) => {
 });
 
 document.addEventListener("click", async (event) => {
+  const chartPoint = event.target.closest("[data-chart-point]");
+  if (chartPoint) {
+    showChartPointDetails(chartPoint);
+    if (chartPoint.matches("[data-donut-segment]")) toggleDonutSegment(chartPoint);
+    return;
+  }
   const scrollButton = event.target.closest("[data-scroll-target]");
   if (scrollButton) {
     event.preventDefault();
@@ -3113,6 +3180,23 @@ document.addEventListener("click", async (event) => {
   if (!value) return;
   await copyToClipboard(value);
   toast("Link copiado.");
+});
+
+document.addEventListener("pointerover", (event) => {
+  const chartPoint = event.target.closest("[data-chart-point]");
+  if (chartPoint) showChartPointDetails(chartPoint);
+});
+
+document.addEventListener("focusin", (event) => {
+  const chartPoint = event.target.closest("[data-chart-point]");
+  if (chartPoint) showChartPointDetails(chartPoint);
+});
+
+document.addEventListener("keydown", (event) => {
+  const chartPoint = event.target.closest(".chart-point[data-chart-point]");
+  if (!chartPoint || !["Enter", " "].includes(event.key)) return;
+  event.preventDefault();
+  showChartPointDetails(chartPoint);
 });
 router();
 
