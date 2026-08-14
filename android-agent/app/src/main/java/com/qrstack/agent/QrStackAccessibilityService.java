@@ -280,9 +280,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             retryOrFail("entering_link", "Instagram recusou o preenchimento do link", 8);
             return;
         }
-        AccessibilityNodeInfo done = findNode(root, "concluir", "done", "pronto", "adicionar", "add");
-        if (click(done)) {
-            advance("positioning_link", "Link clicável inserido", 1200);
+        if (tapDoneInLinkEditor(root)) {
+            advance("positioning_link", "Link clicável inserido; preparando posição e tamanho do sticker", 1400);
         } else retryOrFail("entering_link", "Botão para concluir o link não apareceu", 8);
     }
 
@@ -297,8 +296,18 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             scheduleStep(1500);
             return;
         }
+        if (stepAttempts == 2) {
+            AccessibilityNodeInfo linkSticker = findPlacedLinkSticker(root);
+            Rect source = new Rect();
+            if (linkSticker != null) linkSticker.getBoundsInScreen(source);
+            float centerX = source.isEmpty() ? 0.50f : source.exactCenterX() / getResources().getDisplayMetrics().widthPixels;
+            float centerY = source.isEmpty() ? 0.724f : source.exactCenterY() / getResources().getDisplayMetrics().heightPixels;
+            pinchOut(centerX, centerY, 0.055f, 0.185f, 1050);
+            scheduleStep(1400);
+            return;
+        }
         AccessibilityNodeInfo positioned = findPlacedLinkSticker(root);
-        if (positioned != null && stepAttempts <= 3) {
+        if (positioned != null && stepAttempts <= 5) {
             Rect bounds = new Rect();
             positioned.getBoundsInScreen(bounds);
             int width = getResources().getDisplayMetrics().widthPixels;
@@ -310,6 +319,12 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             if (!insideReservedArea) {
                 drag(bounds.exactCenterX() / width, bounds.exactCenterY() / height, 0.50f, 0.724f, 1200);
                 scheduleStep(1500);
+                return;
+            }
+            boolean largeEnough = bounds.width() >= width * 0.34f || bounds.height() >= height * 0.06f;
+            if (!largeEnough) {
+                pinchOut(bounds.exactCenterX() / width, bounds.exactCenterY() / height, 0.045f, 0.165f, 950);
+                scheduleStep(1300);
                 return;
             }
         }
@@ -533,6 +548,53 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         return null;
     }
 
+    private boolean tapDoneInLinkEditor(AccessibilityNodeInfo root) {
+        if (root == null || findLinkEditor(root) == null) return false;
+        AccessibilityNodeInfo done = findTopRightAction(root, "done", "concluir", "pronto");
+        if (tapNodeCenter(done)) return true;
+
+        int width = getResources().getDisplayMetrics().widthPixels;
+        int height = getResources().getDisplayMetrics().heightPixels;
+        return tapAbsolute(width * 0.905f, height * 0.263f);
+    }
+
+    private AccessibilityNodeInfo findTopRightAction(AccessibilityNodeInfo root, String... labels) {
+        if (root == null) return null;
+        Set<String> expected = new HashSet<>();
+        for (String label : labels) expected.add(normalize(label));
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        AccessibilityNodeInfo best = null;
+        int bestScore = Integer.MIN_VALUE;
+
+        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
+        queue.add(root);
+        while (!queue.isEmpty()) {
+            AccessibilityNodeInfo node = queue.removeFirst();
+            String text = normalizeWords(node.getText());
+            String description = normalizeWords(node.getContentDescription());
+            Rect bounds = new Rect();
+            node.getBoundsInScreen(bounds);
+            boolean labelMatches = matchesAny(text, expected, true) || matchesAny(description, expected, true);
+            boolean topRight = !bounds.isEmpty()
+                    && bounds.exactCenterX() >= screenWidth * 0.68f
+                    && bounds.exactCenterY() <= screenHeight * 0.36f;
+            if (labelMatches && topRight) {
+                int score = (int) bounds.exactCenterX() - Math.abs((int) bounds.exactCenterY() - (int) (screenHeight * 0.265f));
+                if (node.isClickable()) score += 400;
+                if (score > bestScore) {
+                    best = node;
+                    bestScore = score;
+                }
+            }
+            for (int index = 0; index < node.getChildCount(); index += 1) {
+                AccessibilityNodeInfo child = node.getChild(index);
+                if (child != null) queue.add(child);
+            }
+        }
+        return best;
+    }
+
     private boolean isConfirmedLinkEditorScreen(AccessibilityNodeInfo root) {
         return findNode(root,
                 "adicionar link", "adicione um link", "inserir link", "link externo",
@@ -745,6 +807,30 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         path.lineTo(width * toX, height * toY);
         dispatchGesture(new GestureDescription.Builder()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, duration))
+                .build(), null, null);
+    }
+
+    private void pinchOut(float centerX, float centerY, float startRadius, float endRadius, long duration) {
+        int width = getResources().getDisplayMetrics().widthPixels;
+        int height = getResources().getDisplayMetrics().heightPixels;
+        float centerPx = width * centerX;
+        float centerPy = height * centerY;
+        float startX = width * startRadius;
+        float startY = height * startRadius;
+        float endX = width * endRadius;
+        float endY = height * endRadius;
+
+        Path first = new Path();
+        first.moveTo(centerPx - startX, centerPy - startY);
+        first.lineTo(centerPx - endX, centerPy - endY);
+
+        Path second = new Path();
+        second.moveTo(centerPx + startX, centerPy + startY);
+        second.lineTo(centerPx + endX, centerPy + endY);
+
+        dispatchGesture(new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(first, 0, duration))
+                .addStroke(new GestureDescription.StrokeDescription(second, 0, duration))
                 .build(), null, null);
     }
 
