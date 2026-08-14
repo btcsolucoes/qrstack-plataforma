@@ -282,13 +282,34 @@ public final class QrStackAccessibilityService extends AccessibilityService {
 
     private void positionStickerAndShare(AccessibilityNodeInfo root) {
         if (stepAttempts == 1) {
-            drag(0.50f, 0.50f, 0.50f, 0.72f, 650);
-            scheduleStep(850);
+            AccessibilityNodeInfo linkSticker = findPlacedLinkSticker(root);
+            Rect source = new Rect();
+            if (linkSticker != null) linkSticker.getBoundsInScreen(source);
+            float fromX = source.isEmpty() ? 0.50f : source.exactCenterX() / getResources().getDisplayMetrics().widthPixels;
+            float fromY = source.isEmpty() ? 0.50f : source.exactCenterY() / getResources().getDisplayMetrics().heightPixels;
+            drag(fromX, fromY, 0.50f, 0.724f, 850);
+            scheduleStep(1100);
             return;
+        }
+        AccessibilityNodeInfo positioned = findPlacedLinkSticker(root);
+        if (positioned != null && stepAttempts <= 3) {
+            Rect bounds = new Rect();
+            positioned.getBoundsInScreen(bounds);
+            int width = getResources().getDisplayMetrics().widthPixels;
+            int height = getResources().getDisplayMetrics().heightPixels;
+            boolean insideReservedArea = bounds.exactCenterX() >= width * 0.28f
+                    && bounds.exactCenterX() <= width * 0.72f
+                    && bounds.exactCenterY() >= height * 0.65f
+                    && bounds.exactCenterY() <= height * 0.79f;
+            if (!insideReservedArea) {
+                drag(bounds.exactCenterX() / width, bounds.exactCenterY() / height, 0.50f, 0.724f, 850);
+                scheduleStep(1100);
+                return;
+            }
         }
         AccessibilityNodeInfo share = findNode(root, "seu story", "your story", "compartilhar", "share", "publicar", "publish");
         if (click(share)) {
-            advance("awaiting_publish_confirmation", "Comando de publicação enviado; aguardando confirmação visual", 5000);
+            advance("awaiting_publish_confirmation", "Link posicionado na área reservada e comando de publicação enviado", 5000);
             return;
         }
         if (stepAttempts >= 7) fail("Botão de publicar o Story não foi encontrado");
@@ -393,6 +414,37 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             }
         }
         return null;
+    }
+
+    private AccessibilityNodeInfo findPlacedLinkSticker(AccessibilityNodeInfo root) {
+        if (root == null || activeJob == null) return null;
+        String fullLink = normalize(activeJob.storyLink);
+        String compactLink = fullLink.replace("https://", "").replace("http://", "").replace("www.", "");
+        AccessibilityNodeInfo best = null;
+        int bestArea = Integer.MAX_VALUE;
+        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
+        queue.add(root);
+        while (!queue.isEmpty()) {
+            AccessibilityNodeInfo node = queue.removeFirst();
+            String text = normalize(node.getText());
+            String description = normalize(node.getContentDescription());
+            Rect bounds = new Rect();
+            node.getBoundsInScreen(bounds);
+            boolean matchesLink = (!compactLink.isEmpty() && (text.contains(compactLink) || description.contains(compactLink)))
+                    || (!fullLink.isEmpty() && (text.contains(fullLink) || description.contains(fullLink)));
+            if (matchesLink && !bounds.isEmpty() && !hasEditableAncestor(node)) {
+                int area = bounds.width() * bounds.height();
+                if (area < bestArea) {
+                    best = node;
+                    bestArea = area;
+                }
+            }
+            for (int index = 0; index < node.getChildCount(); index += 1) {
+                AccessibilityNodeInfo child = node.getChild(index);
+                if (child != null) queue.add(child);
+            }
+        }
+        return best;
     }
 
     private AccessibilityNodeInfo findStickerResult(AccessibilityNodeInfo root, String label) {
