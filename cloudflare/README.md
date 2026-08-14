@@ -114,4 +114,4 @@ Os indicadores diarios usam o fuso `America/Recife`. Cada data cobre as 24 horas
 
 ## 11. Carregamento rapido dos Insights
 
-O Worker salva o ultimo snapshot real dos Insights no KV `INSIGHTS_CACHE`. Um Cron Trigger atualiza o painel padrao do Amaro a cada cinco minutos. A plataforma recebe o snapshot pronto imediatamente; se ele estiver atrasado, continua exibindo a leitura valida enquanto o Worker recalcula os D1 em segundo plano.
+O Worker salva o ultimo snapshot real dos Insights no KV `INSIGHTS_CACHE`. Um Cron Trigger atualiza os periodos padrao do Amaro a cada dez minutos. A plataforma recebe o snapshot pronto imediatamente; se ele estiver atrasado, continua exibindo a leitura valida enquanto o Worker recalcula os D1 em segundo plano.

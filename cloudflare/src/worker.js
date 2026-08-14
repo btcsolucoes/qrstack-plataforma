@@ -141,6 +141,7 @@ export default {
       refreshInsightsSnapshot(env, { slug: "amaro", startDate: "", endDate: "" }),
       refreshInsightsSnapshot(env, { slug: "amaro", startDate: today, endDate: today }),
       refreshInsightsSnapshot(env, { slug: "amaro", startDate: daysAgoIso(6), endDate: today }),
+      refreshInsightsSnapshot(env, { slug: "amaro", startDate: daysAgoIso(29), endDate: today }),
     ]));
   },
 };
