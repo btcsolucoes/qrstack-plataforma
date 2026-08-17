@@ -274,6 +274,9 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             case "verifying_link":
                 verifyPlacedLinkAndShare(root);
                 break;
+            case "final_visual_audit":
+                auditStoryVisuallyAndPublish();
+                break;
             case "awaiting_publish_confirmation":
                 verifyPublished(root);
                 break;
@@ -1112,13 +1115,100 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             advance("setting_link_style", "Transparência ainda não foi confirmada visualmente", 350);
             return;
         }
-        AccessibilityNodeInfo share = findStoryShareAction(root);
-        if (click(share)) {
-            advance("awaiting_publish_confirmation", "Link posicionado na área reservada e comando de publicação enviado", 5000);
+        advance("final_visual_audit", "Iniciando auditoria visual final antes de publicar", 650);
+    }
+
+    private void auditStoryVisuallyAndPublish() {
+        if (visualScanInFlight) return;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            fail("O Android deste aparelho não permite a auditoria visual final");
             return;
         }
-        if (stepAttempts >= 7) fail("Botão de publicar o Story não foi encontrado");
-        else retry("verifying_link", 800);
+        visualScanInFlight = true;
+        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+            @Override
+            public void onSuccess(ScreenshotResult screenshot) {
+                Bitmap bitmap = copyScreenshotBitmap(screenshot);
+                if (bitmap == null) {
+                    finishFinalAuditFailure("A captura da auditoria final veio vazia");
+                    return;
+                }
+                TextRecognizer recognizer = textRecognizer;
+                if (recognizer == null) {
+                    bitmap.recycle();
+                    finishFinalAuditFailure("O leitor visual não iniciou na auditoria final");
+                    return;
+                }
+                recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                        .addOnSuccessListener(getMainExecutor(), visionText -> {
+                            Rect linkText = findPlacedLinkTextBounds(visionText, bitmap.getWidth(), bitmap.getHeight());
+                            if (linkText == null) {
+                                bitmap.recycle();
+                                finishFinalAuditFailure("Auditoria reprovada: o domínio do link não está visível no Story");
+                                return;
+                            }
+                            int width = bitmap.getWidth();
+                            int height = bitmap.getHeight();
+                            int storyHeight = Math.min(height, Math.round(width * (16f / 9f)));
+                            float targetX = width * 0.50f;
+                            float targetY = storyHeight * (1390f / 1920f);
+                            float deltaX = linkText.exactCenterX() - targetX;
+                            float deltaY = linkText.exactCenterY() - targetY;
+                            boolean centered = Math.abs(deltaX) <= width * 0.022f
+                                    && Math.abs(deltaY) <= storyHeight * 0.022f;
+                            boolean largeEnough = linkText.width() >= width * 0.36f;
+                            StickerAppearance appearance = measureStickerAppearance(bitmap, linkText);
+                            bitmap.recycle();
+                            visualScanInFlight = false;
+                            if (!isCurrentCheckpoint("final_visual_audit")) return;
+
+                            if (!centered) {
+                                positioningCorrections = 0;
+                                advance("moving_link", "Auditoria reprovada: link fora do centro (x="
+                                        + Math.round(deltaX) + ", y=" + Math.round(deltaY) + ")", 450);
+                                return;
+                            }
+                            if (!largeEnough) {
+                                linkScaleCompleted = false;
+                                advance("selecting_link_for_scale", "Auditoria reprovada: sticker menor que 36% da largura", 450);
+                                return;
+                            }
+                            if (!appearance.translucent) {
+                                linkStyleApplied = false;
+                                linkStyleTapAttempts = 0;
+                                advance("setting_link_style", "Auditoria reprovada: fundo ainda opaco (diferença "
+                                        + Math.round(appearance.backgroundDifference) + ")", 450);
+                                return;
+                            }
+
+                            AccessibilityNodeInfo currentRoot = getRootInActiveWindow();
+                            AccessibilityNodeInfo share = findStoryShareAction(currentRoot);
+                            if (click(share)) {
+                                advance("awaiting_publish_confirmation",
+                                        "Auditoria aprovada: link visível, centralizado, ampliado e translúcido; publicação enviada", 5000);
+                            } else {
+                                finishFinalAuditFailure("Auditoria aprovada, mas o botão de publicar não foi encontrado");
+                            }
+                        })
+                        .addOnFailureListener(getMainExecutor(), error -> {
+                            bitmap.recycle();
+                            finishFinalAuditFailure("Falha ao analisar a auditoria visual final");
+                        });
+            }
+
+            @Override
+            public void onFailure(int errorCode) {
+                finishFinalAuditFailure("O Android recusou a auditoria visual final (" + errorCode + ")");
+            }
+        });
+    }
+
+    private void finishFinalAuditFailure(String detail) {
+        visualScanInFlight = false;
+        if (!isCurrentCheckpoint("final_visual_audit")) return;
+        AgentService service = AgentService.current();
+        if (service != null) service.checkpoint(activeJob, "final_visual_audit", detail);
+        retryOrFail("final_visual_audit", detail + "; publicação bloqueada", 6);
     }
 
     private AccessibilityNodeInfo findStoryShareAction(AccessibilityNodeInfo root) {

@@ -33,8 +33,13 @@ final class ApiClient {
     }
 
     StoryJob nextJob() throws IOException, JSONException {
-        String query = "?action=getNextStoryJob&device_id=" + encode(preferences.deviceId(context));
+        String query = "?action=getNextStoryJob&device_id=" + encode(preferences.deviceId(context))
+                + "&app_version=" + encode(BuildConfig.VERSION_NAME);
         JSONObject response = get(query, true);
+        if (response.optBoolean("update_required", false)) {
+            throw new IOException("Atualização obrigatória do agente: versão mínima "
+                    + response.optString("minimum_version", BuildConfig.VERSION_NAME));
+        }
         JSONObject job = response.optJSONObject("job");
         return job == null ? null : new StoryJob(job);
     }
