@@ -9,7 +9,7 @@ import java.util.Base64;
 
 final class AgentPreferences {
     private static final String FILE = "qrstack_agent";
-    private static final int STATE_SCHEMA_VERSION = 16;
+    private static final int STATE_SCHEMA_VERSION = 17;
     private final SharedPreferences preferences;
 
     AgentPreferences(Context context) {
