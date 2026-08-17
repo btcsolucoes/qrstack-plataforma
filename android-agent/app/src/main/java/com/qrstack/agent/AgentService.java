@@ -72,6 +72,7 @@ public final class AgentService extends Service {
                         api.updateJob(job, "paused_interruption", "paused_by_operator", "Agente pausado manualmente no telefone");
                     } catch (Exception ignored) {
                     } finally {
+                        preferences.resetJobState();
                         updateNotification("Agente pausado", "Só será retomado pelo botão Iniciar agente");
                         stopSelf();
                     }
@@ -120,8 +121,25 @@ public final class AgentService extends Service {
         preferences.setCheckpoint("downloading_media");
         updateNotification("Preparando Story", job.restaurantSlug);
         api.updateJob(job, "preparing", "downloading_media", "Arte sendo preparada no telefone");
-        byte[] media = api.download(job.mediaUrl);
-        Uri uri = MediaStoreHelper.saveStory(this, job, media);
+        byte[] media;
+        Uri uri;
+        try {
+            media = api.download(job.mediaUrl);
+            uri = MediaStoreHelper.saveStory(this, job, media);
+            preferences.resetRecoveryAttempts();
+        } catch (Exception error) {
+            int attempts = preferences.incrementRecoveryAttempts();
+            if (attempts >= 3) {
+                try {
+                    api.updateJob(job, "failed_attention", "media_unavailable",
+                            "A arte não pôde ser baixada após 3 tentativas; job preservado e fila liberada");
+                } catch (Exception ignored) {
+                }
+                preferences.resetJobState();
+                updateNotification("Arte indisponível", "A fila seguirá para a próxima publicação");
+            }
+            throw error;
+        }
         if (!preferences.shouldRun()) return;
         preferences.setMediaUri(uri.toString());
         copyStoryLink(job.storyLink);
