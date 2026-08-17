@@ -76,6 +76,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     private boolean manipulationGestureInFlight;
     private boolean linkDragCompleted;
     private boolean linkStyleApplied;
+    private boolean linkScaleCompleted;
+    private int linkStyleTapAttempts;
     private static volatile QrStackAccessibilityService instance;
     private static volatile String foregroundPackage = "";
     private static volatile long foregroundSeenAt;
@@ -202,6 +204,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             positioningCorrections = 0;
             linkDragCompleted = false;
             linkStyleApplied = false;
+            linkScaleCompleted = false;
+            linkStyleTapAttempts = 0;
             interrupted = "paused_interruption".equals(preferences.checkpoint());
         }
     }
@@ -251,6 +255,9 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 break;
             case "moving_link":
                 movePlacedLink(root);
+                break;
+            case "verifying_link_position":
+                verifyPlacedLinkPositionVisually();
                 break;
             case "selecting_link_for_scale":
                 selectPlacedLinkForScale(root);
@@ -620,6 +627,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             positioningCorrections = 0;
             linkDragCompleted = false;
             linkStyleApplied = false;
+            linkScaleCompleted = false;
+            linkStyleTapAttempts = 0;
             advance("positioning_link", "Link clicável inserido; preparando posição e tamanho do sticker", 1400);
         } else retryOrFail("entering_link", "Botão para concluir o link não apareceu", 8);
     }
@@ -816,11 +825,11 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                     manipulationGestureInFlight = false;
                     if (preferences == null || !preferences.shouldRun() || activeJob == null) return;
                     linkDragCompleted = true;
-                    advance("selecting_link_for_scale",
+                    advance("verifying_link_position",
                             "Sticker localizado por " + method + " e arrastado de ("
                                     + Math.round(width * fromX) + "," + Math.round(height * fromY)
                                     + ") para o centro da área (" + Math.round(width * toX) + ","
-                                    + Math.round(height * toY) + ")", 700);
+                                    + Math.round(height * toY) + "); aguardando confirmação visual", 900);
                 },
                 () -> {
                     manipulationGestureInFlight = false;
@@ -832,7 +841,93 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     private void finishPlacedLinkScanFailure(String detail) {
         visualScanInFlight = false;
         if (!isCurrentCheckpoint("moving_link")) return;
+        AgentService service = AgentService.current();
+        if (service != null) service.checkpoint(activeJob, "moving_link", detail);
         retryOrFail("moving_link", detail + "; publicação bloqueada para evitar posicionamento incorreto", 6);
+    }
+
+    private void verifyPlacedLinkPositionVisually() {
+        if (visualScanInFlight) return;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            fail("O Android deste aparelho não permite confirmar visualmente a posição do sticker");
+            return;
+        }
+        visualScanInFlight = true;
+        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+            @Override
+            public void onSuccess(ScreenshotResult screenshot) {
+                Bitmap bitmap = copyScreenshotBitmap(screenshot);
+                if (bitmap == null) {
+                    finishPositionVerificationFailure("A captura de confirmação veio vazia");
+                    return;
+                }
+                TextRecognizer recognizer = textRecognizer;
+                if (recognizer == null) {
+                    bitmap.recycle();
+                    finishPositionVerificationFailure("O leitor visual não iniciou na confirmação de posição");
+                    return;
+                }
+                recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                        .addOnSuccessListener(getMainExecutor(), visionText -> {
+                            Rect sticker = findPlacedLinkTextBounds(visionText, bitmap.getWidth(), bitmap.getHeight());
+                            if (sticker == null) sticker = findPlacedLinkPillBounds(bitmap);
+                            int width = bitmap.getWidth();
+                            int height = bitmap.getHeight();
+                            int storyHeight = Math.min(height, Math.round(width * (16f / 9f)));
+                            bitmap.recycle();
+                            visualScanInFlight = false;
+                            if (!isCurrentCheckpoint("verifying_link_position")) return;
+                            if (sticker == null) {
+                                finishPositionVerificationFailure("O link não apareceu na captura após o arraste");
+                                return;
+                            }
+                            float targetX = width * 0.50f;
+                            float targetY = storyHeight * (1390f / 1920f);
+                            float deltaX = sticker.exactCenterX() - targetX;
+                            float deltaY = sticker.exactCenterY() - targetY;
+                            boolean centered = Math.abs(deltaX) <= width * 0.022f
+                                    && Math.abs(deltaY) <= storyHeight * 0.022f;
+                            if (centered) {
+                                positioningCorrections = 0;
+                                if (linkScaleCompleted) {
+                                    advance("setting_link_style",
+                                            "Centro confirmado visualmente em (" + Math.round(sticker.exactCenterX())
+                                                    + "," + Math.round(sticker.exactCenterY()) + ")", 650);
+                                } else {
+                                    advance("selecting_link_for_scale",
+                                            "Centro confirmado visualmente em (" + Math.round(sticker.exactCenterX())
+                                                    + "," + Math.round(sticker.exactCenterY()) + ")", 500);
+                                }
+                                return;
+                            }
+                            if (positioningCorrections >= 3) {
+                                fail("O sticker continuou fora do centro após 3 correções visuais (desvio x="
+                                        + Math.round(deltaX) + ", y=" + Math.round(deltaY) + ")");
+                                return;
+                            }
+                            positioningCorrections += 1;
+                            advance("moving_link", "Correção visual " + positioningCorrections
+                                    + ": desvio medido x=" + Math.round(deltaX) + ", y=" + Math.round(deltaY), 450);
+                        })
+                        .addOnFailureListener(getMainExecutor(), error -> {
+                            bitmap.recycle();
+                            finishPositionVerificationFailure("Falha ao ler a posição final do sticker");
+                        });
+            }
+
+            @Override
+            public void onFailure(int errorCode) {
+                finishPositionVerificationFailure("O Android recusou a captura de confirmação (" + errorCode + ")");
+            }
+        });
+    }
+
+    private void finishPositionVerificationFailure(String detail) {
+        visualScanInFlight = false;
+        if (!isCurrentCheckpoint("verifying_link_position")) return;
+        AgentService service = AgentService.current();
+        if (service != null) service.checkpoint(activeJob, "verifying_link_position", detail);
+        retryOrFail("verifying_link_position", detail + "; publicação bloqueada sem confirmação", 6);
     }
 
     private void selectPlacedLinkForScale(AccessibilityNodeInfo root) {
@@ -845,6 +940,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         float centerX = 0.50f;
         float centerY = storyStickerTargetYFraction();
         if (pinchOutHorizontal(centerX, centerY, 0.075f, 0.145f, 1050)) {
+            linkScaleCompleted = true;
             advance("recentering_link", "Sticker LINK ampliado", 1350);
         } else retryOrFail("scaling_link", "O Android recusou o gesto de ampliar o sticker", 5);
     }
@@ -854,7 +950,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             advance("moving_link", "Posição do sticker ainda não foi confirmada; repetindo o arraste", 350);
             return;
         }
-        advance("setting_link_style", "Ampliação simétrica concluída sem alterar o centro do sticker", 700);
+        advance("verifying_link_position", "Ampliação concluída; reconfirmando o centro visual", 800);
     }
 
     private void setTranslucentLinkStyle(AccessibilityNodeInfo root) {
@@ -866,45 +962,155 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             advance("verifying_link", "Estilo translúcido do sticker confirmado", 700);
             return;
         }
-        if (tap(0.50f, storyStickerTargetYFraction())) {
-            linkStyleApplied = true;
-            advance("verifying_link", "Sticker LINK alternado para o estilo translúcido", 900);
-        } else retryOrFail("setting_link_style", "O sticker não respondeu ao toque para mudar o estilo", 5);
+        ensureTranslucentLinkStyleVisually();
+    }
+
+    private void ensureTranslucentLinkStyleVisually() {
+        if (visualScanInFlight) return;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            fail("O Android deste aparelho não permite confirmar o estilo translúcido");
+            return;
+        }
+        visualScanInFlight = true;
+        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+            @Override
+            public void onSuccess(ScreenshotResult screenshot) {
+                Bitmap bitmap = copyScreenshotBitmap(screenshot);
+                if (bitmap == null) {
+                    finishStyleVerificationFailure("A captura do estilo do sticker veio vazia");
+                    return;
+                }
+                TextRecognizer recognizer = textRecognizer;
+                if (recognizer == null) {
+                    bitmap.recycle();
+                    finishStyleVerificationFailure("O leitor visual não iniciou na confirmação do estilo");
+                    return;
+                }
+                recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                        .addOnSuccessListener(getMainExecutor(), visionText -> {
+                            Rect textBounds = findPlacedLinkTextBounds(visionText, bitmap.getWidth(), bitmap.getHeight());
+                            if (textBounds == null) {
+                                bitmap.recycle();
+                                finishStyleVerificationFailure("O texto do link não foi localizado para conferir a transparência");
+                                return;
+                            }
+                            StickerAppearance appearance = measureStickerAppearance(bitmap, textBounds);
+                            bitmap.recycle();
+                            visualScanInFlight = false;
+                            if (!isCurrentCheckpoint("setting_link_style")) return;
+                            if (appearance.translucent) {
+                                linkStyleApplied = true;
+                                advance("verifying_link", "Transparência confirmada visualmente (diferença de fundo "
+                                        + Math.round(appearance.backgroundDifference) + ")", 700);
+                                return;
+                            }
+                            if (linkStyleTapAttempts >= 6) {
+                                fail("O Instagram percorreu os estilos disponíveis, mas o sticker translúcido não foi confirmado");
+                                return;
+                            }
+                            linkStyleTapAttempts += 1;
+                            if (!tapAbsolute(textBounds.exactCenterX(), textBounds.exactCenterY())) {
+                                fail("O sticker não respondeu ao toque para alternar o estilo");
+                                return;
+                            }
+                            advance("setting_link_style", "Alternando estilo " + linkStyleTapAttempts
+                                    + ": fundo ainda opaco (diferença "
+                                    + Math.round(appearance.backgroundDifference) + ")", 750);
+                        })
+                        .addOnFailureListener(getMainExecutor(), error -> {
+                            bitmap.recycle();
+                            finishStyleVerificationFailure("Falha ao analisar visualmente a transparência do sticker");
+                        });
+            }
+
+            @Override
+            public void onFailure(int errorCode) {
+                finishStyleVerificationFailure("O Android recusou a captura do estilo (" + errorCode + ")");
+            }
+        });
+    }
+
+    private StickerAppearance measureStickerAppearance(Bitmap bitmap, Rect textBounds) {
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        int padX = Math.max(10, Math.round(textBounds.width() * 0.10f));
+        int padY = Math.max(12, Math.round(textBounds.height() * 0.72f));
+        Rect pill = new Rect(
+                Math.max(0, textBounds.left - padX),
+                Math.max(0, textBounds.top - padY),
+                Math.min(width, textBounds.right + padX),
+                Math.min(height, textBounds.bottom + padY)
+        );
+        int bandHeight = Math.max(3, Math.round(pill.height() * 0.18f));
+        Rect insideTop = new Rect(pill.left + padX, pill.top + bandHeight,
+                pill.right - padX, Math.min(pill.bottom, pill.top + bandHeight * 2));
+        Rect insideBottom = new Rect(pill.left + padX, Math.max(pill.top, pill.bottom - bandHeight * 2),
+                pill.right - padX, pill.bottom - bandHeight);
+        int sideWidth = Math.max(8, Math.round(width * 0.035f));
+        Rect outsideLeft = new Rect(Math.max(0, pill.left - sideWidth), pill.top + bandHeight,
+                pill.left, pill.bottom - bandHeight);
+        Rect outsideRight = new Rect(pill.right, pill.top + bandHeight,
+                Math.min(width, pill.right + sideWidth), pill.bottom - bandHeight);
+
+        ColorSample inside = sampleColors(bitmap, insideTop, insideBottom);
+        ColorSample outside = sampleColors(bitmap, outsideLeft, outsideRight);
+        float redDelta = inside.red - outside.red;
+        float greenDelta = inside.green - outside.green;
+        float blueDelta = inside.blue - outside.blue;
+        float difference = (float) Math.sqrt(redDelta * redDelta + greenDelta * greenDelta + blueDelta * blueDelta);
+        boolean translucent = inside.count > 0 && outside.count > 0
+                && difference <= 58f
+                && inside.whiteRatio <= 0.20f
+                && inside.darkRatio <= 0.28f;
+        return new StickerAppearance(translucent, difference, inside.whiteRatio, inside.darkRatio);
+    }
+
+    private ColorSample sampleColors(Bitmap bitmap, Rect... regions) {
+        long red = 0;
+        long green = 0;
+        long blue = 0;
+        int white = 0;
+        int dark = 0;
+        int count = 0;
+        int stride = Math.max(1, bitmap.getWidth() / 720);
+        for (Rect region : regions) {
+            if (region == null || region.isEmpty()) continue;
+            for (int y = region.top; y < region.bottom; y += stride) {
+                for (int x = region.left; x < region.right; x += stride) {
+                    int color = bitmap.getPixel(x, y);
+                    int r = (color >> 16) & 0xff;
+                    int g = (color >> 8) & 0xff;
+                    int b = color & 0xff;
+                    red += r;
+                    green += g;
+                    blue += b;
+                    if (r >= 210 && g >= 210 && b >= 210) white += 1;
+                    if (r <= 72 && g <= 72 && b <= 72) dark += 1;
+                    count += 1;
+                }
+            }
+        }
+        if (count == 0) return new ColorSample(0f, 0f, 0f, 0f, 0f, 0);
+        return new ColorSample(red / (float) count, green / (float) count, blue / (float) count,
+                white / (float) count, dark / (float) count, count);
+    }
+
+    private void finishStyleVerificationFailure(String detail) {
+        visualScanInFlight = false;
+        if (!isCurrentCheckpoint("setting_link_style")) return;
+        AgentService service = AgentService.current();
+        if (service != null) service.checkpoint(activeJob, "setting_link_style", detail);
+        retryOrFail("setting_link_style", detail + "; publicação bloqueada sem confirmação", 6);
     }
 
     private void verifyPlacedLinkAndShare(AccessibilityNodeInfo root) {
-        if (!linkDragCompleted) {
-            advance("moving_link", "Arraste não concluído; publicação bloqueada até posicionar o link", 350);
+        if (!linkDragCompleted || !linkScaleCompleted) {
+            advance("moving_link", "Posição ou tamanho ainda não foram confirmados visualmente", 350);
             return;
         }
-        AccessibilityNodeInfo positioned = findPlacedLinkSticker(root);
-        if (positioned != null) {
-            Rect bounds = new Rect();
-            positioned.getBoundsInScreen(bounds);
-            int width = getResources().getDisplayMetrics().widthPixels;
-            int height = getResources().getDisplayMetrics().heightPixels;
-            float targetY = storyStickerTargetYFraction();
-            boolean centered = Math.abs(bounds.exactCenterX() - width * 0.50f) <= width * 0.055f
-                    && Math.abs(bounds.exactCenterY() - height * targetY) <= height * 0.045f;
-            if (!centered && positioningCorrections < 2) {
-                positioningCorrections += 1;
-                advance("moving_link", "Sticker fora do centro; repetindo o ajuste de posição", 350);
-                return;
-            }
-            if (!centered) {
-                fail("O sticker LINK continuou fora da área pontilhada; publicação interrompida para não postar errado");
-                return;
-            }
-            boolean largeEnough = bounds.width() >= width * 0.46f;
-            if (!largeEnough && positioningCorrections < 2) {
-                positioningCorrections += 1;
-                advance("selecting_link_for_scale", "Sticker ainda pequeno; repetindo a ampliação", 350);
-                return;
-            }
-            if (!largeEnough) {
-                fail("O sticker LINK continuou pequeno; publicação interrompida para não postar errado");
-                return;
-            }
+        if (!linkStyleApplied) {
+            advance("setting_link_style", "Transparência ainda não foi confirmada visualmente", 350);
+            return;
         }
         AccessibilityNodeInfo share = findStoryShareAction(root);
         if (click(share)) {
@@ -986,6 +1192,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         manipulationGestureInFlight = false;
         linkDragCompleted = false;
         linkStyleApplied = false;
+        linkScaleCompleted = false;
+        linkStyleTapAttempts = 0;
         visualScanInFlight = false;
         interrupted = true;
         activeJob = null;
@@ -1383,6 +1591,38 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 .addStroke(new GestureDescription.StrokeDescription(first, 0, duration))
                 .addStroke(new GestureDescription.StrokeDescription(second, 0, duration))
                 .build(), null, null);
+    }
+
+    private static final class ColorSample {
+        final float red;
+        final float green;
+        final float blue;
+        final float whiteRatio;
+        final float darkRatio;
+        final int count;
+
+        ColorSample(float red, float green, float blue, float whiteRatio, float darkRatio, int count) {
+            this.red = red;
+            this.green = green;
+            this.blue = blue;
+            this.whiteRatio = whiteRatio;
+            this.darkRatio = darkRatio;
+            this.count = count;
+        }
+    }
+
+    private static final class StickerAppearance {
+        final boolean translucent;
+        final float backgroundDifference;
+        final float whiteRatio;
+        final float darkRatio;
+
+        StickerAppearance(boolean translucent, float backgroundDifference, float whiteRatio, float darkRatio) {
+            this.translucent = translucent;
+            this.backgroundDifference = backgroundDifference;
+            this.whiteRatio = whiteRatio;
+            this.darkRatio = darkRatio;
+        }
     }
 
     private static String normalize(CharSequence value) {
