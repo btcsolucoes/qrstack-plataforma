@@ -73,6 +73,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     private String lastLinkTapDiagnostic = "";
     private TextRecognizer textRecognizer;
     private boolean visualScanInFlight;
+    private boolean manipulationGestureInFlight;
+    private boolean linkDragCompleted;
     private static volatile QrStackAccessibilityService instance;
     private static volatile String foregroundPackage = "";
     private static volatile long foregroundSeenAt;
@@ -197,12 +199,14 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             lastStep = "";
             stepAttempts = 0;
             positioningCorrections = 0;
+            linkDragCompleted = false;
             interrupted = "paused_interruption".equals(preferences.checkpoint());
         }
     }
 
     private void scheduleStep(long delayMs) {
-        if (stepScheduled || interrupted || activeJob == null || preferences == null || !preferences.shouldRun()) return;
+        if (stepScheduled || manipulationGestureInFlight || interrupted
+                || activeJob == null || preferences == null || !preferences.shouldRun()) return;
         stepScheduled = true;
         handler.postDelayed(() -> {
             stepScheduled = false;
@@ -609,6 +613,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         }
         if (tapDoneInLinkEditor(root)) {
             positioningCorrections = 0;
+            linkDragCompleted = false;
             advance("positioning_link", "Link clicável inserido; preparando posição e tamanho do sticker", 1400);
         } else retryOrFail("entering_link", "Botão para concluir o link não apareceu", 8);
     }
@@ -622,61 +627,68 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             retryOrFail("positioning_link", "O editor do Story não reapareceu depois de concluir o link", 8);
             return;
         }
-        AccessibilityNodeInfo sticker = findPlacedLinkSticker(root);
-        boolean dispatched = sticker != null ? tapNodeCenter(sticker) : tap(0.50f, storyCenterYFraction());
+        // O Instagram sempre cria o sticker no centro do canvas. Os limites
+        // informados pela acessibilidade podem apontar para o texto da URL.
+        boolean dispatched = tap(0.50f, storyCenterYFraction());
         if (dispatched) {
             advance("moving_link", "Sticker LINK selecionado para posicionamento", 450);
         } else retryOrFail("positioning_link", "O sticker LINK não respondeu ao toque de seleção", 6);
     }
 
     private void movePlacedLink(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo sticker = findPlacedLinkSticker(root);
-        Rect bounds = new Rect();
-        if (sticker != null) sticker.getBoundsInScreen(bounds);
         int width = getResources().getDisplayMetrics().widthPixels;
         int height = getResources().getDisplayMetrics().heightPixels;
-        float fromX = bounds.isEmpty() ? 0.50f : bounds.exactCenterX() / width;
-        float fromY = bounds.isEmpty() ? storyCenterYFraction() : bounds.exactCenterY() / height;
-        if (drag(fromX, fromY, 0.50f, storyStickerTargetYFraction(), 1450)) {
-            advance("selecting_link_for_scale", "Sticker movido para o centro da área pontilhada", 1650);
-        } else retryOrFail("moving_link", "O Android recusou o gesto de mover o sticker", 5);
+        float fromX = 0.50f;
+        float fromY = storyCenterYFraction();
+        float toX = 0.50f;
+        float toY = storyStickerTargetYFraction();
+        if (manipulationGestureInFlight) return;
+        manipulationGestureInFlight = true;
+        dragWithHold(fromX, fromY, toX, toY, 360, 1150,
+                () -> {
+                    manipulationGestureInFlight = false;
+                    if (preferences == null || !preferences.shouldRun() || activeJob == null) return;
+                    linkDragCompleted = true;
+                    advance("selecting_link_for_scale",
+                            "Sticker arrastado de (" + Math.round(width * fromX) + "," + Math.round(height * fromY)
+                                    + ") para o centro da área (" + Math.round(width * toX) + ","
+                                    + Math.round(height * toY) + ")", 700);
+                },
+                () -> {
+                    manipulationGestureInFlight = false;
+                    if (preferences == null || !preferences.shouldRun() || activeJob == null) return;
+                    retryOrFail("moving_link", "O Android cancelou o arraste sustentado do sticker", 5);
+                });
     }
 
     private void selectPlacedLinkForScale(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo sticker = findPlacedLinkSticker(root);
-        boolean dispatched = sticker != null ? tapNodeCenter(sticker) : tap(0.50f, storyStickerTargetYFraction());
+        boolean dispatched = tap(0.50f, storyStickerTargetYFraction());
         if (dispatched) {
             advance("scaling_link", "Sticker selecionado para ampliação", 420);
         } else retryOrFail("selecting_link_for_scale", "O sticker não respondeu antes da ampliação", 5);
     }
 
     private void scalePlacedLink(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo sticker = findPlacedLinkSticker(root);
-        Rect bounds = new Rect();
-        if (sticker != null) sticker.getBoundsInScreen(bounds);
-        int width = getResources().getDisplayMetrics().widthPixels;
-        int height = getResources().getDisplayMetrics().heightPixels;
-        float centerX = bounds.isEmpty() ? 0.50f : bounds.exactCenterX() / width;
-        float centerY = bounds.isEmpty() ? storyStickerTargetYFraction() : bounds.exactCenterY() / height;
+        float centerX = 0.50f;
+        float centerY = storyStickerTargetYFraction();
         if (pinchOutHorizontal(centerX, centerY, 0.075f, 0.145f, 1050)) {
             advance("recentering_link", "Sticker LINK ampliado", 1350);
         } else retryOrFail("scaling_link", "O Android recusou o gesto de ampliar o sticker", 5);
     }
 
     private void recenterPlacedLink(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo sticker = findPlacedLinkSticker(root);
-        Rect bounds = new Rect();
-        if (sticker != null) sticker.getBoundsInScreen(bounds);
-        int width = getResources().getDisplayMetrics().widthPixels;
-        int height = getResources().getDisplayMetrics().heightPixels;
-        float fromX = bounds.isEmpty() ? 0.50f : bounds.exactCenterX() / width;
-        float fromY = bounds.isEmpty() ? storyStickerTargetYFraction() : bounds.exactCenterY() / height;
-        if (drag(fromX, fromY, 0.50f, storyStickerTargetYFraction(), 900)) {
-            advance("verifying_link", "Sticker recentralizado após a ampliação", 1150);
-        } else retryOrFail("recentering_link", "O Android recusou o ajuste final do sticker", 5);
+        if (!linkDragCompleted) {
+            advance("moving_link", "Posição do sticker ainda não foi confirmada; repetindo o arraste", 350);
+            return;
+        }
+        advance("verifying_link", "Ampliação simétrica concluída sem alterar o centro do sticker", 900);
     }
 
     private void verifyPlacedLinkAndShare(AccessibilityNodeInfo root) {
+        if (!linkDragCompleted) {
+            advance("moving_link", "Arraste não concluído; publicação bloqueada até posicionar o link", 350);
+            return;
+        }
         AccessibilityNodeInfo positioned = findPlacedLinkSticker(root);
         if (positioned != null) {
             Rect bounds = new Rect();
@@ -783,6 +795,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     private void suspendAutomation() {
         handler.removeCallbacksAndMessages(null);
         stepScheduled = false;
+        manipulationGestureInFlight = false;
+        linkDragCompleted = false;
         interrupted = true;
         activeJob = null;
     }
@@ -1109,15 +1123,54 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 .build(), null, null);
     }
 
-    private boolean drag(float fromX, float fromY, float toX, float toY, long duration) {
+    private void dragWithHold(float fromX, float fromY, float toX, float toY,
+                              long holdDuration, long moveDuration,
+                              Runnable onCompleted, Runnable onCancelled) {
         int width = getResources().getDisplayMetrics().widthPixels;
         int height = getResources().getDisplayMetrics().heightPixels;
-        Path path = new Path();
-        path.moveTo(width * fromX, height * fromY);
-        path.lineTo(width * toX, height * toY);
-        return dispatchGesture(new GestureDescription.Builder()
-                .addStroke(new GestureDescription.StrokeDescription(path, 0, duration))
-                .build(), null, null);
+        float startX = width * fromX;
+        float startY = height * fromY;
+        float endX = width * toX;
+        float endY = height * toY;
+
+        Path holdPath = new Path();
+        holdPath.moveTo(startX, startY);
+        GestureDescription.StrokeDescription holdStroke =
+                new GestureDescription.StrokeDescription(holdPath, 0, holdDuration, true);
+        boolean holdAccepted = dispatchGesture(new GestureDescription.Builder()
+                        .addStroke(holdStroke)
+                        .build(),
+                new GestureResultCallback() {
+                    @Override
+                    public void onCompleted(GestureDescription gestureDescription) {
+                        Path movePath = new Path();
+                        movePath.moveTo(startX, startY);
+                        movePath.lineTo(endX, endY);
+                        GestureDescription.StrokeDescription moveStroke =
+                                holdStroke.continueStroke(movePath, 0, moveDuration, false);
+                        boolean moveAccepted = dispatchGesture(new GestureDescription.Builder()
+                                        .addStroke(moveStroke)
+                                        .build(),
+                                new GestureResultCallback() {
+                                    @Override
+                                    public void onCompleted(GestureDescription gestureDescription) {
+                                        handler.post(onCompleted);
+                                    }
+
+                                    @Override
+                                    public void onCancelled(GestureDescription gestureDescription) {
+                                        handler.post(onCancelled);
+                                    }
+                                }, handler);
+                        if (!moveAccepted) handler.post(onCancelled);
+                    }
+
+                    @Override
+                    public void onCancelled(GestureDescription gestureDescription) {
+                        handler.post(onCancelled);
+                    }
+                }, handler);
+        if (!holdAccepted) handler.post(onCancelled);
     }
 
     private boolean pinchOutHorizontal(float centerX, float centerY, float startRadius, float endRadius, long duration) {
