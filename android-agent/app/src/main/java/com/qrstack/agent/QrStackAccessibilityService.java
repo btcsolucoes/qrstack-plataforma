@@ -75,6 +75,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     private boolean visualScanInFlight;
     private boolean manipulationGestureInFlight;
     private boolean linkDragCompleted;
+    private boolean linkStyleApplied;
     private static volatile QrStackAccessibilityService instance;
     private static volatile String foregroundPackage = "";
     private static volatile long foregroundSeenAt;
@@ -200,12 +201,13 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             stepAttempts = 0;
             positioningCorrections = 0;
             linkDragCompleted = false;
+            linkStyleApplied = false;
             interrupted = "paused_interruption".equals(preferences.checkpoint());
         }
     }
 
     private void scheduleStep(long delayMs) {
-        if (stepScheduled || manipulationGestureInFlight || interrupted
+        if (stepScheduled || visualScanInFlight || manipulationGestureInFlight || interrupted
                 || activeJob == null || preferences == null || !preferences.shouldRun()) return;
         stepScheduled = true;
         handler.postDelayed(() -> {
@@ -258,6 +260,9 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 break;
             case "recentering_link":
                 recenterPlacedLink(root);
+                break;
+            case "setting_link_style":
+                setTranslucentLinkStyle(root);
                 break;
             case "verifying_link":
                 verifyPlacedLinkAndShare(root);
@@ -614,6 +619,7 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         if (tapDoneInLinkEditor(root)) {
             positioningCorrections = 0;
             linkDragCompleted = false;
+            linkStyleApplied = false;
             advance("positioning_link", "Link clicável inserido; preparando posição e tamanho do sticker", 1400);
         } else retryOrFail("entering_link", "Botão para concluir o link não apareceu", 8);
     }
@@ -627,19 +633,180 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             retryOrFail("positioning_link", "O editor do Story não reapareceu depois de concluir o link", 8);
             return;
         }
-        // O Instagram sempre cria o sticker no centro do canvas. Os limites
-        // informados pela acessibilidade podem apontar para o texto da URL.
-        boolean dispatched = tap(0.50f, storyCenterYFraction());
-        if (dispatched) {
-            advance("moving_link", "Sticker LINK selecionado para posicionamento", 450);
-        } else retryOrFail("positioning_link", "O sticker LINK não respondeu ao toque de seleção", 6);
+        advance("moving_link", "Editor pronto; localizando visualmente o centro real do sticker LINK", 450);
     }
 
     private void movePlacedLink(AccessibilityNodeInfo root) {
+        if (visualScanInFlight || manipulationGestureInFlight) return;
+        locateAndDragPlacedLink();
+    }
+
+    private void locateAndDragPlacedLink() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            fail("O Android deste aparelho não permite localizar o sticker antes do arraste");
+            return;
+        }
+        visualScanInFlight = true;
+        takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
+            @Override
+            public void onSuccess(ScreenshotResult screenshot) {
+                Bitmap bitmap = copyScreenshotBitmap(screenshot);
+                if (bitmap == null) {
+                    finishPlacedLinkScanFailure("A captura do Story veio vazia");
+                    return;
+                }
+                TextRecognizer recognizer = textRecognizer;
+                if (recognizer == null) {
+                    bitmap.recycle();
+                    finishPlacedLinkScanFailure("O leitor visual do sticker não iniciou");
+                    return;
+                }
+                recognizer.process(InputImage.fromBitmap(bitmap, 0))
+                        .addOnSuccessListener(getMainExecutor(), visionText -> {
+                            Rect sticker = findPlacedLinkTextBounds(visionText, bitmap.getWidth(), bitmap.getHeight());
+                            String method = "texto-do-link";
+                            if (sticker == null) {
+                                sticker = findPlacedLinkPillBounds(bitmap);
+                                method = "contorno-do-sticker";
+                            }
+                            int bitmapWidth = bitmap.getWidth();
+                            int bitmapHeight = bitmap.getHeight();
+                            bitmap.recycle();
+                            visualScanInFlight = false;
+                            if (!isCurrentCheckpoint("moving_link")) return;
+                            if (sticker == null) {
+                                finishPlacedLinkScanFailure("O sticker LINK não foi localizado visualmente no Story");
+                                return;
+                            }
+                            dragPlacedLinkFromVisualCenter(sticker, bitmapWidth, bitmapHeight, method);
+                        })
+                        .addOnFailureListener(getMainExecutor(), error -> {
+                            bitmap.recycle();
+                            finishPlacedLinkScanFailure("Falha ao ler visualmente o sticker inserido");
+                        });
+            }
+
+            @Override
+            public void onFailure(int errorCode) {
+                finishPlacedLinkScanFailure("O Android recusou a captura do Story (" + errorCode + ")");
+            }
+        });
+    }
+
+    private Rect findPlacedLinkTextBounds(Text visionText, int screenWidth, int screenHeight) {
+        String expectedHost = "";
+        try {
+            expectedHost = Uri.parse(activeJob.storyLink).getHost();
+        } catch (RuntimeException ignored) {
+            // The pill detector remains available when the URL cannot be parsed.
+        }
+        String expected = normalizeWords(expectedHost == null ? "" : expectedHost);
+        float storyHeight = Math.min(screenHeight, screenWidth * (16f / 9f));
+        int minY = Math.round(storyHeight * 0.22f);
+        int maxY = Math.round(storyHeight * 0.82f);
+        Rect best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (Text.TextBlock block : visionText.getTextBlocks()) {
+            for (Text.Line line : block.getLines()) {
+                Rect bounds = line.getBoundingBox();
+                if (bounds == null || bounds.isEmpty() || bounds.top < minY || bounds.bottom > maxY) continue;
+                String observed = normalizeWords(line.getText());
+                boolean matchesHost = !expected.isEmpty()
+                        && (observed.contains(expected) || expected.contains(observed));
+                boolean looksLikeUrl = observed.contains("tinyurl") || observed.contains("http")
+                        || observed.contains("www") || observed.contains("com");
+                if (!matchesHost && !looksLikeUrl) continue;
+                boolean plausible = bounds.width() >= screenWidth * 0.18f
+                        && bounds.width() <= screenWidth * 0.88f
+                        && bounds.height() >= storyHeight * 0.018f
+                        && bounds.height() <= storyHeight * 0.12f;
+                if (!plausible) continue;
+                int score = bounds.width() * bounds.height();
+                if (matchesHost) score += 100_000;
+                if (score > bestScore) {
+                    best = new Rect(bounds);
+                    bestScore = score;
+                }
+            }
+        }
+        return best;
+    }
+
+    private Rect findPlacedLinkPillBounds(Bitmap bitmap) {
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        int storyHeight = Math.min(height, Math.round(width * (16f / 9f)));
+        int top = Math.round(storyHeight * 0.22f);
+        int bottom = Math.min(height, Math.round(storyHeight * 0.82f));
+        int[] pixels = new int[width * height];
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
+
+        Rect best = null;
+        float bestScore = -1f;
+        int groupTop = -1;
+        int groupBottom = -1;
+        int groupLeft = width;
+        int groupRight = -1;
+        int minWhitePixels = Math.round(width * 0.18f);
+
+        for (int y = top; y <= bottom; y += 1) {
+            int white = 0;
+            int rowLeft = width;
+            int rowRight = -1;
+            if (y < bottom) {
+                int offset = y * width;
+                for (int x = 0; x < width; x += 1) {
+                    if (!isNearWhite(pixels[offset + x])) continue;
+                    white += 1;
+                    rowLeft = Math.min(rowLeft, x);
+                    rowRight = Math.max(rowRight, x);
+                }
+            }
+            boolean qualifyingRow = white >= minWhitePixels;
+            if (qualifyingRow) {
+                if (groupTop < 0) groupTop = y;
+                groupBottom = y;
+                groupLeft = Math.min(groupLeft, rowLeft);
+                groupRight = Math.max(groupRight, rowRight);
+                continue;
+            }
+            if (groupTop < 0) continue;
+            Rect candidate = new Rect(groupLeft, groupTop, groupRight + 1, groupBottom + 1);
+            float candidateWidth = candidate.width();
+            float candidateHeight = candidate.height();
+            boolean plausible = candidateWidth >= width * 0.24f && candidateWidth <= width * 0.90f
+                    && candidateHeight >= storyHeight * 0.018f && candidateHeight <= storyHeight * 0.14f;
+            if (plausible) {
+                float expectedY = storyHeight * 0.46f;
+                float distancePenalty = Math.abs(candidate.exactCenterY() - expectedY) * width * 0.10f;
+                float score = candidateWidth * candidateHeight - distancePenalty;
+                if (score > bestScore) {
+                    best = candidate;
+                    bestScore = score;
+                }
+            }
+            groupTop = -1;
+            groupBottom = -1;
+            groupLeft = width;
+            groupRight = -1;
+        }
+        return best;
+    }
+
+    private boolean isNearWhite(int color) {
+        int red = (color >> 16) & 0xff;
+        int green = (color >> 8) & 0xff;
+        int blue = color & 0xff;
+        int maximum = Math.max(red, Math.max(green, blue));
+        int minimum = Math.min(red, Math.min(green, blue));
+        return red >= 210 && green >= 210 && blue >= 210 && maximum - minimum <= 38;
+    }
+
+    private void dragPlacedLinkFromVisualCenter(Rect sticker, int bitmapWidth, int bitmapHeight, String method) {
         int width = getResources().getDisplayMetrics().widthPixels;
         int height = getResources().getDisplayMetrics().heightPixels;
-        float fromX = 0.50f;
-        float fromY = storyCenterYFraction();
+        float fromX = sticker.exactCenterX() / Math.max(1f, bitmapWidth);
+        float fromY = sticker.exactCenterY() / Math.max(1f, bitmapHeight);
         float toX = 0.50f;
         float toY = storyStickerTargetYFraction();
         if (manipulationGestureInFlight) return;
@@ -650,7 +817,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                     if (preferences == null || !preferences.shouldRun() || activeJob == null) return;
                     linkDragCompleted = true;
                     advance("selecting_link_for_scale",
-                            "Sticker arrastado de (" + Math.round(width * fromX) + "," + Math.round(height * fromY)
+                            "Sticker localizado por " + method + " e arrastado de ("
+                                    + Math.round(width * fromX) + "," + Math.round(height * fromY)
                                     + ") para o centro da área (" + Math.round(width * toX) + ","
                                     + Math.round(height * toY) + ")", 700);
                 },
@@ -661,11 +829,16 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 });
     }
 
+    private void finishPlacedLinkScanFailure(String detail) {
+        visualScanInFlight = false;
+        if (!isCurrentCheckpoint("moving_link")) return;
+        retryOrFail("moving_link", detail + "; publicação bloqueada para evitar posicionamento incorreto", 6);
+    }
+
     private void selectPlacedLinkForScale(AccessibilityNodeInfo root) {
-        boolean dispatched = tap(0.50f, storyStickerTargetYFraction());
-        if (dispatched) {
-            advance("scaling_link", "Sticker selecionado para ampliação", 420);
-        } else retryOrFail("selecting_link_for_scale", "O sticker não respondeu antes da ampliação", 5);
+        // A pinça começa diretamente sobre o sticker. Um toque isolado aqui
+        // alternaria a aparência antes da etapa controlada de transparência.
+        advance("scaling_link", "Sticker centralizado e pronto para ampliação direta", 420);
     }
 
     private void scalePlacedLink(AccessibilityNodeInfo root) {
@@ -681,7 +854,22 @@ public final class QrStackAccessibilityService extends AccessibilityService {
             advance("moving_link", "Posição do sticker ainda não foi confirmada; repetindo o arraste", 350);
             return;
         }
-        advance("verifying_link", "Ampliação simétrica concluída sem alterar o centro do sticker", 900);
+        advance("setting_link_style", "Ampliação simétrica concluída sem alterar o centro do sticker", 700);
+    }
+
+    private void setTranslucentLinkStyle(AccessibilityNodeInfo root) {
+        if (!linkDragCompleted) {
+            advance("moving_link", "Posição do sticker ainda não foi confirmada antes de mudar o estilo", 350);
+            return;
+        }
+        if (linkStyleApplied) {
+            advance("verifying_link", "Estilo translúcido do sticker confirmado", 700);
+            return;
+        }
+        if (tap(0.50f, storyStickerTargetYFraction())) {
+            linkStyleApplied = true;
+            advance("verifying_link", "Sticker LINK alternado para o estilo translúcido", 900);
+        } else retryOrFail("setting_link_style", "O sticker não respondeu ao toque para mudar o estilo", 5);
     }
 
     private void verifyPlacedLinkAndShare(AccessibilityNodeInfo root) {
@@ -797,6 +985,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         stepScheduled = false;
         manipulationGestureInFlight = false;
         linkDragCompleted = false;
+        linkStyleApplied = false;
+        visualScanInFlight = false;
         interrupted = true;
         activeJob = null;
     }
