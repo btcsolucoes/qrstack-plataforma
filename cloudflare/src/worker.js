@@ -554,6 +554,7 @@ async function claimNextStoryJob(db, request, url) {
   let job = await db.prepare(`
     SELECT * FROM story_publish_jobs
     WHERE assigned_device_id = ? AND status IN (${activePlaceholders})
+      AND NOT (status = 'paused_interruption' AND checkpoint = 'paused_by_operator')
     ORDER BY updated_at DESC LIMIT 1
   `).bind(deviceId, ...STORY_ACTIVE_STATUSES).first();
 

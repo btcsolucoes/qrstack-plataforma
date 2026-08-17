@@ -10,8 +10,8 @@ android {
         applicationId "com.qrstack.agent"
         minSdk 26
         targetSdk 35
-        versionCode 17
-        versionName "0.1.16"
+        versionCode 18
+        versionName "0.1.17"
         buildConfigField "String", "DEFAULT_API_URL", '"https://qrstack-api.qrstack.workers.dev"'
     }
 

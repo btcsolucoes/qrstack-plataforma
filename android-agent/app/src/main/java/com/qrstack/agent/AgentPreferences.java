@@ -9,7 +9,7 @@ import java.util.Base64;
 
 final class AgentPreferences {
     private static final String FILE = "qrstack_agent";
-    private static final int STATE_SCHEMA_VERSION = 17;
+    private static final int STATE_SCHEMA_VERSION = 18;
     private final SharedPreferences preferences;
 
     AgentPreferences(Context context) {
@@ -125,6 +125,10 @@ final class AgentPreferences {
         int next = recoveryAttempts() + 1;
         preferences.edit().putInt("recovery_attempts", next).apply();
         return next;
+    }
+
+    void resetRecoveryAttempts() {
+        preferences.edit().putInt("recovery_attempts", 0).apply();
     }
 
     void resetJobState() {
