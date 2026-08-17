@@ -285,15 +285,8 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     }
 
     private void selectLinkSticker(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo link = findStickerResult(root, "link");
-        if (tapNodeCenter(link)) {
-            Rect bounds = new Rect();
-            link.getBoundsInScreen(bounds);
-            lastLinkTapDiagnostic = "accessibility x=" + Math.round(bounds.exactCenterX())
-                    + " y=" + Math.round(bounds.exactCenterY());
-            advance("opening_link_editor", "Sticker LINK localizado pela interface (" + lastLinkTapDiagnostic + ")", 850);
-            return;
-        }
+        // A arvore do Instagram atribui "link" a containers com limites incorretos.
+        // O clique so e liberado depois da confirmacao visual do sticker real.
         findAndTapLinkStickerVisually(root);
     }
 
@@ -865,57 +858,6 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                 if (area < bestArea) {
                     best = node;
                     bestArea = area;
-                }
-            }
-            for (int index = 0; index < node.getChildCount(); index += 1) {
-                AccessibilityNodeInfo child = node.getChild(index);
-                if (child != null) queue.add(child);
-            }
-        }
-        return best;
-    }
-
-    private AccessibilityNodeInfo findStickerResult(AccessibilityNodeInfo root, String label) {
-        if (root == null) return null;
-        String expected = normalizeWords(label);
-        AccessibilityNodeInfo search = findStickerSearchEditor(root);
-        Rect searchBounds = new Rect();
-        if (search != null) search.getBoundsInScreen(searchBounds);
-        int screenWidth = getResources().getDisplayMetrics().widthPixels;
-        int screenHeight = getResources().getDisplayMetrics().heightPixels;
-        AccessibilityNodeInfo best = null;
-        int bestScore = Integer.MIN_VALUE;
-
-        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
-        queue.add(root);
-        while (!queue.isEmpty()) {
-            AccessibilityNodeInfo node = queue.removeFirst();
-            String text = normalize(node.getText());
-            String description = normalize(node.getContentDescription());
-            String viewId = normalize(node.getViewIdResourceName());
-            Rect bounds = new Rect();
-            node.getBoundsInScreen(bounds);
-            String textWords = normalizeWords(text);
-            String descriptionWords = normalizeWords(description);
-            String viewIdWords = normalizeWords(viewId);
-            boolean exactLabel = expected.equals(textWords)
-                    || expected.equals(descriptionWords)
-                    || expected.equals(viewIdWords);
-            boolean wordLabel = containsWord(textWords, expected)
-                    || containsWord(descriptionWords, expected)
-                    || containsWord(viewIdWords, expected);
-            boolean belowSearch = search == null || searchBounds.isEmpty() || bounds.top >= searchBounds.bottom;
-            boolean stickerSized = bounds.width() > 24 && bounds.height() > 20
-                    && bounds.width() < screenWidth * 0.65f
-                    && bounds.height() < screenHeight * 0.22f;
-            if (wordLabel && stickerSized && belowSearch && !hasEditableAncestor(node)) {
-                int score = exactLabel ? 1000 : 500;
-                if (node.isClickable()) score += 120;
-                if (node.getChildCount() == 0) score += 80;
-                score -= Math.min(300, (bounds.width() * bounds.height()) / 1000);
-                if (score > bestScore) {
-                    best = node;
-                    bestScore = score;
                 }
             }
             for (int index = 0; index < node.getChildCount(); index += 1) {
