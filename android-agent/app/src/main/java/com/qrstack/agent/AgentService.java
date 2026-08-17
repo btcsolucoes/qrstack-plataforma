@@ -101,7 +101,17 @@ public final class AgentService extends Service {
     private void pollSafely() {
         if (!preferences.shouldRun() || !preferences.isEnrolled() || busy) return;
         if (!preferences.activeJobJson().isEmpty()) {
-            resumePersistedJob();
+            String checkpoint = preferences.checkpoint();
+            // The accessibility service owns every Instagram checkpoint. Reopening
+            // the composer while it is moving a sticker destroys the current Story.
+            if ("claimed".equals(checkpoint) || "downloading_media".equals(checkpoint)) {
+                resumePersistedJob();
+            } else if ("awaiting_operator_confirmation".equals(checkpoint)) {
+                StoryJob job = StoryJob.restore(preferences.activeJobJson());
+                if (job != null) showStoryReadyAlert(job);
+            } else if ("awaiting_accessibility".equals(checkpoint)) {
+                showAccessibilityAlert();
+            }
             return;
         }
         busy = true;
