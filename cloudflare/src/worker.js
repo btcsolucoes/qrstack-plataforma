@@ -21,7 +21,7 @@ const INSIGHTS_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 1000;
 const STORY_MEDIA_TTL_SECONDS = 48 * 60 * 60;
 const STORY_MEDIA_MAX_BYTES = 6 * 1024 * 1024;
 const STORY_ACTIVE_STATUSES = ["claimed", "preparing", "publishing", "paused_interruption"];
-const STORY_AGENT_MIN_VERSION = "0.1.21";
+const STORY_AGENT_MIN_VERSION = "0.1.22";
 
 const EVENT_COLUMNS = [
   "id", "restaurant_id", "restaurant_slug", "menu_day_id", "event_type", "source",

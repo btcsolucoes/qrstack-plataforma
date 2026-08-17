@@ -1004,7 +1004,9 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                             if (appearance.translucent) {
                                 linkStyleApplied = true;
                                 advance("verifying_link", "Transparência confirmada visualmente (diferença de fundo "
-                                        + Math.round(appearance.backgroundDifference) + ")", 700);
+                                        + Math.round(appearance.backgroundDifference) + ", luminosidade "
+                                        + Math.round(appearance.outsideBrightness) + "→"
+                                        + Math.round(appearance.insideBrightness) + ")", 700);
                                 return;
                             }
                             if (linkStyleTapAttempts >= 6) {
@@ -1018,7 +1020,9 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                             }
                             advance("setting_link_style", "Alternando estilo " + linkStyleTapAttempts
                                     + ": fundo ainda opaco (diferença "
-                                    + Math.round(appearance.backgroundDifference) + ")", 750);
+                                    + Math.round(appearance.backgroundDifference) + ", luminosidade "
+                                    + Math.round(appearance.outsideBrightness) + "→"
+                                    + Math.round(appearance.insideBrightness) + ")", 750);
                         })
                         .addOnFailureListener(getMainExecutor(), error -> {
                             bitmap.recycle();
@@ -1036,19 +1040,23 @@ public final class QrStackAccessibilityService extends AccessibilityService {
     private StickerAppearance measureStickerAppearance(Bitmap bitmap, Rect textBounds) {
         int width = bitmap.getWidth();
         int height = bitmap.getHeight();
-        int padX = Math.max(10, Math.round(textBounds.width() * 0.10f));
-        int padY = Math.max(12, Math.round(textBounds.height() * 0.72f));
+        // The chain icon occupies the left side of the pill but is not part of
+        // the OCR text bounds. These asymmetric pads recover the full sticker.
+        int padLeft = Math.max(16, Math.round(textBounds.width() * 0.28f));
+        int padRight = Math.max(10, Math.round(textBounds.width() * 0.10f));
+        int padY = Math.max(12, Math.round(textBounds.height() * 0.60f));
         Rect pill = new Rect(
-                Math.max(0, textBounds.left - padX),
+                Math.max(0, textBounds.left - padLeft),
                 Math.max(0, textBounds.top - padY),
-                Math.min(width, textBounds.right + padX),
+                Math.min(width, textBounds.right + padRight),
                 Math.min(height, textBounds.bottom + padY)
         );
         int bandHeight = Math.max(3, Math.round(pill.height() * 0.18f));
-        Rect insideTop = new Rect(pill.left + padX, pill.top + bandHeight,
-                pill.right - padX, Math.min(pill.bottom, pill.top + bandHeight * 2));
-        Rect insideBottom = new Rect(pill.left + padX, Math.max(pill.top, pill.bottom - bandHeight * 2),
-                pill.right - padX, pill.bottom - bandHeight);
+        int insideInset = Math.max(10, Math.round(pill.width() * 0.10f));
+        Rect insideTop = new Rect(pill.left + insideInset, pill.top + bandHeight,
+                pill.right - insideInset, Math.min(pill.bottom, pill.top + bandHeight * 2));
+        Rect insideBottom = new Rect(pill.left + insideInset, Math.max(pill.top, pill.bottom - bandHeight * 2),
+                pill.right - insideInset, pill.bottom - bandHeight);
         int sideWidth = Math.max(8, Math.round(width * 0.035f));
         Rect outsideLeft = new Rect(Math.max(0, pill.left - sideWidth), pill.top + bandHeight,
                 pill.left, pill.bottom - bandHeight);
@@ -1061,11 +1069,23 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         float greenDelta = inside.green - outside.green;
         float blueDelta = inside.blue - outside.blue;
         float difference = (float) Math.sqrt(redDelta * redDelta + greenDelta * greenDelta + blueDelta * blueDelta);
+        float insideBrightness = (inside.red + inside.green + inside.blue) / 3f;
+        float outsideBrightness = (outside.red + outside.green + outside.blue) / 3f;
+        float insideChroma = Math.max(inside.red, Math.max(inside.green, inside.blue))
+                - Math.min(inside.red, Math.min(inside.green, inside.blue));
+        float outsideChroma = Math.max(outside.red, Math.max(outside.green, outside.blue))
+                - Math.min(outside.red, Math.min(outside.green, outside.blue));
+        // Reference style: a light translucent film. It raises brightness and
+        // neutralizes the background color without becoming opaque white.
         boolean translucent = inside.count > 0 && outside.count > 0
-                && difference <= 58f
-                && inside.whiteRatio <= 0.20f
-                && inside.darkRatio <= 0.28f;
-        return new StickerAppearance(translucent, difference, inside.whiteRatio, inside.darkRatio);
+                && difference >= 48f && difference <= 175f
+                && insideBrightness - outsideBrightness >= 24f
+                && insideBrightness >= 145f && insideBrightness <= 225f
+                && insideChroma <= Math.max(72f, outsideChroma * 0.76f)
+                && inside.whiteRatio <= 0.16f
+                && inside.darkRatio <= 0.16f;
+        return new StickerAppearance(translucent, difference, inside.whiteRatio, inside.darkRatio,
+                insideBrightness, outsideBrightness, insideChroma, outsideChroma);
     }
 
     private ColorSample sampleColors(Bitmap bitmap, Rect... regions) {
@@ -1177,7 +1197,9 @@ public final class QrStackAccessibilityService extends AccessibilityService {
                                 linkStyleApplied = false;
                                 linkStyleTapAttempts = 0;
                                 advance("setting_link_style", "Auditoria reprovada: fundo ainda opaco (diferença "
-                                        + Math.round(appearance.backgroundDifference) + ")", 450);
+                                        + Math.round(appearance.backgroundDifference) + ", luminosidade "
+                                        + Math.round(appearance.outsideBrightness) + "→"
+                                        + Math.round(appearance.insideBrightness) + ")", 450);
                                 return;
                             }
 
@@ -1706,12 +1728,22 @@ public final class QrStackAccessibilityService extends AccessibilityService {
         final float backgroundDifference;
         final float whiteRatio;
         final float darkRatio;
+        final float insideBrightness;
+        final float outsideBrightness;
+        final float insideChroma;
+        final float outsideChroma;
 
-        StickerAppearance(boolean translucent, float backgroundDifference, float whiteRatio, float darkRatio) {
+        StickerAppearance(boolean translucent, float backgroundDifference, float whiteRatio, float darkRatio,
+                          float insideBrightness, float outsideBrightness,
+                          float insideChroma, float outsideChroma) {
             this.translucent = translucent;
             this.backgroundDifference = backgroundDifference;
             this.whiteRatio = whiteRatio;
             this.darkRatio = darkRatio;
+            this.insideBrightness = insideBrightness;
+            this.outsideBrightness = outsideBrightness;
+            this.insideChroma = insideChroma;
+            this.outsideChroma = outsideChroma;
         }
     }
 
