@@ -21,6 +21,7 @@ const INSIGHTS_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 1000;
 const STORY_MEDIA_TTL_SECONDS = 48 * 60 * 60;
 const STORY_MEDIA_MAX_BYTES = 6 * 1024 * 1024;
 const STORY_ACTIVE_STATUSES = ["claimed", "preparing", "publishing", "paused_interruption"];
+const STORY_AGENT_MIN_VERSION = "0.1.21";
 
 const EVENT_COLUMNS = [
   "id", "restaurant_id", "restaurant_slug", "menu_day_id", "event_type", "source",
@@ -550,6 +551,21 @@ async function createStoryJob(env, payload) {
 async function claimNextStoryJob(db, request, url) {
   const deviceId = cleanIdentifier(url.searchParams.get("device_id") || url.searchParams.get("deviceId"), 100);
   const agent = await assertStoryAgent(db, deviceId, bearerToken(request));
+  const reportedVersion = String(url.searchParams.get("app_version") || url.searchParams.get("appVersion") || "").trim().slice(0, 40);
+  if (reportedVersion) {
+    await db.prepare("UPDATE story_agents SET app_version = ?, last_seen_at = ?, updated_at = ? WHERE device_id = ?")
+      .bind(reportedVersion, new Date().toISOString(), new Date().toISOString(), deviceId).run();
+  }
+  const effectiveVersion = reportedVersion || String(agent.app_version || "");
+  if (compareVersions(effectiveVersion, STORY_AGENT_MIN_VERSION) < 0) {
+    return {
+      job: null,
+      poll_after_seconds: 60,
+      update_required: true,
+      current_version: effectiveVersion || null,
+      minimum_version: STORY_AGENT_MIN_VERSION,
+    };
+  }
   const activePlaceholders = STORY_ACTIVE_STATUSES.map(() => "?").join(", ");
   let job = await db.prepare(`
     SELECT * FROM story_publish_jobs
@@ -588,6 +604,21 @@ async function claimNextStoryJob(db, request, url) {
   mediaUrl.searchParams.set("job", job.id);
   mediaUrl.searchParams.set("token", job.media_token);
   return { job: { ...publicStoryJob(job), media_url: mediaUrl.toString() }, poll_after_seconds: 3 };
+}
+
+function compareVersions(left, right) {
+  const normalizeVersion = (value) => String(value || "")
+    .split(/[+-]/, 1)[0]
+    .split(".")
+    .map((part) => Number.parseInt(part, 10) || 0);
+  const a = normalizeVersion(left);
+  const b = normalizeVersion(right);
+  const length = Math.max(a.length, b.length, 3);
+  for (let index = 0; index < length; index += 1) {
+    const delta = (a[index] || 0) - (b[index] || 0);
+    if (delta !== 0) return delta < 0 ? -1 : 1;
+  }
+  return 0;
 }
 
 async function updateStoryJob(db, payload, request) {

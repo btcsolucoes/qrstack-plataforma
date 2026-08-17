@@ -119,7 +119,12 @@ public final class AgentService extends Service {
             StoryJob job = api.nextJob();
             if (job != null) prepare(job);
         } catch (Exception error) {
-            updateNotification("Conexão em espera", "Nova tentativa automática em instantes");
+            String message = error.getMessage() == null ? "" : error.getMessage();
+            if (message.startsWith("Atualização obrigatória")) {
+                updateNotification("Atualize o agente", message);
+            } else {
+                updateNotification("Conexão em espera", "Nova tentativa automática em instantes");
+            }
         } finally {
             busy = false;
         }
