@@ -29,13 +29,15 @@ Agente privado para publicar o Story gerado pela plataforma QrStack no Instagram
 
 ## Instalacao no telefone
 
-1. Baixe e instale o APK da release privada da QrStack.
+1. Baixe e instale o APK da release privada da QrStack apenas na primeira instalação.
 2. Abra `QrStack Agent` uma vez.
-3. Informe a URL da API e a chave de pareamento do dono.
+3. Toque em `Parear este telefone`. Não há chave para digitar.
 4. Conceda acesso ao Nao Perturbe.
 5. Ative o servico de acessibilidade `QrStack - publicar Stories`.
 6. Remova a restricao de bateria para o agente.
 7. Toque em `Iniciar agente`.
+
+Depois desta instalação, o agente consulta a versão publicada automaticamente. Quando houver uma versão nova, o botão de atualização baixa o APK dentro do próprio aplicativo e abre a confirmação oficial do Android. Não é necessário procurar o arquivo nem abrir o navegador; o toque final em `Instalar` continua obrigatório em aparelhos Android comuns.
 
 O telefone deve estar desbloqueado e com a conta correta aberta no Instagram durante a janela operacional. Nao e necessario deixá-lo sem senha; remover a senha reduziria a seguranca sem resolver os bloqueios de automacao do Android.
 

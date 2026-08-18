@@ -11,6 +11,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -24,12 +26,15 @@ final class ApiClient {
         this.preferences = new AgentPreferences(context);
     }
 
-    JSONObject enroll(String ownerKey, String label) throws IOException, JSONException {
+    JSONObject enroll(String label) throws IOException, JSONException {
         JSONObject body = baseBody("registerStoryAgent");
-        body.put("owner_key", ownerKey);
         body.put("label", label);
         body.put("app_version", BuildConfig.VERSION_NAME);
         return post(body, false);
+    }
+
+    JSONObject latestRelease() throws IOException, JSONException {
+        return get("?action=getAgentRelease", false);
     }
 
     StoryJob nextJob() throws IOException, JSONException {
@@ -62,6 +67,24 @@ final class ApiClient {
             int read;
             while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
             return output.toByteArray();
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    void downloadTo(String source, File target) throws IOException {
+        HttpURLConnection connection = open(new URL(source), "GET", false);
+        connection.setInstanceFollowRedirects(true);
+        connection.connect();
+        ensureSuccess(connection);
+        File parent = target.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            throw new IOException("Não foi possível preparar a pasta da atualização.");
+        }
+        try (InputStream input = connection.getInputStream(); FileOutputStream output = new FileOutputStream(target)) {
+            byte[] buffer = new byte[32 * 1024];
+            int read;
+            while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
         } finally {
             connection.disconnect();
         }
@@ -118,7 +141,17 @@ final class ApiClient {
     private static void ensureSuccess(HttpURLConnection connection) throws IOException {
         int status = connection.getResponseCode();
         if (status >= 200 && status < 300) return;
-        throw new IOException("QrStack API HTTP " + status);
+        String detail = "";
+        InputStream error = connection.getErrorStream();
+        if (error != null) {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(error, StandardCharsets.UTF_8))) {
+                StringBuilder text = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) text.append(line);
+                detail = text.toString();
+            }
+        }
+        throw new IOException("QrStack API HTTP " + status + (detail.isEmpty() ? "" : ": " + detail));
     }
 
     private static String encode(String value) {

@@ -21,7 +21,10 @@ const INSIGHTS_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 1000;
 const STORY_MEDIA_TTL_SECONDS = 48 * 60 * 60;
 const STORY_MEDIA_MAX_BYTES = 6 * 1024 * 1024;
 const STORY_ACTIVE_STATUSES = ["claimed", "preparing", "publishing", "paused_interruption"];
-const STORY_AGENT_MIN_VERSION = "0.1.22";
+const STORY_AGENT_MIN_VERSION = "0.1.23";
+const STORY_AGENT_RELEASE_VERSION = "0.1.23";
+const STORY_AGENT_APK_URL = "https://github.com/btcsolucoes/qrstack-plataforma/releases/latest/download/QrStack-Agent-latest.apk";
+const STORY_AGENT_APK_SHA256 = "04c8d4d1fb3e7979906beb908cd174f8df31eaf25e2ee4e63e27f8882de28670";
 
 const EVENT_COLUMNS = [
   "id", "restaurant_id", "restaurant_slug", "menu_day_id", "event_type", "source",
@@ -136,8 +139,17 @@ export default {
 
       if (action === "registerStoryAgent") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        assertOwner(url.searchParams, request, env, payload.owner_key || payload.ownerKey);
-        return json({ ok: true, agent: await registerStoryAgent(env.DB, payload) }, 201);
+        return json({ ok: true, agent: await registerStoryAgent(env.DB, payload, env) }, 201);
+      }
+
+      if (action === "getAgentRelease") {
+        return jsonp(url, {
+          ok: true,
+          version: STORY_AGENT_RELEASE_VERSION,
+          minimum_version: STORY_AGENT_MIN_VERSION,
+          apk_url: STORY_AGENT_APK_URL,
+          sha256: STORY_AGENT_APK_SHA256,
+        }, 200, READ_CACHE_HEADERS);
       }
 
       if (action === "createStoryJob") {
@@ -614,7 +626,7 @@ function mergeNumberMaps(maps) {
   }, {});
 }
 
-async function registerStoryAgent(db, payload) {
+async function registerStoryAgent(db, payload, env) {
   const deviceId = cleanIdentifier(payload.device_id || payload.deviceId, 100);
   const deviceToken = String(payload.device_token || payload.deviceToken || "").trim();
   const label = String(payload.label || "Telefone QrStack").trim().slice(0, 120);
@@ -622,6 +634,16 @@ async function registerStoryAgent(db, payload) {
   if (!deviceId || deviceToken.length < 32) throw httpError("invalid_agent_credentials", 400);
   const now = new Date().toISOString();
   const tokenHash = await sha256Hex(deviceToken);
+  const existing = await db.prepare(
+    "SELECT device_id FROM story_agents WHERE device_id = ? AND token_hash = ? LIMIT 1"
+  ).bind(deviceId, tokenHash).first();
+  const ownerKey = String(payload.owner_key || payload.ownerKey || "").trim();
+  const authorizedOwner = ownerKey && ownerKey === String(env.OWNER_ACCESS_TOKEN || "");
+  const active = await db.prepare("SELECT COUNT(*) AS total FROM story_agents WHERE is_active = 1").first();
+  const firstAgent = Number(active?.total || 0) === 0;
+  if (!existing && !authorizedOwner && !firstAgent) {
+    throw httpError("pairing_requires_owner_approval", 403);
+  }
   await db.prepare(`
     INSERT INTO story_agents (
       device_id, label, token_hash, platform, app_version, is_active,

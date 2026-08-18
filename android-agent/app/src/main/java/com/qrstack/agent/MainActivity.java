@@ -12,15 +12,21 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
 import android.provider.Settings;
-import android.text.InputType;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import androidx.core.content.FileProvider;
+
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.security.MessageDigest;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -29,9 +35,10 @@ public final class MainActivity extends Activity {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private AgentPreferences preferences;
     private TextView status;
-    private EditText apiUrl;
-    private EditText ownerKey;
     private Button agentControl;
+    private Button updateControl;
+    private JSONObject availableRelease;
+    private File pendingUpdate;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -42,12 +49,14 @@ public final class MainActivity extends Activity {
         if (!preferences.shouldRun()) InterruptionGuard.restoreNormalState(this);
         setContentView(buildScreen());
         requestNotificationPermission();
+        checkForUpdate(false);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         refreshStatus();
+        if (pendingUpdate != null && pendingUpdate.exists() && canInstallPackages()) installUpdate(pendingUpdate);
     }
 
     private View buildScreen() {
@@ -78,17 +87,14 @@ public final class MainActivity extends Activity {
         statusParams.setMargins(0, dp(22), 0, dp(18));
         content.addView(status, statusParams);
 
-        apiUrl = field("Endpoint QrStack", preferences.apiUrl(), false);
-        content.addView(apiUrl, blockParams());
-        ownerKey = field("Chave da Central (somente no pareamento)", "", true);
-        content.addView(ownerKey, blockParams());
-
-        content.addView(button("1. Parear este telefone", this::enroll));
+        content.addView(button("1. PAREAR ESTE TELEFONE", this::enroll));
         content.addView(button("2. Permitir Não Perturbe", view -> openNotificationPolicy()));
         content.addView(button("3. Ativar acessibilidade QrStack", view -> openAccessibilitySettings()));
         content.addView(button("4. Remover restrição de bateria", view -> requestBatteryExemption()));
         agentControl = button("5. INICIAR AGENTE", view -> toggleAgent());
         content.addView(agentControl);
+        updateControl = button("VERIFICAR ATUALIZAÇÃO", view -> handleUpdate());
+        content.addView(updateControl);
 
         TextView warning = text(
                 "Importante: é um APK privado. Ele não lê mensagens, não captura senhas e não atende nem rejeita ligações. Uma mudança na interface do Instagram pode exigir ajuste do motor antes de uma nova publicação.",
@@ -100,30 +106,153 @@ public final class MainActivity extends Activity {
     }
 
     private void enroll(View ignored) {
-        String endpoint = apiUrl.getText().toString().trim();
-        String key = ownerKey.getText().toString().trim();
-        if (!endpoint.startsWith("https://") || key.length() < 6) {
-            toast("Preencha o endpoint HTTPS e a chave da Central.");
+        String endpoint = preferences.apiUrl();
+        if (!endpoint.startsWith("https://")) {
+            toast("O endpoint interno da QrStack está inválido.");
             return;
         }
-        preferences.setApiUrl(endpoint);
         status.setText("Pareando com a QrStack...");
         executor.execute(() -> {
             try {
-                new ApiClient(this).enroll(key, Build.MANUFACTURER + " " + Build.MODEL);
+                new ApiClient(this).enroll(Build.MANUFACTURER + " " + Build.MODEL);
                 preferences.setEnrolled(true);
                 runOnUiThread(() -> {
-                    ownerKey.setText("");
                     toast("Telefone pareado com sucesso.");
                     refreshStatus();
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
-                    status.setText("Pareamento falhou. Confira a chave e a internet.");
+                    status.setText("Pareamento não autorizado. Confira a internet ou libere este telefone na Central.");
                     toast("Não foi possível parear: " + error.getMessage());
                 });
             }
         });
+    }
+
+    private void handleUpdate() {
+        if (availableRelease == null) {
+            checkForUpdate(true);
+            return;
+        }
+        downloadUpdate();
+    }
+
+    private void checkForUpdate(boolean announceCurrent) {
+        if (updateControl != null) {
+            updateControl.setEnabled(false);
+            updateControl.setText("VERIFICANDO ATUALIZAÇÃO...");
+        }
+        executor.execute(() -> {
+            try {
+                JSONObject response = new ApiClient(this).latestRelease();
+                String version = response.optString("version", BuildConfig.VERSION_NAME);
+                boolean available = compareVersions(version, BuildConfig.VERSION_NAME) > 0;
+                availableRelease = available ? response : null;
+                runOnUiThread(() -> {
+                    updateControl.setEnabled(true);
+                    updateControl.setText(available
+                            ? "ATUALIZAR AGENTE PARA " + version
+                            : "AGENTE ATUALIZADO · " + BuildConfig.VERSION_NAME);
+                    if (announceCurrent && !available) toast("Você já está usando a versão mais recente.");
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    updateControl.setEnabled(true);
+                    updateControl.setText("TENTAR VERIFICAR ATUALIZAÇÃO");
+                    if (announceCurrent) toast("Não foi possível verificar agora: " + error.getMessage());
+                });
+            }
+        });
+    }
+
+    private void downloadUpdate() {
+        JSONObject release = availableRelease;
+        if (release == null) return;
+        String source = release.optString("apk_url", "");
+        String version = release.optString("version", "nova");
+        if (!source.startsWith("https://")) {
+            toast("A Central não retornou um APK válido.");
+            return;
+        }
+        updateControl.setEnabled(false);
+        updateControl.setText("BAIXANDO " + version + "...");
+        executor.execute(() -> {
+            try {
+                File target = new File(new File(getCacheDir(), "updates"), "QrStack-Agent-" + version + ".apk");
+                new ApiClient(this).downloadTo(source, target);
+                String expectedHash = release.optString("sha256", "").toLowerCase();
+                if (!expectedHash.isEmpty() && !expectedHash.equals(sha256(target))) {
+                    target.delete();
+                    throw new IllegalStateException("O arquivo recebido não passou na verificação de integridade.");
+                }
+                pendingUpdate = target;
+                runOnUiThread(() -> {
+                    updateControl.setEnabled(true);
+                    updateControl.setText("INSTALAR ATUALIZAÇÃO " + version);
+                    installUpdate(target);
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    updateControl.setEnabled(true);
+                    updateControl.setText("TENTAR ATUALIZAR NOVAMENTE");
+                    toast("Falha no download da atualização: " + error.getMessage());
+                });
+            }
+        });
+    }
+
+    private void installUpdate(File apk) {
+        if (!canInstallPackages()) {
+            toast("Autorize o QrStack a instalar atualizações. Depois volte para concluir.");
+            Intent permission = new Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName())
+            );
+            startActivity(permission);
+            return;
+        }
+        Uri content = FileProvider.getUriForFile(this, getPackageName() + ".files", apk);
+        pendingUpdate = null;
+        Intent installer = new Intent(Intent.ACTION_VIEW)
+                .setDataAndType(content, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(installer);
+    }
+
+    private boolean canInstallPackages() {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.O || getPackageManager().canRequestPackageInstalls();
+    }
+
+    private static int compareVersions(String left, String right) {
+        String[] a = left.split("\\.");
+        String[] b = right.split("\\.");
+        int length = Math.max(a.length, b.length);
+        for (int index = 0; index < length; index++) {
+            int av = index < a.length ? parseVersionPart(a[index]) : 0;
+            int bv = index < b.length ? parseVersionPart(b[index]) : 0;
+            if (av != bv) return Integer.compare(av, bv);
+        }
+        return 0;
+    }
+
+    private static int parseVersionPart(String value) {
+        try {
+            return Integer.parseInt(value.replaceAll("[^0-9].*$", ""));
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
+    private static String sha256(File file) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (FileInputStream input = new FileInputStream(file)) {
+            byte[] buffer = new byte[32 * 1024];
+            int read;
+            while ((read = input.read(buffer)) >= 0) digest.update(buffer, 0, read);
+        }
+        StringBuilder result = new StringBuilder();
+        for (byte value : digest.digest()) result.append(String.format("%02x", value));
+        return result.toString();
     }
 
     private void startAgent() {
@@ -188,7 +317,8 @@ public final class MainActivity extends Activity {
                 + "\n" + (dnd ? "Não Perturbe autorizado" : "Não Perturbe pendente")
                 + "  ·  " + (battery ? "Bateria liberada" : "Bateria restrita")
                 + "\nAgente: " + (preferences.shouldRun() ? "em execução" : "parado")
-                + "  ·  Etapa: " + preferences.checkpoint();
+                + "  ·  Etapa: " + preferences.checkpoint()
+                + "\nVersão instalada: " + BuildConfig.VERSION_NAME;
         status.setText(value);
         if (agentControl != null) {
             boolean running = preferences.shouldRun();
@@ -206,18 +336,6 @@ public final class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 91);
         }
-    }
-
-    private EditText field(String hint, String value, boolean secret) {
-        EditText field = new EditText(this);
-        field.setHint(hint);
-        field.setText(value);
-        field.setTextSize(15);
-        field.setSingleLine(true);
-        field.setPadding(dp(14), dp(12), dp(14), dp(12));
-        field.setBackgroundColor(Color.WHITE);
-        if (secret) field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        return field;
     }
 
     private Button button(String label, View.OnClickListener listener) {

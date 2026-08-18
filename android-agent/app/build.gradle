@@ -10,8 +10,8 @@ android {
         applicationId "com.qrstack.agent"
         minSdk 26
         targetSdk 35
-        versionCode 23
-        versionName "0.1.22"
+        versionCode 24
+        versionName "0.1.23"
         buildConfigField "String", "DEFAULT_API_URL", '"https://qrstack-api.qrstack.workers.dev"'
     }
 
@@ -33,5 +33,6 @@ android {
 }
 
 dependencies {
+    implementation "androidx.core:core:1.8.0"
     implementation "com.google.mlkit:text-recognition:16.0.1"
 }
