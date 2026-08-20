@@ -2960,6 +2960,77 @@ select:focus {
   color: #fff;
 }
 
+.catalog-manager-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+#catalog-new-section-field[hidden] {
+  display: none !important;
+}
+
+.catalog-editor,
+.catalog-library {
+  min-width: 0;
+}
+
+.catalog-editor {
+  position: sticky;
+  top: 88px;
+}
+
+.catalog-list {
+  display: grid;
+  gap: 0;
+  max-height: 620px;
+  margin-top: 0.75rem;
+  overflow: auto;
+  border-block: 1px solid var(--line);
+}
+
+.catalog-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.8rem;
+  align-items: center;
+  padding: 0.9rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.catalog-row:last-child {
+  border-bottom: 0;
+}
+
+.catalog-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.18rem;
+}
+
+.catalog-row strong,
+.catalog-row small {
+  overflow-wrap: anywhere;
+}
+
+.catalog-row small {
+  color: var(--muted);
+}
+
+.catalog-row__section {
+  color: var(--primary);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.catalog-edit {
+  width: auto;
+  min-height: 42px;
+  padding-inline: 0.9rem;
+}
+
 @media (max-width: 760px) {
   .entry-screen {
     place-items: start center;
@@ -2999,5 +3070,21 @@ select:focus {
 
   .client-topbar .brand-chip span {
     display: none;
+  }
+
+  .catalog-manager-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .catalog-editor {
+    position: static;
+  }
+
+  .catalog-list {
+    max-height: none;
+  }
+
+  .catalog-row {
+    align-items: end;
   }
 }

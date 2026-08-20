@@ -90,6 +90,11 @@ export default {
         return jsonp(url, { ok: true, ...(await getCatalog(env.DB, slug)) }, 200, READ_CACHE_HEADERS);
       }
 
+      if (action === "saveCatalogItem") {
+        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+        return json({ ok: true, item: await saveCatalogItem(env.DB, payload) });
+      }
+
       if (action === "getMenu") {
         const slug = url.searchParams.get("slug") || "amaro";
         const date = normalizeDate(url.searchParams.get("date"));
@@ -748,6 +753,80 @@ async function getCatalog(db, slug) {
     ORDER BY asset_type, label
   `).bind(restaurant.id).all();
   return { restaurant, items: items.results || [], assets: assets.results || [] };
+}
+
+async function saveCatalogItem(db, payload) {
+  const slug = normalizeSlug(payload.slug || "amaro");
+  const restaurant = await requireRestaurant(db, slug);
+  assertRestaurantToken(restaurant, payload.token);
+
+  const name = boundedText(payload.name, 140);
+  if (!name) throw httpError("catalog_item_name_required", 400);
+
+  const requestedId = cleanIdentifier(payload.id || payload.item_id || "", 160);
+  const existing = requestedId
+    ? await db.prepare("SELECT * FROM catalog_items WHERE id = ? AND restaurant_id = ? LIMIT 1")
+      .bind(requestedId, restaurant.id).first()
+    : null;
+  if (requestedId && !existing) throw httpError("catalog_item_not_found", 404);
+
+  const sectionTitle = boundedText(payload.section_title || payload.sectionTitle || existing?.section_title || payload.category || "Catálogo", 100);
+  const sectionId = cleanIdentifier(
+    payload.section_id || payload.sectionId || existing?.section_id || normalizeKey(sectionTitle).replace(/\s+/g, "-"),
+    100
+  ) || "catalogo";
+  const now = new Date().toISOString();
+  const id = existing?.id || `catalog_${slug}_${crypto.randomUUID()}`;
+  let sortOrder = Number(payload.sort_order ?? payload.sortOrder ?? existing?.sort_order);
+  if (!Number.isFinite(sortOrder)) {
+    const last = await db.prepare(`
+      SELECT COALESCE(MAX(sort_order), 0) AS last_sort_order
+      FROM catalog_items WHERE restaurant_id = ? AND section_id = ?
+    `).bind(restaurant.id, sectionId).first();
+    sortOrder = Number(last?.last_sort_order || 0) + 1;
+  }
+
+  await db.prepare(`
+    INSERT INTO catalog_items (
+      id, restaurant_id, section_id, section_title, name, category, description,
+      price, image_url, source_repo, source_path, source_url, sort_order,
+      is_active, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      section_id = excluded.section_id,
+      section_title = excluded.section_title,
+      name = excluded.name,
+      category = excluded.category,
+      description = excluded.description,
+      price = excluded.price,
+      image_url = excluded.image_url,
+      sort_order = excluded.sort_order,
+      is_active = 1,
+      updated_at = excluded.updated_at
+  `).bind(
+    id,
+    restaurant.id,
+    sectionId,
+    sectionTitle,
+    name,
+    boundedText(payload.category || sectionTitle, 100),
+    boundedText(payload.description, 1200),
+    boundedText(payload.price, 40),
+    boundedText(payload.image_url || payload.imageUrl, 1000),
+    boundedText(existing?.source_repo, 300),
+    boundedText(existing?.source_path, 500),
+    boundedText(existing?.source_url, 1000),
+    Math.max(0, Math.trunc(sortOrder)),
+    existing?.created_at || now,
+    now
+  ).run();
+
+  return db.prepare("SELECT * FROM catalog_items WHERE id = ? AND restaurant_id = ? LIMIT 1")
+    .bind(id, restaurant.id).first();
+}
+
+function boundedText(value, maxLength) {
+  return String(value || "").trim().slice(0, maxLength);
 }
 
 async function getMenu(db, slug, date = "") {

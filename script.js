@@ -781,11 +781,14 @@ function normalizeCatalogItem(item, restaurant) {
   };
 }
 
-async function syncCatalogForRestaurant(restaurant) {
+async function syncCatalogForRestaurant(restaurant, { fresh = false } = {}) {
   let catalog = [];
   try {
     const endpoint = restaurant.analyticsEndpoint || QRSTACK_D1_API_URL;
-    const data = await endpointGet(endpoint, "getCatalog", { slug: restaurant.slug });
+    const data = await endpointGet(endpoint, "getCatalog", {
+      slug: restaurant.slug,
+      ...(fresh ? { fresh: Date.now() } : {}),
+    });
     catalog = Array.isArray(data.items) ? data.items : Array.isArray(data.catalog) ? data.catalog : [];
   } catch (error) {
     console.warn("QrStack catalog API unavailable:", error.message);
@@ -1531,9 +1534,12 @@ function renderHqInsights() {
   `;
 }
 
-async function renderClientPortal(slug, version) {
+async function renderClientPortal(slug, version, { skipCatalogSync = false } = {}) {
   const localRestaurant = getRestaurant(slug);
-  const [remote] = await Promise.all([syncMenuFromApi(slug), syncCatalogForRestaurant(localRestaurant)]);
+  const [remote] = await Promise.all([
+    syncMenuFromApi(slug),
+    skipCatalogSync ? Promise.resolve(getCatalogForRestaurant(localRestaurant)) : syncCatalogForRestaurant(localRestaurant),
+  ]);
   if (!isCurrentRoute(version)) return;
   const currentHash = window.location.hash.replace(/^#\/?/, "");
   if (!currentHash.startsWith(`cliente/${slug}`) && !currentHash.startsWith(`admin/${slug}`)) return;
@@ -1565,7 +1571,7 @@ async function renderClientPortal(slug, version) {
             <input type="hidden" name="date" value="${escapeAttr(todayIso())}" />
             <input type="hidden" name="price" value="${escapeAttr(menu.price || "")}" />
             <input type="hidden" name="serviceHours" value="${escapeAttr(menu.serviceHours || "")}" />
-            ${restaurant.slug === "amaro" ? renderAmaroOriginalForm(menuItems) : renderGenericItemsTextarea(menuItems)}
+            ${restaurant.slug === "amaro" ? renderAmaroOriginalForm(restaurant, menuItems) : renderGenericItemsTextarea(menuItems)}
             <div class="field field--full">
               <label for="notes">Observações</label>
               <textarea id="notes" name="notes" placeholder="Observações do dia">${menu.notes || ""}</textarea>
@@ -1574,6 +1580,15 @@ async function renderClientPortal(slug, version) {
               <button type="submit">Enviar e publicar Story</button>
             </div>
           </form>
+        </section>
+
+        <section class="section client-step" id="catalog-manager">
+          <div class="section__head">
+            <p class="eyebrow">Pratos</p>
+            <h2>Catálogo do restaurante</h2>
+            <p class="muted">Cadastre pratos novos ou atualize nome, categoria, descrição e preço dos já existentes.</p>
+          </div>
+          ${renderCatalogManager(restaurant)}
         </section>
 
         <section class="section client-step" id="story-panel">
@@ -1622,6 +1637,7 @@ function renderClientTopbar(restaurant) {
           <span>${restaurant.name}</span>
         </a>
         <button type="button" class="nav-link active" data-scroll-target="formulario">Formulário</button>
+        <button type="button" class="nav-link" data-scroll-target="catalog-manager">Pratos</button>
         <button type="button" class="nav-link" data-scroll-target="story-panel">Story</button>
         <a class="nav-link" href="${publicMenuHash(restaurant, "cliente")}">Cardápio público</a>
         ${ownerReturn}
@@ -1670,12 +1686,12 @@ function renderGenericItemsTextarea(menuItems) {
   `;
 }
 
-function renderAmaroOriginalForm(menuItems) {
+function renderAmaroOriginalForm(restaurant, menuItems) {
   const configuredFields = getAmaroFormFields().filter((field) => field.title.toLowerCase().startsWith("prato"));
   const fields = configuredFields.length
     ? configuredFields
     : Array.from({ length: 7 }, (_, index) => ({ title: `Prato ${index + 1}:` }));
-  const activeExecutives = getAmaroCatalog()
+  const activeExecutives = getCatalogForRestaurant(restaurant)
     .filter((item) => item.section_id === "executivos" && isCatalogItemActive(item))
     .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
     .map((item) => item.name);
@@ -1703,6 +1719,72 @@ function renderAmaroOriginalForm(menuItems) {
             `;
           })
           .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderCatalogManager(restaurant) {
+  const catalog = getCatalogForRestaurant(restaurant)
+    .filter(isCatalogItemActive)
+    .sort((a, b) => {
+      const section = String(a.section_title || "").localeCompare(String(b.section_title || ""), "pt-BR");
+      return section || Number(a.sort_order || 0) - Number(b.sort_order || 0) || String(a.name).localeCompare(String(b.name), "pt-BR");
+    });
+  const sections = [...new Map(catalog.map((item) => [item.section_id, item.section_title || item.category || "Catálogo"])).entries()];
+  return `
+    <div class="catalog-manager-layout">
+      <form id="catalog-item-form" class="card form-grid catalog-editor">
+        <input type="hidden" name="catalogItemId" value="" />
+        <div class="field field--full">
+          <label for="catalog-name">Nome do prato</label>
+          <input id="catalog-name" name="catalogName" required maxlength="140" placeholder="Ex.: Maminha grelhada" />
+        </div>
+        <div class="field">
+          <label for="catalog-section">Categoria</label>
+          <select id="catalog-section" name="catalogSection" required>
+            ${sections.map(([id, title]) => `<option value="${escapeAttr(id)}" data-title="${escapeAttr(title)}">${escapeHtml(title)}</option>`).join("")}
+            <option value="__new__">Nova categoria</option>
+          </select>
+        </div>
+        <div class="field" id="catalog-new-section-field" hidden>
+          <label for="catalog-new-section">Nome da nova categoria</label>
+          <input id="catalog-new-section" name="catalogNewSection" maxlength="100" placeholder="Ex.: Executivos" />
+        </div>
+        <div class="field">
+          <label for="catalog-price">Preço</label>
+          <input id="catalog-price" name="catalogPrice" maxlength="40" placeholder="R$ 38,00" />
+        </div>
+        <div class="field field--full">
+          <label for="catalog-description">Descrição</label>
+          <textarea id="catalog-description" name="catalogDescription" maxlength="1200" placeholder="Ingredientes e acompanhamentos"></textarea>
+        </div>
+        <div class="field field--full">
+          <label for="catalog-image">Foto (URL ou caminho publicado)</label>
+          <input id="catalog-image" name="catalogImage" maxlength="1000" placeholder="https://... ou fotos de pratos/prato.jpg" />
+        </div>
+        <div class="actions field--full">
+          <button type="submit">Salvar prato</button>
+          <button type="reset" class="secondary">Limpar</button>
+        </div>
+      </form>
+      <div class="card catalog-library">
+        <div class="field">
+          <label for="catalog-search">Buscar no catálogo</label>
+          <input id="catalog-search" type="search" placeholder="Digite o nome do prato" />
+        </div>
+        <div class="catalog-list" id="catalog-list">
+          ${catalog.map((item) => `
+            <article class="catalog-row" data-catalog-search="${escapeAttr(normalizeKey(`${item.name} ${item.section_title || item.category || ""}`))}">
+              <div>
+                <span class="catalog-row__section">${escapeHtml(item.section_title || item.category || "Catálogo")}</span>
+                <strong>${escapeHtml(item.name)}</strong>
+                <small>${escapeHtml(item.price || "Sem preço informado")}</small>
+              </div>
+              <button type="button" class="ghost catalog-edit" data-catalog-id="${escapeAttr(item.id)}">Editar</button>
+            </article>
+          `).join("")}
+        </div>
       </div>
     </div>
   `;
@@ -1796,6 +1878,113 @@ function attachClientHandlers(restaurant, menu) {
     const latestMenu = getLatestMenu(restaurant.id);
     await shareStory(restaurant, latestMenu);
     trackEvent(restaurant, "story_shared", "admin", latestMenu.id);
+  });
+
+  attachCatalogManagerHandlers(restaurant);
+}
+
+function attachCatalogManagerHandlers(restaurant) {
+  const form = document.getElementById("catalog-item-form");
+  const sectionSelect = document.getElementById("catalog-section");
+  const newSectionField = document.getElementById("catalog-new-section-field");
+  const search = document.getElementById("catalog-search");
+  if (!form || !sectionSelect || !newSectionField) return;
+
+  const syncNewSectionField = () => {
+    const isNew = sectionSelect.value === "__new__";
+    newSectionField.hidden = !isNew;
+    form.elements.catalogNewSection.required = isNew;
+    if (isNew) form.elements.catalogNewSection.focus();
+  };
+  sectionSelect.addEventListener("change", syncNewSectionField);
+
+  document.querySelectorAll(".catalog-edit").forEach((button) => {
+    button.addEventListener("click", () => {
+      const catalogItem = getCatalogForRestaurant(restaurant).find((item) => item.id === button.dataset.catalogId);
+      if (!catalogItem) return;
+      form.elements.catalogItemId.value = catalogItem.id;
+      form.elements.catalogName.value = catalogItem.name || "";
+      form.elements.catalogPrice.value = catalogItem.price || "";
+      form.elements.catalogDescription.value = catalogItem.description || "";
+      form.elements.catalogImage.value = catalogItem.image_url || "";
+      const existingOption = [...sectionSelect.options].find((option) => option.value === catalogItem.section_id);
+      if (existingOption) {
+        sectionSelect.value = catalogItem.section_id;
+        form.elements.catalogNewSection.value = "";
+      } else {
+        sectionSelect.value = "__new__";
+        form.elements.catalogNewSection.value = catalogItem.section_title || catalogItem.category || "";
+      }
+      syncNewSectionField();
+      form.scrollIntoView({ behavior: "smooth", block: "start" });
+      form.elements.catalogName.focus({ preventScroll: true });
+    });
+  });
+
+  search?.addEventListener("input", () => {
+    const query = normalizeKey(search.value);
+    document.querySelectorAll(".catalog-row").forEach((row) => {
+      row.hidden = Boolean(query && !String(row.dataset.catalogSearch || "").includes(query));
+    });
+  });
+
+  form.addEventListener("reset", () => {
+    window.setTimeout(() => {
+      form.elements.catalogItemId.value = "";
+      syncNewSectionField();
+    }, 0);
+  });
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (form.dataset.submitting === "true") return;
+    const submitButton = form.querySelector('button[type="submit"]');
+    const selectedOption = sectionSelect.selectedOptions[0];
+    const newSectionTitle = form.elements.catalogNewSection.value.trim();
+    const sectionTitle = sectionSelect.value === "__new__"
+      ? newSectionTitle
+      : selectedOption?.dataset.title || selectedOption?.textContent?.trim() || "Catálogo";
+    if (!sectionTitle) {
+      toast("Informe o nome da categoria.");
+      return;
+    }
+
+    form.dataset.submitting = "true";
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.textContent = "Salvando...";
+    }
+    try {
+      const data = await apiPost({
+        action: "saveCatalogItem",
+        slug: restaurant.slug,
+        token: restaurant.adminToken || ACTIVE_CLIENT_TOKEN,
+        id: form.elements.catalogItemId.value,
+        name: form.elements.catalogName.value.trim(),
+        section_id: sectionSelect.value === "__new__" ? normalizeKey(sectionTitle).replace(/\s+/g, "-") : sectionSelect.value,
+        section_title: sectionTitle,
+        category: sectionTitle,
+        description: form.elements.catalogDescription.value.trim(),
+        price: form.elements.catalogPrice.value.trim(),
+        image_url: form.elements.catalogImage.value.trim(),
+      });
+      const savedItem = normalizeCatalogItem(data.item, restaurant);
+      const nextCatalog = getCatalogForRestaurant(restaurant).filter((item) => item.id !== savedItem.id);
+      nextCatalog.push(savedItem);
+      runtimeCatalogs.set(restaurant.id, nextCatalog);
+      toast(form.elements.catalogItemId.value ? "Prato atualizado no cardápio." : "Prato adicionado ao cardápio.");
+      await renderClientPortal(restaurant.slug, routeVersion, { skipCatalogSync: true });
+      document.getElementById("catalog-manager")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (error) {
+      console.warn("QrStack catalog save unavailable:", error);
+      toast("Não foi possível salvar o prato. Tente novamente.");
+    } finally {
+      delete form.dataset.submitting;
+      if (submitButton && document.body.contains(submitButton)) {
+        submitButton.disabled = false;
+        submitButton.textContent = "Salvar prato";
+      }
+    }
   });
 }
 
@@ -2000,7 +2189,7 @@ async function saveMenuForm(restaurant, menuId, formData) {
 
   state.menuItems = state.menuItems.filter((menuItem) => menuItem.menuDayId !== menuId);
   const selectedRows =
-    restaurant.slug === "amaro" ? selectedAmaroRows(formData) : selectedGenericRows(formData);
+    restaurant.slug === "amaro" ? selectedAmaroRows(restaurant, formData) : selectedGenericRows(formData);
   selectedRows.forEach((parsed, index) => {
     state.menuItems.push(item(menuId, parsed.name, parsed.category, parsed.isHighlight, index + 1, parsed.description, parsed.price));
   });
@@ -2046,8 +2235,11 @@ function selectedGenericRows(formData) {
     .map(parseMenuItemLine);
 }
 
-function selectedAmaroRows(formData) {
-  const catalog = catalogByName();
+function selectedAmaroRows(restaurant, formData) {
+  const catalog = getCatalogForRestaurant(restaurant).reduce((acc, catalogItem) => {
+    acc[normalizeKey(catalogItem.name)] = catalogItem;
+    return acc;
+  }, {});
   return Array.from({ length: 7 }, (_, index) => formData.get(`prato_${index + 1}`)?.toString().trim())
     .filter(Boolean)
     .map((name, index) => {
@@ -3441,6 +3633,15 @@ function formatDateTime(value) {
 
 function escapeAttr(value) {
   return String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function toast(message) {
