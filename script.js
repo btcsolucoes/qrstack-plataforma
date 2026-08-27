@@ -1571,10 +1571,10 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
             <input type="hidden" name="date" value="${escapeAttr(todayIso())}" />
             <input type="hidden" name="price" value="${escapeAttr(menu.price || "")}" />
             <input type="hidden" name="serviceHours" value="${escapeAttr(menu.serviceHours || "")}" />
-            ${restaurant.slug === "amaro" ? renderAmaroOriginalForm(restaurant, menuItems) : renderGenericItemsTextarea(menuItems)}
+            ${restaurant.slug === "amaro" ? renderAmaroOriginalForm(restaurant) : renderGenericItemsTextarea()}
             <div class="field field--full">
               <label for="notes">Observações</label>
-              <textarea id="notes" name="notes" placeholder="Observações do dia">${menu.notes || ""}</textarea>
+              <textarea id="notes" name="notes" placeholder="Observações do dia"></textarea>
             </div>
             <div class="actions field--full">
               <button type="submit">Enviar e publicar Story</button>
@@ -1675,18 +1675,16 @@ function field(label, name, value, placeholder = "", type = "text") {
   `;
 }
 
-function renderGenericItemsTextarea(menuItems) {
+function renderGenericItemsTextarea() {
   return `
     <div class="field field--full">
       <label for="items">Itens do cardápio</label>
-      <textarea id="items" name="items" placeholder="Categoria: Item | Preço">${menuItems
-        .map((menuItem) => `${menuItem.category}: ${menuItem.name}${menuItem.price ? ` | ${menuItem.price}` : ""}${menuItem.isHighlight ? "*" : ""}`)
-        .join("\n")}</textarea>
+      <textarea id="items" name="items" placeholder="Categoria: Item | Preço"></textarea>
     </div>
   `;
 }
 
-function renderAmaroOriginalForm(restaurant, menuItems) {
+function renderAmaroOriginalForm(restaurant) {
   const configuredFields = getAmaroFormFields().filter((field) => field.title.toLowerCase().startsWith("prato"));
   const fields = configuredFields.length
     ? configuredFields
@@ -1695,14 +1693,12 @@ function renderAmaroOriginalForm(restaurant, menuItems) {
     .filter((item) => item.section_id === "executivos" && isCatalogItemActive(item))
     .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
     .map((item) => item.name);
-  const selectedNames = menuItems.map((menuItem) => menuItem.name);
   return `
     <div class="field field--full">
       <label>Formulário original Amaro</label>
       <div class="select-grid">
         ${fields
           .map((field, index) => {
-            const selectedName = selectedNames[index] || "";
             return `
               <div class="field">
                 <label for="amaro-prato-${index + 1}">${field.title.replace(":", "")}</label>
@@ -1711,7 +1707,7 @@ function renderAmaroOriginalForm(restaurant, menuItems) {
                   ${activeExecutives
                     .map(
                       (option) =>
-                        `<option value="${escapeAttr(option)}" ${option === selectedName ? "selected" : ""}>${option}</option>`
+                        `<option value="${escapeAttr(option)}">${option}</option>`
                     )
                     .join("")}
                 </select>
