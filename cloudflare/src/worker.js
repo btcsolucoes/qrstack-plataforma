@@ -16,6 +16,7 @@ const CORS_HEADERS = {
 
 const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec";
 const ANALYTICS_CACHE_VERSION = "v5-persistent-snapshot";
+const D1_CAPACITY_BLOCK_KEY = "insights:d1-capacity-blocked";
 const BUSINESS_TIME_ZONE = "America/Recife";
 const INSIGHTS_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 1000;
 const STORY_MEDIA_TTL_SECONDS = 48 * 60 * 60;
@@ -231,6 +232,7 @@ export default {
 };
 
 function isD1CapacityError(error) {
+  if (error?.code === "D1_CAPACITY_BLOCKED_CACHED") return true;
   const message = String(error?.message || error || "");
   return /SQLITE_FULL|database (?:or disk )?is full|maximum database size|max(?:imum)? db size|storage (?:capacity|limit)|quota (?:exceeded|reached)|exceeded[^\n]*(?:quota|daily row)|(?:daily|free tier)[^\n]*row (?:read|write) limit|write quota/i.test(message);
 }
@@ -316,7 +318,19 @@ async function readInsightsSnapshot(env, key) {
 }
 
 async function refreshInsightsSnapshot(env, filters, key = insightsSnapshotKey(filters)) {
-  const insights = await getCombinedInsights(env, filters);
+  if (env.INSIGHTS_CACHE && await env.INSIGHTS_CACHE.get(D1_CAPACITY_BLOCK_KEY)) {
+    const error = new Error("D1 capacity is temporarily blocked (cached)");
+    error.code = "D1_CAPACITY_BLOCKED_CACHED";
+    throw error;
+  }
+
+  let insights;
+  try {
+    insights = await getCombinedInsights(env, filters);
+  } catch (error) {
+    if (isD1CapacityError(error)) await markD1CapacityBlocked(env, error);
+    throw error;
+  }
   const slug = normalizeSlug(filters.slug || "amaro");
   const snapshot = {
     ok: true,
@@ -328,6 +342,20 @@ async function refreshInsightsSnapshot(env, filters, key = insightsSnapshotKey(f
     await env.INSIGHTS_CACHE.put(key, JSON.stringify(snapshot));
   }
   return snapshot;
+}
+
+async function markD1CapacityBlocked(env, error) {
+  if (!env.INSIGHTS_CACHE || error?.code === "D1_CAPACITY_BLOCKED_CACHED") return;
+  const now = new Date();
+  const nextReset = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 5);
+  const expirationTtl = Math.max(60, Math.ceil((nextReset - now.getTime()) / 1000));
+  try {
+    await env.INSIGHTS_CACHE.put(D1_CAPACITY_BLOCK_KEY, new Date().toISOString(), { expirationTtl });
+  } catch (cacheError) {
+    console.warn("QrStack could not persist D1 capacity marker", {
+      error: cacheError?.message || String(cacheError),
+    });
+  }
 }
 
 async function getRestaurant(db, slug) {
@@ -344,7 +372,12 @@ async function requireRestaurant(db, slug) {
 
 async function trackEvent(db, payload, request) {
   const slug = normalizeSlug(payload.slug || payload.cliente || payload.restaurant_slug || "amaro");
-  const restaurant = await requireRestaurant(db, slug);
+  // Amaro is the production tenant and its stable id is part of the initial schema.
+  // Avoid a read before every event so writes keep working if only the row-read
+  // allowance is temporarily exhausted.
+  const restaurant = slug === "amaro"
+    ? { id: "rest_amaro", slug: "amaro" }
+    : await requireRestaurant(db, slug);
   const userAgent = payload.user_agent || payload.userAgent || request.headers.get("user-agent") || "";
   const device = detectDevice(userAgent);
   const dishName = payload.dish_name || payload.item_name || payload.prato || "";
@@ -382,6 +415,7 @@ async function trackEvent(db, payload, request) {
   };
 
   if (event.event_type.startsWith("dish_") && event.session_id) {
+    await insertEvent(db, event);
     const recoveredPageView = {
       ...event,
       id: `recovered-pageview:${event.restaurant_slug}:${event.session_id}`,
@@ -401,18 +435,16 @@ async function trackEvent(db, payload, request) {
       viewport: payload.viewport || "",
       timezone_offset: payload.timezone_offset || payload.timezoneOffset || "",
     };
-    await insertRecoveredPageView(db, recoveredPageView);
-  }
-
-  if (event.event_type === "page_view" && event.session_id) {
-    const recoveredId = `recovered-pageview:${event.restaurant_slug}:${event.session_id}`;
-    const columnsToRefresh = EVENT_COLUMNS.filter((column) => !["id", "restaurant_id", "restaurant_slug", "session_id"].includes(column));
-    const result = await db.prepare(`
-      UPDATE analytics_events
-      SET ${columnsToRefresh.map((column) => `${column} = ?`).join(", ")}
-      WHERE id = ?
-    `).bind(...columnsToRefresh.map((column) => event[column] ?? ""), recoveredId).run();
-    if (Number(result.meta?.changes || 0) > 0) return event;
+    try {
+      await insertRecoveredPageView(db, recoveredPageView);
+    } catch (error) {
+      if (!isD1CapacityError(error)) throw error;
+      console.warn("QrStack skipped recovered page view while D1 reads are limited", {
+        event_id: event.id,
+        session_id: event.session_id,
+      });
+    }
+    return event;
   }
 
   await insertEvent(db, event);
