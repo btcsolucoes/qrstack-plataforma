@@ -1,4 +1,4 @@
-const CACHE_PURGE_VERSION = "qrstack-platform-network-first-20260902-unified-responses";
+const CACHE_PURGE_VERSION = "qrstack-platform-network-first-20260902-stories-paused";
 
 self.addEventListener("install", () => {
   self.skipWaiting();
