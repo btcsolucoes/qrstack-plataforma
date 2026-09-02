@@ -1,4 +1,4 @@
-const CACHE_PURGE_VERSION = "qrstack-platform-network-first-20260827-blank-form";
+const CACHE_PURGE_VERSION = "qrstack-platform-network-first-20260902-unified-responses";
 
 self.addEventListener("install", () => {
   self.skipWaiting();

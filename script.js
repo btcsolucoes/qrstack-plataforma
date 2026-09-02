@@ -76,7 +76,7 @@ const DEFAULT_STATE = {
 };
 
 const STORE_KEY = "qrstack-platform-v4-amaro";
-const INSIGHTS_CACHE_KEY = "qrstack-insights-html-cache-v2";
+const INSIGHTS_CACHE_KEY = "qrstack-insights-html-cache-v3";
 const MENU_SUBMISSION_PREFIX = "qrstack:menu-submission:";
 const insightsOpenedThisSession = new Set();
 const app = document.getElementById("app");
@@ -1085,6 +1085,7 @@ function renderHq(tab = "overview") {
     insightsOpenedThisSession.add(restaurant.slug);
     hydrateInsights(restaurant, { refreshAfterLoad: shouldRefreshOnOpen });
   }
+  if (tab === "respostas") hydrateMenuResponses();
 }
 
 function renderAdminHero(title, subtitle, logoUrl) {
@@ -1197,43 +1198,76 @@ function renderHqClients(restaurants) {
 }
 
 function renderHqResponses() {
-  const rows = state.menuDays
-    .slice()
-    .sort((a, b) => String(b.updatedAt || b.createdAt || b.date).localeCompare(String(a.updatedAt || a.createdAt || a.date)))
-    .map((menu) => {
-      const restaurant = state.restaurants.find((rest) => rest.id === menu.restaurantId);
-      const itemCount = getMenuItems(menu.id).length;
-      return `
-        <article class="response-card">
-          <div>
-            <p class="eyebrow">${restaurant?.name || "Cliente"}</p>
-            <h3>${menu.title}</h3>
-            <p class="muted">${formatDate(menu.date)} • ${menu.serviceHours || "Horário não informado"} • ${itemCount} itens</p>
-          </div>
-          <div class="response-card__items">
-            ${getMenuItems(menu.id)
-              .map((item) => `<span>${item.name}${item.price ? ` • ${item.price}` : ""}</span>`)
-              .join("")}
-          </div>
-          ${menu.notes ? `<p class="muted">${menu.notes}</p>` : ""}
-          <div class="actions">
-            <a class="button secondary" href="${clientPortalLink(restaurant || getRestaurant(ACTIVE_CLIENT_SLUG))}">Abrir formulário</a>
-            <a class="button ghost" href="${publicMenuHash(restaurant || getRestaurant(ACTIVE_CLIENT_SLUG), "hq")}">Ver cardápio</a>
-          </div>
-        </article>
-      `;
-    })
-    .join("");
   return `
     <section class="section">
       <div class="section__head">
         <p class="eyebrow">Formulários</p>
         <h2>Respostas recebidas</h2>
-        <p>Cada envio do cliente aparece aqui com data, itens publicados, preço, observações e acesso direto ao cardápio.</p>
+        <p>Envios da plataforma e do Google Forms aparecem em uma única linha do tempo, sem duplicar datas já registradas no D1.</p>
       </div>
-      <div class="response-list">${rows || "<p class='muted'>Nenhuma resposta ainda.</p>"}</div>
+      <div class="response-list" id="responses-live"><p class="muted">Sincronizando respostas reais...</p></div>
     </section>
   `;
+}
+
+function responseSourceLabel(source) {
+  if (source === "google_forms") return "Google Forms";
+  if (source === "platform") return "Plataforma QrStack";
+  if (source === "d1") return "D1";
+  return "Origem registrada";
+}
+
+function renderMenuResponseRows(records) {
+  const restaurant = getRestaurant(ACTIVE_CLIENT_SLUG);
+  if (!records.length) return "<p class='muted'>Nenhuma resposta registrada.</p>";
+  return records.map((record) => {
+    const menu = record.menu || {};
+    const items = Array.isArray(record.items) ? record.items : [];
+    return `
+      <article class="response-card">
+        <div>
+          <p class="eyebrow">${escapeHtml(responseSourceLabel(record.response_source))}</p>
+          <h3>${escapeHtml(menu.title || "Almoço de Hoje")}</h3>
+          <p class="muted">${formatDate(menu.date)} • ${escapeHtml(menu.service_hours || "Horário não informado")} • ${items.length} itens</p>
+        </div>
+        <div class="response-card__items">
+          ${items.map((item) => `<span>${escapeHtml(item.name)}${item.price ? ` • ${escapeHtml(item.price)}` : ""}</span>`).join("")}
+        </div>
+        ${menu.notes ? `<p class="muted">${escapeHtml(menu.notes)}</p>` : ""}
+        <div class="actions">
+          <a class="button secondary" href="${clientPortalLink(restaurant)}">Abrir formulário</a>
+          <a class="button ghost" href="${publicMenuHash(restaurant, "hq")}">Ver cardápio</a>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
+function localMenuResponseRecords() {
+  return state.menuDays.map((menu) => ({
+    menu: {
+      ...menu,
+      restaurant_id: menu.restaurantId,
+      service_hours: menu.serviceHours,
+      story_link: menu.storyLink,
+      updated_at: menu.updatedAt,
+    },
+    items: getMenuItems(menu.id),
+    response_source: "local",
+  }));
+}
+
+async function hydrateMenuResponses() {
+  const target = document.getElementById("responses-live");
+  if (!target) return;
+  try {
+    const data = await apiGet("getMenuResponses", { slug: ACTIVE_CLIENT_SLUG, key: OWNER_ACCESS_TOKEN, fresh: Date.now() });
+    target.innerHTML = renderMenuResponseRows(Array.isArray(data.responses) ? data.responses : []);
+  } catch (error) {
+    console.warn("QrStack response history unavailable:", error.message);
+    target.innerHTML = renderMenuResponseRows(localMenuResponseRecords());
+    target.insertAdjacentHTML("afterbegin", "<p class='muted'>Mostrando o cache local enquanto a sincronização é retomada.</p>");
+  }
 }
 
 function renderHqStories() {
