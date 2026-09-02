@@ -49,7 +49,7 @@ export default {
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v7-story-retry-history",
+          version: "archive-live-v8-quota-safe-insights",
           fallback_storage: "google_sheets",
           story_automation: true,
         });
@@ -89,17 +89,40 @@ export default {
         };
         const snapshotKey = insightsSnapshotKey(filters);
         if (forceRefresh) {
-          const refreshedSnapshot = await refreshInsightsSnapshot(env, filters, snapshotKey);
-          return jsonp(url, {
-            ...refreshedSnapshot,
-            cache: { status: "forced_refreshed", generated_at: refreshedSnapshot.generated_at },
-          }, 200, JSON_HEADERS);
+          try {
+            const refreshedSnapshot = await refreshInsightsSnapshot(env, filters, snapshotKey);
+            return jsonp(url, {
+              ...refreshedSnapshot,
+              cache: { status: "forced_refreshed", generated_at: refreshedSnapshot.generated_at },
+            }, 200, JSON_HEADERS);
+          } catch (error) {
+            const savedSnapshot = isD1CapacityError(error)
+              ? await readInsightsSnapshot(env, snapshotKey)
+              : null;
+            if (!savedSnapshot) throw error;
+            console.warn("QrStack insights refresh reached D1 quota; serving saved snapshot", {
+              key: snapshotKey,
+              error: error?.message || String(error),
+            });
+            return jsonp(url, {
+              ...savedSnapshot,
+              cache: {
+                status: "quota_stale",
+                generated_at: savedSnapshot.generated_at || savedSnapshot.insights?.collected_at || "",
+              },
+            }, 200, READ_CACHE_HEADERS);
+          }
         }
         const snapshot = await readInsightsSnapshot(env, snapshotKey);
         if (snapshot) {
           const ageMs = Date.now() - Date.parse(snapshot.generated_at || snapshot.insights?.collected_at || 0);
           if (!Number.isFinite(ageMs) || ageMs > INSIGHTS_SNAPSHOT_MAX_AGE_MS) {
-            ctx.waitUntil(refreshInsightsSnapshot(env, filters, snapshotKey));
+            ctx.waitUntil(refreshInsightsSnapshot(env, filters, snapshotKey).catch((error) => {
+              console.warn("QrStack background insights refresh failed", {
+                key: snapshotKey,
+                error: error?.message || String(error),
+              });
+            }));
           }
           return jsonp(url, {
             ...snapshot,
@@ -189,18 +212,27 @@ export default {
 
   async scheduled(controller, env, ctx) {
     const today = todayIso();
-    ctx.waitUntil(Promise.allSettled([
-      refreshInsightsSnapshot(env, { slug: "amaro", startDate: "", endDate: "" }),
+    const scheduledAt = new Date(controller.scheduledTime || Date.now());
+    const refreshes = [
       refreshInsightsSnapshot(env, { slug: "amaro", startDate: today, endDate: today }),
-      refreshInsightsSnapshot(env, { slug: "amaro", startDate: daysAgoIso(6), endDate: today }),
-      refreshInsightsSnapshot(env, { slug: "amaro", startDate: daysAgoIso(29), endDate: today }),
-    ]));
+    ];
+
+    // Historical scans run once a day. Recomputing them every ten minutes exhausted
+    // the D1 free-tier row-read quota without making historical data more useful.
+    if (scheduledAt.getUTCHours() === 6 && scheduledAt.getUTCMinutes() < 10) {
+      refreshes.push(
+        refreshInsightsSnapshot(env, { slug: "amaro", startDate: "", endDate: "" }),
+        refreshInsightsSnapshot(env, { slug: "amaro", startDate: daysAgoIso(6), endDate: today }),
+        refreshInsightsSnapshot(env, { slug: "amaro", startDate: daysAgoIso(29), endDate: today }),
+      );
+    }
+    ctx.waitUntil(Promise.allSettled(refreshes));
   },
 };
 
 function isD1CapacityError(error) {
   const message = String(error?.message || error || "");
-  return /SQLITE_FULL|database (?:or disk )?is full|maximum database size|max(?:imum)? db size|storage (?:capacity|limit)|quota (?:exceeded|reached)|exceeded[^\n]*quota|write quota/i.test(message);
+  return /SQLITE_FULL|database (?:or disk )?is full|maximum database size|max(?:imum)? db size|storage (?:capacity|limit)|quota (?:exceeded|reached)|exceeded[^\n]*(?:quota|daily row)|(?:daily|free tier)[^\n]*row (?:read|write) limit|write quota/i.test(message);
 }
 
 async function storeEventInSheets(env, payload, request) {
@@ -412,36 +444,40 @@ async function insertRecoveredPageView(db, event) {
 async function getInsights(db, filters) {
   const restaurant = await requireRestaurant(db, normalizeSlug(filters.slug));
   const bounds = buildDateBounds(filters);
+  const startDate = normalizeDate(filters.startDate);
+  const endDate = normalizeDate(filters.endDate);
+  const hasDateFilter = Boolean(startDate || endDate);
+  const today = todayIso();
   const period = eventWhere(restaurant.slug, bounds);
-  const all = eventWhere(restaurant.slug);
   const periodPageViews = eventWhere(restaurant.slug, bounds, "event_type = 'page_view'");
-  const allPageViews = eventWhere(restaurant.slug, null, "event_type = 'page_view'");
-  const todayPageViews = eventWhere(restaurant.slug, { start: dateStartUtc(todayIso()), endExclusive: dateStartUtc(addDays(todayIso(), 1)) }, "event_type = 'page_view'");
-  const sevenDaysPageViews = eventWhere(restaurant.slug, { start: dateStartUtc(daysAgoIso(6)) }, "event_type = 'page_view'");
+  const isTodayFilter = startDate === today && endDate === today;
+  const isSevenDayFilter = startDate === daysAgoIso(6) && endDate === today;
+  const todayPageViews = isTodayFilter
+    ? periodPageViews
+    : eventWhere(restaurant.slug, { start: dateStartUtc(today), endExclusive: dateStartUtc(addDays(today, 1)) }, "event_type = 'page_view'");
+  const sevenDaysPageViews = isSevenDayFilter
+    ? periodPageViews
+    : eventWhere(restaurant.slug, { start: dateStartUtc(daysAgoIso(6)), endExclusive: dateStartUtc(addDays(today, 1)) }, "event_type = 'page_view'");
   const dishViews = eventWhere(restaurant.slug, bounds, "event_type = 'dish_view' AND COALESCE(dish_name, '') <> ''");
   const dishTouches = eventWhere(restaurant.slug, bounds, "event_type = 'dish_touch' AND COALESCE(dish_name, '') <> ''");
   const dishObserves = eventWhere(restaurant.slug, bounds, "event_type = 'dish_observe' AND COALESCE(dish_name, '') <> ''");
   const webviewBanner = eventWhere(restaurant.slug, bounds, "banner_shown = 1");
 
   const [
-    totalEvents, periodEvents, totalAccesses, periodAccesses, accessesToday, accesses7Days,
-    uniqueSessionsPeriod, uniqueSessionsTotal, sourceCounts, eventTypeCounts, eventTypeCountsAll,
+    periodEvents, periodAccesses, accessesToday, accesses7Days,
+    uniqueSessionsPeriod, sourceCounts, eventTypeCounts,
     dailyAccesses, hourCounts, deviceCounts, browserCounts, osCounts, dishViewCounts,
     dishTouchCounts, dishObserveSeconds, dishCategoryCounts, dishTouchCategoryCounts,
     dishObserveCategorySeconds, totalDishObserveSeconds, webviewBannerShown,
     webviewBannerPlatformCounts, instagramToDirect, recentEvents,
   ] = await Promise.all([
-    scalarCount(db, all),
     scalarCount(db, period),
-    scalarCount(db, allPageViews),
     scalarCount(db, periodPageViews),
     scalarCount(db, todayPageViews),
     scalarCount(db, sevenDaysPageViews),
     scalarDistinctCount(db, period, "session_id"),
-    scalarDistinctCount(db, all, "session_id"),
     groupedCounts(db, periodPageViews, "source"),
     groupedCounts(db, period, "event_type"),
-    groupedCounts(db, all, "event_type"),
     groupedCounts(db, periodPageViews, "substr(datetime(created_at, '-3 hours'), 1, 10)"),
     groupedCounts(db, periodPageViews, "substr(datetime(created_at, '-3 hours'), 12, 2)"),
     groupedCounts(db, periodPageViews, "device_type"),
@@ -465,24 +501,19 @@ async function getInsights(db, filters) {
   mergeScore(dishAttentionScores, dishTouchCounts, 3);
   mergeScore(dishAttentionScores, dishObserveSeconds, 0.2);
 
-  return {
+  const insights = {
     restaurant_name: restaurant.name,
     provider: "cloudflare_d1",
     period_label: periodLabel(filters.startDate, filters.endDate),
     collected_at: new Date().toISOString(),
-    total_events: totalEvents,
     period_events: periodEvents,
-    total_accesses: totalAccesses,
-    total_page_views: totalAccesses,
     period_accesses: periodAccesses,
     filtered_accesses: periodAccesses,
     accesses_today: accessesToday,
     accesses_7_days: accesses7Days,
     unique_sessions_period: uniqueSessionsPeriod,
-    unique_sessions_total: uniqueSessionsTotal,
     source_counts: sourceCounts,
     event_type_counts: eventTypeCounts,
-    event_type_counts_all: eventTypeCountsAll,
     daily_accesses: dailyAccesses,
     hour_counts: hourCounts,
     peak_hour: peakHourFromCounts(hourCounts),
@@ -504,6 +535,15 @@ async function getInsights(db, filters) {
     total_dish_observe_seconds: totalDishObserveSeconds,
     recent_events: recentEvents,
   };
+
+  if (!hasDateFilter) {
+    insights.total_events = periodEvents;
+    insights.total_accesses = periodAccesses;
+    insights.total_page_views = periodAccesses;
+    insights.unique_sessions_total = uniqueSessionsPeriod;
+    insights.event_type_counts_all = eventTypeCounts;
+  }
+  return insights;
 }
 
 async function getCombinedInsights(env, filters) {
@@ -576,18 +616,22 @@ function mergeInsights(parts) {
     collected_at: new Date().toISOString(),
   };
   const numericKeys = [
-    "total_events", "period_events", "total_accesses", "total_page_views",
+    "period_events",
     "period_accesses", "filtered_accesses", "accesses_today", "accesses_7_days",
-    "unique_sessions_period", "unique_sessions_total", "webview_banner_shown",
+    "unique_sessions_period", "webview_banner_shown",
     "total_dish_views", "total_dish_touches", "total_dish_observe_seconds",
   ];
   const mapKeys = [
-    "source_counts", "event_type_counts", "event_type_counts_all", "daily_accesses",
+    "source_counts", "event_type_counts", "daily_accesses",
     "hour_counts", "device_counts", "browser_counts", "os_counts", "dish_view_counts",
     "dish_touch_counts", "dish_observe_seconds", "dish_view_category_counts",
     "dish_touch_category_counts", "dish_observe_category_seconds",
     "webview_banner_platform_counts",
   ];
+  if (parts.some((part) => Object.hasOwn(part, "total_events"))) {
+    numericKeys.push("total_events", "total_accesses", "total_page_views", "unique_sessions_total");
+    mapKeys.push("event_type_counts_all");
+  }
 
   numericKeys.forEach((key) => {
     merged[key] = parts.reduce((total, part) => total + Number(part[key] || 0), 0);
