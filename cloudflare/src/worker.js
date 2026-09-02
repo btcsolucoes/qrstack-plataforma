@@ -60,8 +60,11 @@ export default {
         const receivedPayload = request.method === "POST" ? payload : Object.fromEntries(url.searchParams);
         const eventPayload = { ...receivedPayload, id: receivedPayload.id || crypto.randomUUID() };
         try {
-          const event = await trackEvent(env.DB, eventPayload, request);
-          return json({ ok: true, event, storage: "d1" }, 201);
+          const tracked = await trackEvent(env.DB, eventPayload, request);
+          if (tracked.inserted && tracked.event.event_type === "page_view") {
+            ctx.waitUntil(updateTodayInsightsSnapshot(env, tracked.event));
+          }
+          return json({ ok: true, event: tracked.event, storage: "d1" }, 201);
         } catch (error) {
           if (!isD1CapacityError(error)) throw error;
           const fallback = await storeEventInSheets(env, eventPayload, request);
@@ -358,6 +361,73 @@ async function markD1CapacityBlocked(env, error) {
   }
 }
 
+async function updateTodayInsightsSnapshot(env, event) {
+  if (!env.INSIGHTS_CACHE || event.restaurant_slug !== "amaro") return;
+  const createdAt = new Date(event.created_at);
+  if (Number.isNaN(createdAt.getTime())) return;
+  const businessDate = todayIso(createdAt);
+  if (businessDate !== todayIso()) return;
+  const testText = `${event.source || ""} ${event.source_detail || ""} ${event.url || ""}`.toLowerCase();
+  if (/codex|teste|test|fresh=/.test(testText)) return;
+
+  const key = insightsSnapshotKey({ slug: event.restaurant_slug, startDate: businessDate, endDate: businessDate });
+  try {
+    const snapshot = await readInsightsSnapshot(env, key);
+    if (!snapshot?.insights) return;
+    const insights = snapshot.insights;
+    const hour = new Intl.DateTimeFormat("en-GB", {
+      timeZone: BUSINESS_TIME_ZONE,
+      hour: "2-digit",
+      hourCycle: "h23",
+    }).format(createdAt);
+    const increment = (field) => {
+      insights[field] = Number(insights[field] || 0) + 1;
+    };
+    const incrementMap = (field, mapKey) => {
+      if (!mapKey) return;
+      insights[field] = insights[field] || {};
+      insights[field][mapKey] = Number(insights[field][mapKey] || 0) + 1;
+    };
+
+    increment("period_events");
+    increment("period_accesses");
+    increment("filtered_accesses");
+    increment("accesses_today");
+    increment("accesses_7_days");
+    incrementMap("source_counts", event.source || "direct");
+    incrementMap("event_type_counts", "page_view");
+    incrementMap("daily_accesses", businessDate);
+    incrementMap("hour_counts", hour);
+    incrementMap("device_counts", event.device_type || "Não identificado");
+    incrementMap("browser_counts", event.browser || "Não identificado");
+    incrementMap("os_counts", event.os || "Não identificado");
+    if (event.banner_shown) {
+      increment("webview_banner_shown");
+      incrementMap("webview_banner_platform_counts", event.banner_platform || "Não identificado");
+    }
+    insights.peak_hour = peakHourFromCounts(insights.hour_counts);
+    insights.recent_events = [{
+      created_at: event.created_at,
+      event_type: event.event_type,
+      source: event.source,
+      source_detail: event.source_detail,
+      dish_name: "",
+      dish_category: "",
+      observe_seconds: 0,
+      device_type: event.device_type,
+    }, ...(insights.recent_events || [])].slice(0, 15);
+    const generatedAt = new Date().toISOString();
+    insights.collected_at = generatedAt;
+    snapshot.generated_at = generatedAt;
+    await env.INSIGHTS_CACHE.put(key, JSON.stringify(snapshot));
+  } catch (error) {
+    console.warn("QrStack could not increment today's insights snapshot", {
+      event_id: event.id,
+      error: error?.message || String(error),
+    });
+  }
+}
+
 async function getRestaurant(db, slug) {
   return db.prepare("SELECT * FROM restaurants WHERE slug = ? LIMIT 1").bind(slug).first();
 }
@@ -415,7 +485,7 @@ async function trackEvent(db, payload, request) {
   };
 
   if (event.event_type.startsWith("dish_") && event.session_id) {
-    await insertEvent(db, event);
+    const inserted = await insertEvent(db, event);
     const recoveredPageView = {
       ...event,
       id: `recovered-pageview:${event.restaurant_slug}:${event.session_id}`,
@@ -444,18 +514,18 @@ async function trackEvent(db, payload, request) {
         session_id: event.session_id,
       });
     }
-    return event;
+    return { event, inserted };
   }
 
-  await insertEvent(db, event);
-
-  return event;
+  const inserted = await insertEvent(db, event);
+  return { event, inserted };
 }
 
 async function insertEvent(db, event) {
-  await db.prepare(
+  const result = await db.prepare(
     `INSERT OR IGNORE INTO analytics_events (${EVENT_COLUMNS.join(", ")}) VALUES (${EVENT_COLUMNS.map(() => "?").join(", ")})`
   ).bind(...EVENT_COLUMNS.map((column) => event[column] ?? "")).run();
+  return Number(result.meta?.changes || 0) > 0;
 }
 
 async function insertRecoveredPageView(db, event) {
