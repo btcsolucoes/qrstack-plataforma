@@ -16,6 +16,9 @@ const CORS_HEADERS = {
 
 const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec";
 const ANALYTICS_CACHE_VERSION = "v5-persistent-snapshot";
+const MENU_CACHE_VERSION = "v1-unified-responses";
+const AMARO_FORM_SHEET_ID = "1wj-cHrLg-MHAzwD2CdWR-ZocaVMLQApdNif1hTIXpJI";
+const AMARO_FORM_SHEET_NAME = "Respostas ao formulário 1";
 const D1_CAPACITY_BLOCK_KEY = "insights:d1-capacity-blocked";
 const BUSINESS_TIME_ZONE = "America/Recife";
 const INSIGHTS_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 1000;
@@ -50,7 +53,7 @@ export default {
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v8-quota-safe-insights",
+          version: "archive-live-v9-unified-menu-cache",
           fallback_storage: "google_sheets",
           story_automation: true,
         });
@@ -161,12 +164,32 @@ export default {
       if (action === "getMenu") {
         const slug = url.searchParams.get("slug") || "amaro";
         const date = normalizeDate(url.searchParams.get("date"));
-        return jsonp(url, { ok: true, ...(await getMenu(env.DB, slug, date)) }, 200, READ_CACHE_HEADERS);
+        return jsonp(url, { ok: true, ...(await getMenu(env, slug, date)) }, 200, READ_CACHE_HEADERS);
       }
 
       if (action === "saveMenuDay") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        return json({ ok: true, ...(await saveMenuDay(env.DB, payload)) });
+        return json({ ok: true, ...(await saveMenuDay(env, payload)) });
+      }
+
+      if (action === "getMenuResponses") {
+        assertOwner(url.searchParams, request, env);
+        const slug = normalizeSlug(url.searchParams.get("slug") || "amaro");
+        if (slug === "amaro") await syncGoogleFormHistory(env);
+        return jsonp(url, { ok: true, responses: await getVisibleMenuResponses(env, slug) }, 200, READ_CACHE_HEADERS);
+      }
+
+      if (action === "cacheMenuRecords") {
+        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+        assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
+        const records = Array.isArray(payload.records) ? payload.records.filter(Boolean).slice(0, 500) : [];
+        for (const record of records) await cacheMenuRecord(env, normalizeCachedMenuRecord(record, "d1"));
+        return json({ ok: true, cached: records.length });
+      }
+
+      if (action === "backfillMenuCache") {
+        assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
+        return jsonp(url, { ok: true, ...(await backfillD1MenuCache(env, url.searchParams.get("slug") || payload.slug || "amaro")) });
       }
 
       if (action === "registerStoryAgent") {
@@ -219,12 +242,14 @@ export default {
     const scheduledAt = new Date(controller.scheduledTime || Date.now());
     const refreshes = [
       refreshInsightsSnapshot(env, { slug: "amaro", startDate: today, endDate: today }),
+      syncGoogleFormDate(env, today),
     ];
 
     // Historical scans run once a day. Recomputing them every ten minutes exhausted
     // the D1 free-tier row-read quota without making historical data more useful.
     if (scheduledAt.getUTCHours() === 6 && scheduledAt.getUTCMinutes() < 10) {
       refreshes.push(
+        backfillD1MenuCache(env, "amaro"),
         refreshInsightsSnapshot(env, { slug: "amaro", startDate: "", endDate: "" }),
         refreshInsightsSnapshot(env, { slug: "amaro", startDate: daysAgoIso(6), endDate: today }),
         refreshInsightsSnapshot(env, { slug: "amaro", startDate: daysAgoIso(29), endDate: today }),
@@ -1159,7 +1184,295 @@ function boundedText(value, maxLength) {
   return String(value || "").trim().slice(0, maxLength);
 }
 
-async function getMenu(db, slug, date = "") {
+function menuCacheKey(slug, date) {
+  return ["menu", MENU_CACHE_VERSION, normalizeSlug(slug), normalizeDate(date)].join(":");
+}
+
+function menuHistoryKey(slug) {
+  return ["menu-history", MENU_CACHE_VERSION, normalizeSlug(slug)].join(":");
+}
+
+function fallbackRestaurant(slug = "amaro") {
+  const normalizedSlug = normalizeSlug(slug);
+  return {
+    id: `rest_${normalizedSlug}`,
+    slug: normalizedSlug,
+    name: normalizedSlug === "amaro" ? "Amaro Café" : titleize(normalizedSlug),
+  };
+}
+
+function stableTextHash(value) {
+  let hash = 2166136261;
+  for (const character of String(value || "")) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function normalizeCachedMenuRecord(record, defaultSource = "platform") {
+  const menu = record?.menu || {};
+  const slug = normalizeSlug(record?.restaurant?.slug || record?.slug || "amaro");
+  const date = normalizeDate(menu.date || record?.date) || todayIso();
+  const source = String(record?.response_source || record?.source || defaultSource || "platform");
+  const menuId = String(menu.id || record?.menu_id || `menu_${slug}_${date}`);
+  const items = (Array.isArray(record?.items) ? record.items : []).slice(0, 30).map((item, index) => ({
+    id: String(item.id || `item_${slug}_${date}_${index + 1}_${stableTextHash(item.name)}`),
+    menu_day_id: menuId,
+    name: boundedText(item.name, 140),
+    category: boundedText(item.category || "Executivo", 100),
+    description: boundedText(item.description, 1200),
+    price: boundedText(item.price, 40),
+    image_url: boundedText(item.image_url || item.imageUrl, 1000),
+    is_highlight: toBooleanInteger(item.is_highlight ?? item.isHighlight ?? 1),
+    sort_order: Number(item.sort_order || item.sortOrder || index + 1),
+    created_at: item.created_at || menu.created_at || record?.received_at || new Date().toISOString(),
+  })).filter((item) => item.name);
+  const fingerprint = stableTextHash(`${date}|${items.map((item) => normalizeKey(item.name)).sort().join("|")}`);
+  return {
+    restaurant: { ...fallbackRestaurant(slug), ...(record?.restaurant || {}), slug },
+    menu: {
+      id: menuId,
+      restaurant_id: String(menu.restaurant_id || record?.restaurant?.id || `rest_${slug}`),
+      date,
+      title: boundedText(menu.title || record?.title || "Almoço de Hoje", 180),
+      price: boundedText(menu.price || record?.price, 40),
+      service_hours: boundedText(menu.service_hours || menu.serviceHours || record?.service_hours, 100),
+      story_link: boundedText(menu.story_link || menu.storyLink || record?.story_link, 1000),
+      notes: boundedText(menu.notes || record?.notes, 1200),
+      is_published: toBooleanInteger(menu.is_published ?? menu.isPublished ?? 1),
+      published_at: menu.published_at || menu.publishedAt || record?.received_at || new Date().toISOString(),
+      created_at: menu.created_at || menu.createdAt || record?.received_at || new Date().toISOString(),
+      updated_at: menu.updated_at || menu.updatedAt || record?.received_at || new Date().toISOString(),
+    },
+    items,
+    response_source: source,
+    response_id: String(record?.response_id || `${source}:${date}:${fingerprint}`),
+    received_at: record?.received_at || menu.updated_at || menu.created_at || new Date().toISOString(),
+  };
+}
+
+function sourcePriority(source) {
+  if (source === "platform") return 3;
+  if (source === "d1") return 2;
+  if (source === "google_forms") return 1;
+  return 0;
+}
+
+async function readMenuHistory(env, slug) {
+  if (!env.INSIGHTS_CACHE) return [];
+  try {
+    return await env.INSIGHTS_CACHE.get(menuHistoryKey(slug), "json") || [];
+  } catch (error) {
+    console.warn("QrStack menu history cache read failed", { error: error?.message || String(error) });
+    return [];
+  }
+}
+
+async function mergeMenuHistory(env, slug, incomingRecords) {
+  if (!env.INSIGHTS_CACHE) return [];
+  const current = await readMenuHistory(env, slug);
+  const byId = new Map(current.map((record) => [record.response_id, record]));
+  incomingRecords.forEach((record) => {
+    const normalized = normalizeCachedMenuRecord(record, record.response_source);
+    const previous = byId.get(normalized.response_id);
+    if (!previous || String(normalized.received_at) >= String(previous.received_at)) byId.set(normalized.response_id, normalized);
+  });
+  const merged = [...byId.values()]
+    .sort((a, b) => String(b.received_at || b.menu?.date).localeCompare(String(a.received_at || a.menu?.date)))
+    .slice(0, 500);
+  await env.INSIGHTS_CACHE.put(menuHistoryKey(slug), JSON.stringify(merged));
+  return merged;
+}
+
+async function cacheMenuRecord(env, record) {
+  if (!env.INSIGHTS_CACHE || !record?.menu?.date) return record;
+  const normalized = normalizeCachedMenuRecord(record, record.response_source);
+  const key = menuCacheKey(normalized.restaurant.slug, normalized.menu.date);
+  const existing = await env.INSIGHTS_CACHE.get(key, "json");
+  if (!existing || sourcePriority(normalized.response_source) >= sourcePriority(existing.response_source)) {
+    await env.INSIGHTS_CACHE.put(key, JSON.stringify(normalized));
+  }
+  await mergeMenuHistory(env, normalized.restaurant.slug, [normalized]);
+  return normalized;
+}
+
+async function readCachedMenu(env, slug, date = "") {
+  if (!env.INSIGHTS_CACHE) return null;
+  if (date) return env.INSIGHTS_CACHE.get(menuCacheKey(slug, date), "json");
+  const history = await readMenuHistory(env, slug);
+  return getVisibleResponses(history)[0] || null;
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (quoted) {
+      if (character === '"' && text[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else if (character === '"') quoted = false;
+      else field += character;
+    } else if (character === '"') quoted = true;
+    else if (character === ",") {
+      row.push(field);
+      field = "";
+    } else if (character === "\n") {
+      row.push(field.replace(/\r$/, ""));
+      rows.push(row);
+      row = [];
+      field = "";
+    } else field += character;
+  }
+  if (field || row.length) {
+    row.push(field.replace(/\r$/, ""));
+    rows.push(row);
+  }
+  return rows;
+}
+
+function brazilianDateToIso(value) {
+  const match = String(value || "").match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : normalizeDate(value);
+}
+
+function brazilianTimestampToIso(value) {
+  const match = String(value || "").match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}):(\d{2}))?/);
+  if (!match) return normalizeTimestamp(value) || new Date().toISOString();
+  return `${match[3]}-${match[2]}-${match[1]}T${match[4] || "00"}:${match[5] || "00"}:${match[6] || "00"}-03:00`;
+}
+
+async function fetchGoogleFormRecords(date = "") {
+  const query = date
+    ? `select A,B,C,D,E,F,G,H,I where B = date '${date}' order by A desc`
+    : "select A,B,C,D,E,F,G,H,I order by A desc";
+  const url = new URL(`https://docs.google.com/spreadsheets/d/${AMARO_FORM_SHEET_ID}/gviz/tq`);
+  url.searchParams.set("tqx", "out:csv");
+  url.searchParams.set("sheet", AMARO_FORM_SHEET_NAME);
+  url.searchParams.set("tq", query);
+  const response = await fetch(url.toString(), { headers: { accept: "text/csv" } });
+  if (!response.ok) throw new Error(`google_forms_sync_failed:${response.status}`);
+  const rows = parseCsv(await response.text()).slice(1);
+  return rows.map((row) => {
+    const responseDate = brazilianDateToIso(row[1]);
+    const receivedAt = brazilianTimestampToIso(row[0]);
+    const names = row.slice(2, 9).map((name) => String(name || "").trim()).filter(Boolean);
+    if (!responseDate || !names.length) return null;
+    const fingerprint = stableTextHash(`${responseDate}|${names.map(normalizeKey).sort().join("|")}`);
+    const menuId = `menu_amaro_${responseDate}_forms_${fingerprint}`;
+    return normalizeCachedMenuRecord({
+      restaurant: fallbackRestaurant("amaro"),
+      menu: {
+        id: menuId,
+        restaurant_id: "rest_amaro",
+        date: responseDate,
+        title: "Almoço de Hoje",
+        service_hours: "11h às 15h",
+        is_published: 1,
+        published_at: receivedAt,
+        created_at: receivedAt,
+        updated_at: receivedAt,
+      },
+      items: names.map((name, index) => ({ name, category: "Executivo", is_highlight: 1, sort_order: index + 1 })),
+      response_source: "google_forms",
+      response_id: `google_forms:${responseDate}:${fingerprint}`,
+      received_at: receivedAt,
+    }, "google_forms");
+  }).filter(Boolean);
+}
+
+async function syncGoogleFormDate(env, date) {
+  try {
+    const records = await fetchGoogleFormRecords(date);
+    if (!records.length) return [];
+    const latest = records.sort((a, b) => String(b.received_at).localeCompare(String(a.received_at)))[0];
+    await cacheMenuRecord(env, latest);
+    return records;
+  } catch (error) {
+    console.warn("QrStack Google Forms daily sync failed", { date, error: error?.message || String(error) });
+    return [];
+  }
+}
+
+async function syncGoogleFormHistory(env) {
+  try {
+    const records = await fetchGoogleFormRecords();
+    await mergeMenuHistory(env, "amaro", records);
+    return records;
+  } catch (error) {
+    console.warn("QrStack Google Forms history sync failed", { error: error?.message || String(error) });
+    return [];
+  }
+}
+
+function getVisibleResponses(records) {
+  const datesWithPrimary = new Set(records
+    .filter((record) => sourcePriority(record.response_source) >= sourcePriority("d1"))
+    .map((record) => record.menu?.date));
+  return records
+    .filter((record) => record.response_source !== "google_forms" || !datesWithPrimary.has(record.menu?.date))
+    .sort((a, b) => String(b.received_at || b.menu?.date).localeCompare(String(a.received_at || a.menu?.date)));
+}
+
+async function getVisibleMenuResponses(env, slug) {
+  return getVisibleResponses(await readMenuHistory(env, slug));
+}
+
+async function backfillD1MenuCache(env, slug = "amaro") {
+  const normalizedSlug = normalizeSlug(slug);
+  const restaurant = await requireRestaurant(env.DB, normalizedSlug);
+  const menuRows = await env.DB.prepare(`
+    SELECT * FROM menu_days
+    WHERE restaurant_id = ?
+    ORDER BY date DESC, updated_at DESC
+    LIMIT 180
+  `).bind(restaurant.id).all();
+  const menus = menuRows.results || [];
+  if (!menus.length) return { cached: 0 };
+  const placeholders = menus.map(() => "?").join(",");
+  const itemRows = await env.DB.prepare(`
+    SELECT * FROM menu_items
+    WHERE menu_day_id IN (${placeholders})
+    ORDER BY menu_day_id, sort_order, name
+  `).bind(...menus.map((menu) => menu.id)).all();
+  const items = itemRows.results || [];
+  for (const menu of menus) {
+    await cacheMenuRecord(env, normalizeCachedMenuRecord({
+      restaurant,
+      menu,
+      items: items.filter((item) => item.menu_day_id === menu.id),
+      response_source: "d1",
+      response_id: `d1:${menu.id}`,
+      received_at: menu.updated_at || menu.created_at,
+    }, "d1"));
+  }
+  return { cached: menus.length };
+}
+
+async function getMenu(env, slug, date = "") {
+  const normalizedSlug = normalizeSlug(slug);
+  let cached = await readCachedMenu(env, normalizedSlug, date);
+  if (cached) return cached;
+  if (normalizedSlug === "amaro" && date) {
+    await syncGoogleFormDate(env, date);
+    cached = await readCachedMenu(env, normalizedSlug, date);
+    if (cached) return cached;
+  }
+  try {
+    const result = await getMenuD1(env.DB, normalizedSlug, date);
+    if (result.menu) await cacheMenuRecord(env, normalizeCachedMenuRecord({ ...result, response_source: "d1" }, "d1"));
+    return result;
+  } catch (error) {
+    if (!isD1CapacityError(error)) throw error;
+    return { restaurant: fallbackRestaurant(normalizedSlug), menu: null, items: [], cache_status: "d1_quota_no_cached_menu" };
+  }
+}
+
+async function getMenuD1(db, slug, date = "") {
   const restaurant = await requireRestaurant(db, normalizeSlug(slug));
   const menu = date
     ? await db.prepare("SELECT * FROM menu_days WHERE restaurant_id = ? AND date = ? ORDER BY updated_at DESC LIMIT 1")
@@ -1172,7 +1485,45 @@ async function getMenu(db, slug, date = "") {
   return { restaurant, menu, items: items.results || [] };
 }
 
-async function saveMenuDay(db, payload) {
+async function saveMenuDay(env, payload) {
+  const slug = normalizeSlug(payload.slug || "amaro");
+  if (slug === "amaro") {
+    const expected = env.AMARO_ADMIN_TOKEN || "qrstack-amaro-2026";
+    if (String(payload.token || "") !== expected) throw httpError("unauthorized", 401);
+  }
+  const now = new Date().toISOString();
+  const cachedPayload = normalizeCachedMenuRecord({
+    slug,
+    menu: {
+      id: payload.menu_id || payload.menuId || `menu_${slug}_${normalizeDate(payload.date) || todayIso()}`,
+      date: normalizeDate(payload.date) || todayIso(),
+      title: payload.title,
+      price: payload.price,
+      service_hours: payload.service_hours || payload.serviceHours,
+      story_link: payload.story_link || payload.storyLink,
+      notes: payload.notes,
+      is_published: 1,
+      published_at: now,
+      created_at: now,
+      updated_at: now,
+    },
+    items: payload.items,
+    response_source: "platform",
+    received_at: now,
+  }, "platform");
+  if (slug === "amaro") await cacheMenuRecord(env, cachedPayload);
+  try {
+    const saved = await saveMenuDayD1(env.DB, payload);
+    const cached = normalizeCachedMenuRecord({ ...saved, response_source: "platform", received_at: now }, "platform");
+    await cacheMenuRecord(env, cached);
+    return { ...saved, storage: "d1" };
+  } catch (error) {
+    if (slug !== "amaro" || !isD1CapacityError(error)) throw error;
+    return { ...cachedPayload, duplicate: false, storage: "kv_pending_d1", fallback_reason: "d1_read_quota" };
+  }
+}
+
+async function saveMenuDayD1(db, payload) {
   const slug = normalizeSlug(payload.slug || "amaro");
   const restaurant = await requireRestaurant(db, slug);
   assertRestaurantToken(restaurant, payload.token);
@@ -1204,7 +1555,7 @@ async function saveMenuDay(db, payload) {
       .bind(menuId).all();
     const existingItems = existingItemsResult.results || [];
     if (menuContentFingerprint(existingMenu, existingItems) === menuContentFingerprint(incomingMenu, incomingItems)) {
-      return { ...(await getMenu(db, slug, date)), duplicate: true };
+      return { ...(await getMenuD1(db, slug, date)), duplicate: true };
     }
   }
 
@@ -1257,7 +1608,7 @@ async function saveMenuDay(db, payload) {
     )),
   ];
   await db.batch(statements);
-  return { ...(await getMenu(db, slug, date)), duplicate: false };
+  return { ...(await getMenuD1(db, slug, date)), duplicate: false };
 }
 
 function menuContentFingerprint(menu, items) {
