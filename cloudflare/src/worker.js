@@ -24,6 +24,7 @@ const BUSINESS_TIME_ZONE = "America/Recife";
 const INSIGHTS_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 1000;
 const STORY_MEDIA_TTL_SECONDS = 48 * 60 * 60;
 const STORY_MEDIA_MAX_BYTES = 6 * 1024 * 1024;
+const STORY_AUTOMATION_ENABLED = false;
 const STORY_ACTIVE_STATUSES = ["claimed", "preparing", "publishing", "paused_interruption"];
 const STORY_AGENT_MIN_VERSION = "0.1.23";
 const STORY_AGENT_RELEASE_VERSION = "0.1.23";
@@ -55,7 +56,7 @@ export default {
           service: "qrstack-d1",
           version: "archive-live-v9-unified-menu-cache",
           fallback_storage: "google_sheets",
-          story_automation: true,
+          story_automation: STORY_AUTOMATION_ENABLED,
         });
       }
 
@@ -209,10 +210,12 @@ export default {
 
       if (action === "createStoryJob") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+        if (!STORY_AUTOMATION_ENABLED) return json({ ok: false, error: "story_automation_paused" }, 503);
         return json({ ok: true, ...(await createStoryJob(env, payload, request)) }, 201);
       }
 
       if (action === "getNextStoryJob") {
+        if (!STORY_AUTOMATION_ENABLED) return jsonp(url, { ok: true, job: null, automation_paused: true, poll_after_seconds: 60 });
         const result = await claimNextStoryJob(env.DB, request, url);
         return jsonp(url, { ok: true, ...result }, 200, JSON_HEADERS);
       }

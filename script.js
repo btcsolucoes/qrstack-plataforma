@@ -9,6 +9,7 @@ const QRSTACK_API_URL = QRSTACK_D1_API_URL;
 const ACTIVE_CLIENT_SLUG = "amaro";
 const ACTIVE_CLIENT_TOKEN = "qrstack-amaro-2026";
 const OWNER_ACCESS_TOKEN = "qrstack-berna-2026";
+const STORY_AUTOMATION_ENABLED = false;
 const OWNER_SESSION_KEY = "qrstack:owner-access";
 const CLIENT_SESSION_PREFIX = "qrstack:client-access:";
 const AMARO_ASSETS_BASE_URL = "https://btcsolucoes.github.io/carda-pio/";
@@ -105,7 +106,14 @@ function item(menuDayId, name, category, isHighlight, sortOrder, description = "
 }
 
 function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Recife",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 function loadState() {
@@ -1065,7 +1073,7 @@ function renderHq(tab = "overview") {
         [ownerLink("respostas"), "Respostas", tab === "respostas"],
         [ownerLink("banco"), "Banco", tab === "banco"],
         [ownerLink("cardapios"), "Cardápios", tab === "cardapios"],
-        [ownerLink("stories"), "Stories", tab === "stories"],
+        ...(STORY_AUTOMATION_ENABLED ? [[ownerLink("stories"), "Stories", tab === "stories"]] : []),
         [ownerLink("insights"), "Insights", tab === "insights"],
       ])}
       <main class="page">
@@ -1073,7 +1081,7 @@ function renderHq(tab = "overview") {
         ${tab === "respostas" ? renderHqResponses() : ""}
         ${tab === "banco" ? renderHqCatalogBank() : ""}
         ${tab === "cardapios" ? renderHqPublicMenus() : ""}
-        ${tab === "stories" ? renderHqStories() : ""}
+        ${tab === "stories" && STORY_AUTOMATION_ENABLED ? renderHqStories() : ""}
         ${tab === "insights" ? renderHqInsights() : ""}
         ${tab === "overview" ? renderHqOverview() : ""}
       </main>
@@ -1511,7 +1519,7 @@ function renderHqInsights() {
           <p class="muted">Escolha um período para comparar acessos, origem e ações registradas.</p>
         </div>
         <div class="insights-filter__presets">
-          <button type="button" class="secondary" data-insights-preset="today" aria-pressed="false">Hoje</button>
+          <button type="button" class="secondary is-active" data-insights-preset="today" aria-pressed="true">Hoje</button>
           <button type="button" class="secondary" data-insights-preset="7" aria-pressed="false">7 dias</button>
           <button type="button" class="secondary" data-insights-preset="30" aria-pressed="false">30 dias</button>
           <button type="button" class="secondary" data-insights-preset="all" aria-pressed="false">Todos</button>
@@ -1519,11 +1527,11 @@ function renderHqInsights() {
         <div class="insights-filter__dates">
           <label>
             Início
-            <input type="date" name="startDate" />
+            <input type="date" name="startDate" value="${todayIso()}" />
           </label>
           <label>
             Fim
-            <input type="date" name="endDate" />
+            <input type="date" name="endDate" value="${todayIso()}" />
           </label>
           <button type="submit">Aplicar</button>
         </div>
@@ -1589,7 +1597,7 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
         <div>
           <p class="eyebrow">QrStack</p>
           <h1>${restaurant.name}</h1>
-          <p>Atualize o cardápio do dia e gere o Story.</p>
+          <p>Atualize e publique o cardápio do dia.</p>
         </div>
       </header>
       ${renderClientTopbar(restaurant)}
@@ -1611,7 +1619,7 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
               <textarea id="notes" name="notes" placeholder="Observações do dia"></textarea>
             </div>
             <div class="actions field--full">
-              <button type="submit">Enviar e publicar Story</button>
+              <button type="submit">Enviar e publicar cardápio</button>
             </div>
           </form>
         </section>
@@ -1625,7 +1633,7 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
           ${renderCatalogManager(restaurant)}
         </section>
 
-        <section class="section client-step" id="story-panel">
+        ${STORY_AUTOMATION_ENABLED ? `<section class="section client-step" id="story-panel">
           <div class="section__head">
             <p class="eyebrow">Story</p>
             <h2>Arte pronta</h2>
@@ -1651,12 +1659,12 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
               <canvas id="story-canvas" width="1080" height="1920"></canvas>
             </div>
           </div>
-        </section>
+        </section>` : ""}
       </main>
     </div>
   `;
   attachClientHandlers(restaurant, menu);
-  drawStory(restaurant, menu, getMenuItems(menu.id));
+  if (STORY_AUTOMATION_ENABLED) drawStory(restaurant, menu, getMenuItems(menu.id));
 }
 
 function renderClientTopbar(restaurant) {
@@ -1672,7 +1680,7 @@ function renderClientTopbar(restaurant) {
         </a>
         <button type="button" class="nav-link active" data-scroll-target="formulario">Formulário</button>
         <button type="button" class="nav-link" data-scroll-target="catalog-manager">Pratos</button>
-        <button type="button" class="nav-link" data-scroll-target="story-panel">Story</button>
+        ${STORY_AUTOMATION_ENABLED ? '<button type="button" class="nav-link" data-scroll-target="story-panel">Story</button>' : ""}
         <a class="nav-link" href="${publicMenuHash(restaurant, "cliente")}">Cardápio público</a>
         ${ownerReturn}
       </div>
@@ -1841,7 +1849,7 @@ function attachClientHandlers(restaurant, menu) {
       delete event.currentTarget.dataset.submitting;
       if (submitButton) {
         submitButton.disabled = false;
-        submitButton.textContent = "Enviar e publicar Story";
+        submitButton.textContent = STORY_AUTOMATION_ENABLED ? "Enviar e publicar Story" : "Enviar e publicar cardápio";
       }
       toast("Cada prato pode ser escolhido apenas uma vez.");
       return;
@@ -1860,7 +1868,12 @@ function attachClientHandlers(restaurant, menu) {
         }
         rememberMenuSubmission(submission.storageKey, submission.signature, "saved");
       } else {
-        toast("Esta resposta já foi salva. A fila não criará uma publicação duplicada.");
+        toast("Esta resposta já foi salva e não será duplicada.");
+      }
+
+      if (!STORY_AUTOMATION_ENABLED) {
+        toast("Cardápio publicado com sucesso.");
+        return;
       }
 
       const updatedMenu = getLatestMenu(restaurant.id);
@@ -1887,24 +1900,24 @@ function attachClientHandlers(restaurant, menu) {
       delete event.currentTarget.dataset.submitting;
       if (!submitButton || !document.body.contains(submitButton)) return;
       submitButton.disabled = false;
-      submitButton.textContent = "Enviar e publicar Story";
+      submitButton.textContent = STORY_AUTOMATION_ENABLED ? "Enviar e publicar Story" : "Enviar e publicar cardápio";
     }
   });
 
-  document.querySelector('[name="storyLink"]').addEventListener("input", (event) => {
+  document.querySelector('[name="storyLink"]')?.addEventListener("input", (event) => {
     const latestMenu = getLatestMenu(restaurant.id);
     latestMenu.storyLink = event.currentTarget.value.trim();
     saveState();
     drawStory(restaurant, latestMenu, getMenuItems(latestMenu.id));
   });
 
-  document.getElementById("download-story").addEventListener("click", () => {
+  document.getElementById("download-story")?.addEventListener("click", () => {
     downloadStory(restaurant);
     const latestMenu = getLatestMenu(restaurant.id);
     trackEvent(restaurant, "story_downloaded", "admin", latestMenu.id);
   });
 
-  document.getElementById("share-story").addEventListener("click", async () => {
+  document.getElementById("share-story")?.addEventListener("click", async () => {
     const latestMenu = getLatestMenu(restaurant.id);
     await shareStory(restaurant, latestMenu);
     trackEvent(restaurant, "story_shared", "admin", latestMenu.id);
