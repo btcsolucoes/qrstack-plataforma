@@ -954,8 +954,9 @@ function normalizeKey(value) {
 
 function trackEvent(restaurant, eventType, source = "", menuDayId = null) {
   const traffic = buildTrafficPayload(source);
+  const eventId = crypto.randomUUID();
   state.events.push({
-    id: crypto.randomUUID(),
+    id: eventId,
     restaurantId: restaurant.id,
     menuDayId,
     eventType,
@@ -969,6 +970,7 @@ function trackEvent(restaurant, eventType, source = "", menuDayId = null) {
   saveState();
   sendAnalyticsEvent(restaurant.analyticsEndpoint || restaurant.liveMenuEndpoint || QRSTACK_API_URL, {
     action: "trackEvent",
+    id: eventId,
     slug: restaurant.slug,
     menu_day_id: menuDayId || "",
     event_type: eventType,
@@ -2467,6 +2469,19 @@ async function hydrateInsights(restaurant, options = {}) {
     const recentEvents = insights.recent_events || [];
     const testEvents = Number(insights.test_events || 0);
     const collectedAt = insights.collected_at ? formatDateTime(insights.collected_at) : "Agora";
+    const storageHealth = data.analytics_storage || {};
+    const fallbackActive = storageHealth.ingestion_status === "fallback_active";
+    const cachedDashboard = storageHealth.dashboard_status === "cached_snapshot";
+    const collectionLabel = fallbackActive
+      ? "Coleta preservada no fallback"
+      : cachedDashboard
+        ? "Coleta ativa · leitura salva"
+        : "Coleta ativa no D1";
+    const collectionDetail = fallbackActive
+      ? "Novos eventos estão seguros na planilha e na fila de retorno ao D1."
+      : cachedDashboard
+        ? "A cota de leitura está protegida; os eventos continuam sendo recebidos."
+        : "D1 e consolidação diária operando normalmente.";
     const topSource = sortedCountEntries(sourceCounts)[0];
     const topDish = sortedCountEntries(dishAttentionScores)[0];
     const topObservedDish = sortedCountEntries(dishObserveSeconds)[0];
@@ -2480,7 +2495,8 @@ async function hydrateInsights(restaurant, options = {}) {
           <p class="muted">Dados carregados da base analítica QrStack. A leitura abaixo separa origem, volume, visitantes únicos, dispositivos e ações de intenção.</p>
         </div>
         <div class="dashboard-hero__status">
-          <span class="status-pill">Coleta ativa</span>
+          <span class="status-pill">${collectionLabel}</span>
+          <small>${collectionDetail}</small>
           <small>Atualizado: ${collectedAt}</small>
           ${testEvents ? `<small>${formatNumber(testEvents)} evento(s) de teste filtrado(s)</small>` : ""}
         </div>
