@@ -767,7 +767,9 @@ async function writeAnalyticsRollupDate(db, aggregate, options = {}) {
   await executeSqlValueChunks(db,
     "INSERT INTO analytics_session_facts (restaurant_slug, metric_date, session_id, first_seen_at) VALUES ",
     sessionRows,
-    " ON CONFLICT(restaurant_slug, metric_date, session_id) DO UPDATE SET first_seen_at=MIN(first_seen_at, excluded.first_seen_at)",
+    replace
+      ? " ON CONFLICT(restaurant_slug, metric_date, session_id) DO UPDATE SET first_seen_at=MIN(first_seen_at, excluded.first_seen_at)"
+      : " ON CONFLICT(restaurant_slug, metric_date, session_id) DO NOTHING",
   );
 
   const pageviewRows = aggregate.pageviews.map((event) => `(${[
@@ -779,16 +781,18 @@ async function writeAnalyticsRollupDate(db, aggregate, options = {}) {
   await executeSqlValueChunks(db,
     "INSERT INTO analytics_pageview_facts (restaurant_slug, event_id, metric_date, created_at, session_id, visitor_id, source, source_detail, device_type, browser, os, banner_shown, banner_platform) VALUES ",
     pageviewRows,
-    " ON CONFLICT(restaurant_slug, event_id) DO UPDATE SET metric_date=excluded.metric_date, created_at=excluded.created_at, session_id=excluded.session_id, visitor_id=excluded.visitor_id, source=excluded.source, source_detail=excluded.source_detail, device_type=excluded.device_type, browser=excluded.browser, os=excluded.os, banner_shown=excluded.banner_shown, banner_platform=excluded.banner_platform",
+    replace
+      ? " ON CONFLICT(restaurant_slug, event_id) DO UPDATE SET metric_date=excluded.metric_date, created_at=excluded.created_at, session_id=excluded.session_id, visitor_id=excluded.visitor_id, source=excluded.source, source_detail=excluded.source_detail, device_type=excluded.device_type, browser=excluded.browser, os=excluded.os, banner_shown=excluded.banner_shown, banner_platform=excluded.banner_platform"
+      : " ON CONFLICT(restaurant_slug, event_id) DO NOTHING",
   );
 
   const dateConflict = replace
-    ? "status='ready', source_event_count=excluded.source_event_count, completed_at=excluded.completed_at"
-    : "status='ready', source_event_count=source_event_count+excluded.source_event_count, completed_at=excluded.completed_at";
+    ? "DO UPDATE SET status='ready', source_event_count=excluded.source_event_count, completed_at=excluded.completed_at"
+    : "DO NOTHING";
   await db.prepare(`
     INSERT INTO analytics_rollup_dates (restaurant_slug, metric_date, status, source_event_count, completed_at)
     VALUES (?, ?, 'ready', ?, ?)
-    ON CONFLICT(restaurant_slug, metric_date) DO UPDATE SET ${dateConflict}
+    ON CONFLICT(restaurant_slug, metric_date) ${dateConflict}
   `).bind(aggregate.slug, aggregate.metricDate, aggregate.sourceEventCount, now).run();
 }
 
