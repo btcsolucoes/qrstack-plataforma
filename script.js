@@ -77,7 +77,7 @@ const DEFAULT_STATE = {
 };
 
 const STORE_KEY = "qrstack-platform-v4-amaro";
-const INSIGHTS_CACHE_KEY = "qrstack-insights-html-cache-v3";
+const INSIGHTS_CACHE_KEY = "qrstack-insights-html-cache-v4";
 const MENU_SUBMISSION_PREFIX = "qrstack:menu-submission:";
 const insightsOpenedThisSession = new Set();
 const app = document.getElementById("app");
@@ -1517,19 +1517,19 @@ function renderHqInsights() {
           <p class="muted">Escolha um período para comparar acessos, origem e ações registradas.</p>
         </div>
         <div class="insights-filter__presets">
-          <button type="button" class="secondary is-active" data-insights-preset="today" aria-pressed="true">Hoje</button>
+          <button type="button" class="secondary" data-insights-preset="today" aria-pressed="false">Hoje</button>
           <button type="button" class="secondary" data-insights-preset="7" aria-pressed="false">7 dias</button>
           <button type="button" class="secondary" data-insights-preset="30" aria-pressed="false">30 dias</button>
-          <button type="button" class="secondary" data-insights-preset="all" aria-pressed="false">Todos</button>
+          <button type="button" class="secondary is-active" data-insights-preset="all" aria-pressed="true">Todos</button>
         </div>
         <div class="insights-filter__dates">
           <label>
             Início
-            <input type="date" name="startDate" value="${todayIso()}" />
+            <input type="date" name="startDate" value="" />
           </label>
           <label>
             Fim
-            <input type="date" name="endDate" value="${todayIso()}" />
+            <input type="date" name="endDate" value="" />
           </label>
           <button type="submit">Aplicar</button>
         </div>
@@ -2423,6 +2423,18 @@ async function hydrateInsights(restaurant, options = {}) {
     const accesses7Days = insights.accesses_7_days || 0;
     const uniqueSessions = insights.unique_sessions_period ?? insights.unique_sessions ?? 0;
     const uniqueSessionsTotal = insights.unique_sessions_total ?? 0;
+    const uniqueVisitors = insights.unique_visitors_period ?? uniqueSessions;
+    const uniqueVisitorsTotal = insights.unique_visitors_total ?? uniqueSessionsTotal;
+    const returningVisitors = Number(insights.returning_visitors_period || 0);
+    const returningVisitorsTotal = Number(insights.returning_visitors_total || 0);
+    const returningSessions = Number(insights.returning_sessions_period || 0);
+    const returningSessionsTotal = Number(insights.returning_sessions_total || 0);
+    const trackedDays = Number(insights.tracked_days || 0);
+    const returnRate = uniqueVisitors ? (returningVisitors / uniqueVisitors) * 100 : 0;
+    const visitorMix = {
+      "Uma única sessão": Math.max(0, Number(uniqueVisitors) - returningVisitors),
+      "Visitantes recorrentes": returningVisitors,
+    };
     const whatsappClicks = eventTypeCounts.whatsapp_click || eventTypeCounts.whatsapp || 0;
     const mapsClicks = eventTypeCounts.maps_click || eventTypeCounts.maps || 0;
     const conversionBase = Number(periodAccesses) || 0;
@@ -2432,6 +2444,10 @@ async function hydrateInsights(restaurant, options = {}) {
     const dailyAccesses = insights.daily_accesses || {};
     const hourCounts = insights.hour_counts || {};
     const deviceCounts = normalizeCountKeys(insights.device_counts || {}, (value) => String(value || "desconhecido").toLowerCase());
+    const browserCounts = insights.browser_counts || {};
+    const osCounts = insights.os_counts || {};
+    const sourceDetailCounts = insights.source_detail_counts || {};
+    const webviewPlatformCounts = insights.webview_banner_platform_counts || {};
     const dishViewCounts = insights.dish_view_counts || {};
     const dishTouchCounts = insights.dish_touch_counts || {};
     const dishObserveSeconds = insights.dish_observe_seconds || {};
@@ -2469,19 +2485,36 @@ async function hydrateInsights(restaurant, options = {}) {
           ${testEvents ? `<small>${formatNumber(testEvents)} evento(s) de teste filtrado(s)</small>` : ""}
         </div>
       </article>
+      <section class="history-overview" aria-label="Histórico completo">
+        <div class="history-overview__heading">
+          <div>
+            <p class="eyebrow">Histórico completo</p>
+            <h3>Todos os dados preservados desde o início da coleta</h3>
+          </div>
+          <span>${formatNumber(trackedDays)} dia(s) consolidados</span>
+        </div>
+        <div class="history-metrics">
+          ${insightKpi("Todos os acessos", totalAccesses ?? periodAccesses, "aberturas do cardápio")}
+          ${insightKpi("Pessoas únicas", uniqueVisitorsTotal, "IDs de visitante ou sessão")}
+          ${insightKpi("Pessoas que voltaram", returningVisitorsTotal, "em duas ou mais sessões")}
+          ${insightKpi("Sessões de retorno", returningSessionsTotal, "sessões além da primeira")}
+          ${insightKpi("Todas as sessões", uniqueSessionsTotal, "sessões identificadas")}
+          ${insightKpi("Todas as interações", totalEvents, "eventos preservados")}
+        </div>
+      </section>
       <section class="control-room">
         <article class="card command-panel">
           <div class="command-panel__copy">
             <p class="eyebrow">Leitura executiva</p>
-            <h3>${formatNumber(periodAccesses)} acessos reais</h3>
-            <p class="muted">Acessos são aberturas do cardápio. As ${formatNumber(periodEvents)} interações abaixo mostram o que aconteceu depois que a pessoa entrou.</p>
+            <h3>${formatNumber(periodAccesses)} acessos no recorte</h3>
+            <p class="muted">O filtro atual contém ${formatNumber(uniqueVisitors)} pessoa(s), ${formatNumber(uniqueSessions)} sessão(ões) e ${formatNumber(periodEvents)} interações.</p>
           </div>
           <div class="command-metrics">
-            ${insightKpi("Visitantes únicos", uniqueSessions, uniqueSessionsTotal ? `${formatNumber(uniqueSessionsTotal)} no histórico` : "por sessão")}
+            ${insightKpi("Pessoas únicas", uniqueVisitors, "visitantes no período")}
+            ${insightKpi("Sessões", uniqueSessions, "sessões no período")}
+            ${insightKpi("Pessoas recorrentes", returningVisitors, `${formatPercentNumber(returnRate)} voltaram no período`)}
             ${insightKpi("Hoje", accessesToday, "acessos no dia")}
             ${insightKpi("7 dias", accesses7Days, "janela recente")}
-            ${insightKpi("Webview IG", webviewBannerShown, "avisos/redirects")}
-            ${insightKpi("Pessoas que retornaram", instagramToDirectVisitors, `${formatPercentNumber(instagramToDirectRate)} dos visitantes do Instagram`)}
             ${insightKpi("Pico", peak || "Sem dados", "maior horário")}
           </div>
         </article>
@@ -2492,7 +2525,8 @@ async function hydrateInsights(restaurant, options = {}) {
             ["Prato líder", topDish ? topDish[0] : "Sem ranking", topDish ? `${formatScore(topDish[1])} pontos` : "sem dados"],
             ["Mais observado", topObservedDish ? topObservedDish[0] : "Sem tempo", topObservedDish ? formatDurationShort(topObservedDish[1]) : "sem dados"],
             ["Categoria quente", topCategory ? topCategory[0] : "Sem categoria", topCategory ? `${formatNumber(topCategory[1])} visualizações` : "sem dados"],
-            ["Conversão Instagram -> Direto", `${formatNumber(instagramToDirectVisitors)} pessoa(s) retornaram`, `${formatNumber(instagramToDirectSessions)} acesso(s) direto(s) feito(s) por elas`],
+            ["Recorrência geral", `${formatNumber(returningVisitors)} pessoa(s) voltaram`, `${formatNumber(returningSessions)} sessão(ões) de retorno no recorte`],
+            ["Instagram -> Direto", `${formatNumber(instagramToDirectVisitors)} pessoa(s) voltaram`, `${formatNumber(instagramToDirectSessions)} sessão(ões) diretas após Instagram`],
           ])}
           <p class="muted decision-panel__note">${insightSummary(periodAccesses, sourceCounts, whatsappClicks, mapsClicks)}</p>
         </article>
@@ -2506,9 +2540,23 @@ async function hydrateInsights(restaurant, options = {}) {
           <span>${topDevice ? `${formatDeviceLabel(topDevice[0])} domina o acesso` : "Sem dispositivo dominante"}</span>
         </div>
         ${renderChannelCards(sourceCounts, periodAccesses)}
-        <div class="dashboard-grid dashboard-grid--split">
+        <div class="dashboard-grid dashboard-grid--three">
           ${renderDonutChart("Composição dos acessos", sourceCounts, { empty: "Sem origem registrada neste período.", labeler: formatSourceLabel })}
+          ${renderDonutChart("Novos e recorrentes", visitorMix, { empty: "Sem visitantes identificados neste período." })}
           ${renderInstagramDirectConversion(instagramToDirect)}
+        </div>
+        <div class="dashboard-grid dashboard-grid--two">
+          ${renderInsightBars("Detalhamento das origens", sourceDetailCounts, { empty: "Sem detalhamento de origem neste período.", labeler: formatSourceDetailLabel, limit: 8 })}
+          <article class="card insight-chart traffic-audit">
+            <p class="eyebrow">Leitura correta</p>
+            <h3>Acessos, pessoas e sessões não são a mesma coisa</h3>
+            <div class="traffic-audit__rows">
+              <p><strong>${formatNumber(periodAccesses)}</strong><span>aberturas do cardápio</span></p>
+              <p><strong>${formatNumber(uniqueVisitors)}</strong><span>pessoas identificadas</span></p>
+              <p><strong>${formatNumber(uniqueSessions)}</strong><span>sessões iniciadas</span></p>
+              <p><strong>${formatNumber(returningVisitors)}</strong><span>pessoas que abriram em mais de uma sessão</span></p>
+            </div>
+          </article>
         </div>
       </section>
       <section class="insight-section insight-section--menu">
@@ -2545,6 +2593,20 @@ async function hydrateInsights(restaurant, options = {}) {
           ${renderAreaChart("Evolução diária", dailyAccesses, { empty: "Sem série diária neste período.", labeler: formatDateShort })}
           ${renderColumnChart("Horários de acesso", hourCounts, { empty: "Sem horário suficiente neste período.", labeler: formatHourLabel })}
           ${renderDonutChart("Dispositivos", deviceCounts, { empty: "Sem dispositivo registrado neste período.", labeler: formatDeviceLabel })}
+        </div>
+      </section>
+      <section class="insight-section insight-section--technology">
+        <div class="section-title-row">
+          <div>
+            <p class="eyebrow">Tecnologia</p>
+            <h3>Navegadores, sistemas e webviews</h3>
+          </div>
+          <span>${formatNumber(webviewBannerShown)} aviso(s) de navegador interno do Instagram</span>
+        </div>
+        <div class="dashboard-grid dashboard-grid--three">
+          ${renderDonutChart("Navegadores", browserCounts, { empty: "Sem navegador identificado neste período." })}
+          ${renderDonutChart("Sistemas operacionais", osCounts, { empty: "Sem sistema identificado neste período." })}
+          ${renderInsightBars("Webview do Instagram", webviewPlatformCounts, { empty: "Nenhum aviso de webview neste período.", labeler: formatDeviceLabel, limit: 4 })}
         </div>
       </section>
       <section class="insight-section insight-section--categories">
@@ -3579,6 +3641,21 @@ function formatSourceLabel(source = "") {
   };
   const key = String(source || "direct").toLowerCase();
   return labels[key] || String(source || "Direto");
+}
+
+function formatSourceDetailLabel(detail = "") {
+  const key = String(detail || "sem_detalhe").trim().toLowerCase();
+  const labels = {
+    sem_detalhe: "Sem detalhe técnico",
+    sem_referrer: "Sem referência enviada",
+    ig: "Instagram identificado",
+    instagram: "Instagram identificado",
+    qr: "QR Code identificado",
+    qrcode: "QR Code identificado",
+    whatsapp: "WhatsApp identificado",
+    google: "Pesquisa Google",
+  };
+  return labels[key] || String(detail || "Sem detalhe técnico");
 }
 
 function formatDeviceLabel(device = "") {
