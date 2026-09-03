@@ -15,7 +15,7 @@ const CORS_HEADERS = {
 };
 
 const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec";
-const ANALYTICS_CACHE_VERSION = "v7-complete-insights";
+const ANALYTICS_CACHE_VERSION = "v8-conversion-coverage";
 const MENU_CACHE_VERSION = "v1-unified-responses";
 const AMARO_FORM_SHEET_ID = "1wj-cHrLg-MHAzwD2CdWR-ZocaVMLQApdNif1hTIXpJI";
 const AMARO_FORM_SHEET_NAME = "Respostas ao formulário 1";
@@ -59,7 +59,7 @@ export default {
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v11-complete-insights",
+          version: "archive-live-v12-conversion-coverage",
           fallback_storage: "google_sheets",
           story_automation: STORY_AUTOMATION_ENABLED,
           analytics_read_model: "daily_rollups",
@@ -1162,37 +1162,55 @@ async function getRollupVisitorStats(db, slug, periodStart, periodEnd, today) {
 async function getRollupInstagramToDirect(db, slug, startDate, endDate) {
   const row = await db.prepare(`
     WITH pageviews AS (
-      SELECT visitor_id, session_id, source, created_at
+      SELECT visitor_id, session_id, source, created_at, banner_shown
       FROM analytics_pageview_facts
       WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
         AND COALESCE(visitor_id, '') <> ''
     ),
     instagram_visitors AS (
-      SELECT visitor_id, MIN(created_at) AS first_instagram_at
+      SELECT
+        visitor_id,
+        MIN(created_at) AS first_instagram_at,
+        MIN(CASE WHEN COALESCE(banner_shown, 0) = 0 THEN created_at END) AS first_browser_instagram_at
       FROM pageviews
       WHERE source = 'instagram'
       GROUP BY visitor_id
     ),
+    trackable_instagram_visitors AS (
+      SELECT visitor_id, first_browser_instagram_at
+      FROM instagram_visitors
+      WHERE first_browser_instagram_at IS NOT NULL
+    ),
     direct_after_instagram AS (
       SELECT p.visitor_id, COUNT(DISTINCT p.session_id) AS direct_sessions_after_instagram
       FROM pageviews p
-      JOIN instagram_visitors i ON i.visitor_id = p.visitor_id
-      WHERE p.source = 'direct' AND p.created_at > i.first_instagram_at
+      JOIN trackable_instagram_visitors i ON i.visitor_id = p.visitor_id
+      WHERE p.source = 'direct' AND p.created_at > i.first_browser_instagram_at
       GROUP BY p.visitor_id
     )
     SELECT
       (SELECT COUNT(*) FROM instagram_visitors) AS instagram_visitors,
+      (SELECT COUNT(*) FROM trackable_instagram_visitors) AS trackable_instagram_visitors,
       (SELECT COUNT(*) FROM direct_after_instagram) AS instagram_to_direct_visitors,
       (SELECT COALESCE(SUM(direct_sessions_after_instagram), 0) FROM direct_after_instagram) AS direct_sessions_after_instagram
   `).bind(slug, startDate, endDate).first();
-  const instagramVisitors = Number(row?.instagram_visitors || 0);
+  const instagramClickIdentities = Number(row?.instagram_visitors || 0);
+  const instagramVisitors = Number(row?.trackable_instagram_visitors || 0);
   const convertedVisitors = Number(row?.instagram_to_direct_visitors || 0);
   return {
     instagram_visitors: instagramVisitors,
+    instagram_click_identities: instagramClickIdentities,
+    webview_only_visitors: Math.max(0, instagramClickIdentities - instagramVisitors),
+    tracking_coverage_rate: instagramClickIdentities
+      ? Number(((instagramVisitors / instagramClickIdentities) * 100).toFixed(2))
+      : 0,
     instagram_to_direct_visitors: convertedVisitors,
     direct_sessions_after_instagram: Number(row?.direct_sessions_after_instagram || 0),
     instagram_to_direct_rate: instagramVisitors
       ? Number(((convertedVisitors / instagramVisitors) * 100).toFixed(2))
+      : 0,
+    instagram_to_direct_lower_bound_rate: instagramClickIdentities
+      ? Number(((convertedVisitors / instagramClickIdentities) * 100).toFixed(2))
       : 0,
   };
 }
