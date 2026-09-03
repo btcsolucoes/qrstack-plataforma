@@ -104,7 +104,8 @@ Invoke-RestMethod "https://qrstack-api.seu-subdominio.workers.dev?action=getInsi
 O D1 e o armazenamento primario dos eventos. Se uma gravacao falhar por banco cheio ou limite diario, o Worker abre um circuito ate a proxima virada da cota e encaminha os eventos diretamente para o Apps Script configurado em `SHEETS_FALLBACK_URL`.
 
 - O cardapio considera o envio concluido somente depois da confirmacao do D1 ou do Google Sheets.
-- O mesmo evento tambem entra na fila `qrstack-analytics-retry`, que tenta replica-lo no D1 depois da virada da cota.
+- Eventos essenciais de acesso (`page_view` e a ponte do Instagram) tambem entram na fila `qrstack-analytics-retry`, que tenta replica-los no D1 depois da virada da cota. Isso recompõe acessos e conversões sem despejar milhares de interações no banco de uma vez.
+- As demais interacoes permanecem integralmente no Google Sheets durante a contingencia e nao disputam a cota reservada aos acessos.
 - O `id` original do navegador e preservado no replay e anexado a `source_detail` como `qrstack_event_id=<id>`; o D1 usa `INSERT OR IGNORE` para impedir dupla contagem.
 - Se a fila gratuita estiver indisponivel ou exceder seu limite, a copia confirmada no Google Sheets continua preservada para reconciliacao.
 - Erros de validacao e falhas comuns nao acionam o fallback; nesses casos, a fila local do cardapio continua tentando.

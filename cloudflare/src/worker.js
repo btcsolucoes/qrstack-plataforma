@@ -366,6 +366,7 @@ async function getAnalyticsStorageHealth(env) {
     primary: "cloudflare_d1",
     fallback: "google_sheets",
     replay: env.ANALYTICS_RETRY_QUEUE ? "cloudflare_queue" : "manual",
+    automatic_replay_events: ["page_view", "instagram_webview_prompt"],
     ingestion_status: writeBlock ? "fallback_active" : "d1_active",
     dashboard_status: readBlock ? "cached_snapshot" : "d1_rollups",
     read_block: readBlock,
@@ -398,6 +399,8 @@ async function markD1WriteBlocked(env, error) {
 
 async function enqueueFallbackReplay(env, eventPayload) {
   if (!env.ANALYTICS_RETRY_QUEUE) return false;
+  const eventType = normalizeEventType(eventPayload.event_type || eventPayload.tipo || "page_view");
+  if (!["page_view", "instagram_webview_prompt"].includes(eventType)) return false;
   try {
     await env.ANALYTICS_RETRY_QUEUE.send(
       { event: eventPayload, queued_at: new Date().toISOString() },
