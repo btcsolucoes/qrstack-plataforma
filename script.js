@@ -996,13 +996,13 @@ function renderHome() {
           <a class="entry-card entry-card--owner" href="${ownerHasSession ? ownerLink("overview") : "#/hq"}">
             <span class="entry-card__index">01</span>
             <h2>Central QrStack</h2>
-            <p>Clientes, respostas, banco de pratos, Stories e Insights.</p>
+            <p>Clientes, respostas, banco de pratos e Insights.</p>
             <strong>${ownerHasSession ? "Continuar na Central" : "Acesso interno"}</strong>
           </a>
           <a class="entry-card entry-card--restaurant" href="${clientHasSession ? clientPortalLink(restaurant) : `#/cliente/${restaurant.slug}`}">
             <span class="entry-card__index">02</span>
             <h2>Portal do restaurante</h2>
-            <p>Formulário diário e geração da arte para o Story.</p>
+            <p>Formulário diário e publicação do cardápio.</p>
             <strong>${clientHasSession ? `Continuar como ${restaurant.name}` : "Acesso privado"}</strong>
           </a>
           <a class="entry-card entry-card--menu" href="${publicMenuHash(restaurant, "platform")}">
@@ -1066,7 +1066,7 @@ function renderHq(tab = "overview") {
   const restaurants = state.restaurants;
   app.innerHTML = `
     <div class="admin-layout">
-      ${renderAdminHero("Central QrStack", "Sua visão interna dos clientes, formulários, respostas, Stories e insights.", ASSETS.qrstackMark)}
+      ${renderAdminHero("Central QrStack", "Sua visão interna dos clientes, formulários, respostas e insights.", ASSETS.qrstackMark)}
       ${renderTopbar([
         [ownerLink("overview"), "Visão Geral", tab === "overview"],
         [ownerLink("clientes"), "Clientes", tab === "clientes"],
@@ -1134,7 +1134,6 @@ function renderTopbar(links, restaurant = null, brandHref = null) {
 function renderHqOverview() {
   const totalRestaurants = state.restaurants.length;
   const todayEvents = state.events.filter((event) => isToday(event.createdAt)).length;
-  const stories = state.storyAssets.length;
   const menus = state.menuDays.length;
   const catalogItems = getAllCatalogItems().length;
   return `
@@ -1142,15 +1141,14 @@ function renderHqOverview() {
       <div class="section__head">
         <p class="eyebrow">Operação</p>
         <h2>Painel central dos clientes</h2>
-        <p>Aqui ficam seus restaurantes, respostas recebidas, banco de pratos com fotos, links dos cardápios públicos, Stories gerados e insights internos.</p>
+        <p>Aqui ficam seus restaurantes, respostas recebidas, banco de pratos com fotos, links dos cardápios públicos e insights internos.</p>
       </div>
       <div class="grid grid--three">
         ${metric("Clientes", totalRestaurants)}
         ${metric("Pratos no banco", catalogItems)}
-        ${metric("Stories gerados", stories)}
+        ${metric("Cardápios", menus)}
       </div>
       <div class="grid grid--three">
-        ${metric("Publicações", menus)}
         ${metric("Acessos hoje", todayEvents)}
         ${metric("Fotos", getAllCatalogItems().filter((item) => item.image_url).length)}
       </div>
