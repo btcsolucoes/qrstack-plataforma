@@ -1,4 +1,4 @@
-const CACHE_PURGE_VERSION = "qrstack-platform-network-first-20260902-d1-rollups";
+const CACHE_PURGE_VERSION = "qrstack-platform-network-first-20260902-insights-completos";
 
 self.addEventListener("install", () => {
   self.skipWaiting();

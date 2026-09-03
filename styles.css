@@ -2099,6 +2099,48 @@ select:focus {
   color: #116047;
 }
 
+.history-overview {
+  display: grid;
+  gap: 0.9rem;
+  border-block: 1px solid var(--line);
+  padding: 1.25rem 0;
+}
+
+.history-overview__heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.history-overview__heading h3 {
+  margin: 0.15rem 0 0;
+  font-size: 1.45rem;
+}
+
+.history-overview__heading > span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-align: right;
+}
+
+.history-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.history-metrics .insight-kpi {
+  min-height: 124px;
+  border-top: 3px solid var(--secondary);
+  box-shadow: none;
+}
+
+.history-metrics .insight-kpi strong {
+  font-size: 1.85rem;
+}
+
 .control-room {
   grid-template-columns: minmax(0, 1.65fr) minmax(300px, 0.75fr);
   gap: 1rem;
@@ -2196,6 +2238,48 @@ select:focus {
 
 .decision-panel__note {
   font-size: 0.78rem;
+}
+
+.traffic-audit {
+  align-content: start;
+}
+
+.traffic-audit__rows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  margin-top: 0.6rem;
+  border: 1px solid var(--line);
+}
+
+.traffic-audit__rows p {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+  margin: 0;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 0.9rem;
+}
+
+.traffic-audit__rows p:nth-child(2n) {
+  border-right: 0;
+}
+
+.traffic-audit__rows p:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+.traffic-audit__rows strong {
+  color: var(--primary);
+  font-family: Sora, Manrope, system-ui, sans-serif;
+  font-size: 1.55rem;
+}
+
+.traffic-audit__rows span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
 }
 
 .insight-section {
@@ -2575,6 +2659,18 @@ select:focus {
     font-size: 1.25rem;
   }
 
+  .history-overview__heading {
+    align-items: start;
+  }
+
+  .history-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .history-metrics .insight-kpi {
+    min-height: 108px;
+  }
+
   .command-panel {
     grid-template-columns: 1fr;
     padding: 1rem;
@@ -2743,6 +2839,33 @@ select:focus {
 
   .command-panel__copy h3 {
     font-size: 2.15rem;
+  }
+
+  .history-overview__heading {
+    display: grid;
+  }
+
+  .history-overview__heading > span {
+    text-align: left;
+  }
+
+  .history-metrics .insight-kpi strong {
+    font-size: 1.5rem;
+  }
+
+  .traffic-audit__rows {
+    grid-template-columns: 1fr;
+  }
+
+  .traffic-audit__rows p,
+  .traffic-audit__rows p:nth-child(2n),
+  .traffic-audit__rows p:nth-last-child(-n + 2) {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .traffic-audit__rows p:last-child {
+    border-bottom: 0;
   }
 
   .command-metrics .insight-kpi {

@@ -15,7 +15,7 @@ const CORS_HEADERS = {
 };
 
 const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec";
-const ANALYTICS_CACHE_VERSION = "v6-daily-rollups";
+const ANALYTICS_CACHE_VERSION = "v7-complete-insights";
 const MENU_CACHE_VERSION = "v1-unified-responses";
 const AMARO_FORM_SHEET_ID = "1wj-cHrLg-MHAzwD2CdWR-ZocaVMLQApdNif1hTIXpJI";
 const AMARO_FORM_SHEET_NAME = "Respostas ao formulário 1";
@@ -59,7 +59,7 @@ export default {
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v10-daily-rollups",
+          version: "archive-live-v11-complete-insights",
           fallback_storage: "google_sheets",
           story_automation: STORY_AUTOMATION_ENABLED,
           analytics_read_model: "daily_rollups",
@@ -1036,15 +1036,27 @@ async function getRollupInsights(env, filters) {
   }, {});
   const bounds = buildDateBounds({ startDate: periodStart, endDate: periodEnd });
 
-  const [restaurant, sessionRow, conversion, recent] = await Promise.all([
+  const [restaurant, conversion, recent, historicalRow, visitorStats, sourceDetailResult] = await Promise.all([
     getRestaurant(env.DB, slug),
-    env.DB.prepare(`
-      SELECT COUNT(DISTINCT session_id) AS total
-      FROM analytics_session_facts
-      WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
-    `).bind(slug, periodStart, periodEnd).first(),
     getRollupInstagramToDirect(env.DB, slug, periodStart, periodEnd),
     getRollupRecentEvents(env.DB, slug, periodStart, periodEnd),
+    env.DB.prepare(`
+      SELECT
+        COALESCE(SUM(CASE WHEN metric = 'events' AND dimension = 'total' THEN value ELSE 0 END), 0) AS total_events,
+        COALESCE(SUM(CASE WHEN metric = 'page_views' AND dimension = 'total' THEN value ELSE 0 END), 0) AS total_accesses,
+        COUNT(DISTINCT CASE WHEN metric = 'page_views' AND dimension = 'total' THEN metric_date END) AS tracked_days
+      FROM analytics_daily_metrics
+      WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
+        AND metric IN ('events', 'page_views') AND dimension = 'total'
+    `).bind(slug, ANALYTICS_ROLLUP_START_DATE, today).first(),
+    getRollupVisitorStats(env.DB, slug, periodStart, periodEnd, today),
+    env.DB.prepare(`
+      SELECT COALESCE(NULLIF(source_detail, ''), 'sem_detalhe') AS dimension, COUNT(*) AS value
+      FROM analytics_pageview_facts
+      WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
+      GROUP BY COALESCE(NULLIF(source_detail, ''), 'sem_detalhe')
+      ORDER BY value DESC
+    `).bind(slug, periodStart, periodEnd).all(),
   ]);
 
   const dishViewCounts = mapMetric(periodRows, "dish_view");
@@ -1064,10 +1076,22 @@ async function getRollupInsights(env, filters) {
     period_events: periodEvents,
     period_accesses: periodAccesses,
     filtered_accesses: periodAccesses,
+    total_events: Number(historicalRow?.total_events || 0),
+    total_accesses: Number(historicalRow?.total_accesses || 0),
+    total_page_views: Number(historicalRow?.total_accesses || 0),
+    tracked_days: Number(historicalRow?.tracked_days || 0),
     accesses_today: sumMetric(todayRows, "page_views", "total"),
     accesses_7_days: sumMetric(sevenDayRows, "page_views", "total"),
-    unique_sessions_period: Number(sessionRow?.total || 0),
+    unique_sessions_period: visitorStats.unique_sessions_period,
+    unique_sessions_total: visitorStats.unique_sessions_total,
+    unique_visitors_period: visitorStats.unique_visitors_period,
+    unique_visitors_total: visitorStats.unique_visitors_total,
+    returning_visitors_period: visitorStats.returning_visitors_period,
+    returning_visitors_total: visitorStats.returning_visitors_total,
+    returning_sessions_period: visitorStats.returning_sessions_period,
+    returning_sessions_total: visitorStats.returning_sessions_total,
     source_counts: mapMetric(periodRows, "source"),
+    source_detail_counts: Object.fromEntries((sourceDetailResult.results || []).map((row) => [row.dimension, Number(row.value || 0)])),
     event_type_counts: mapMetric(periodRows, "event_type"),
     daily_accesses: dailyAccesses,
     hour_counts: mapMetric(periodRows, "hour"),
@@ -1093,13 +1117,46 @@ async function getRollupInsights(env, filters) {
   };
 
   if (!normalizeDate(filters.startDate) && !normalizeDate(filters.endDate)) {
-    insights.total_events = periodEvents;
-    insights.total_accesses = periodAccesses;
-    insights.total_page_views = periodAccesses;
-    insights.unique_sessions_total = insights.unique_sessions_period;
     insights.event_type_counts_all = insights.event_type_counts;
   }
   return insights;
+}
+
+async function getRollupVisitorStats(db, slug, periodStart, periodEnd, today) {
+  const row = await db.prepare(`
+    WITH identities AS (
+      SELECT
+        COALESCE(NULLIF(visitor_id, ''), 'session:' || COALESCE(NULLIF(session_id, ''), event_id)) AS identity_id,
+        COUNT(DISTINCT CASE
+          WHEN metric_date >= ? AND metric_date <= ?
+          THEN COALESCE(NULLIF(session_id, ''), event_id)
+        END) AS period_sessions,
+        COUNT(DISTINCT COALESCE(NULLIF(session_id, ''), event_id)) AS total_sessions
+      FROM analytics_pageview_facts
+      WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
+      GROUP BY COALESCE(NULLIF(visitor_id, ''), 'session:' || COALESCE(NULLIF(session_id, ''), event_id))
+    )
+    SELECT
+      COALESCE(SUM(CASE WHEN period_sessions > 0 THEN 1 ELSE 0 END), 0) AS unique_visitors_period,
+      COALESCE(SUM(CASE WHEN period_sessions > 1 THEN 1 ELSE 0 END), 0) AS returning_visitors_period,
+      COALESCE(SUM(CASE WHEN period_sessions > 1 THEN period_sessions - 1 ELSE 0 END), 0) AS returning_sessions_period,
+      COUNT(*) AS unique_visitors_total,
+      COALESCE(SUM(CASE WHEN total_sessions > 1 THEN 1 ELSE 0 END), 0) AS returning_visitors_total,
+      COALESCE(SUM(CASE WHEN total_sessions > 1 THEN total_sessions - 1 ELSE 0 END), 0) AS returning_sessions_total,
+      COALESCE(SUM(period_sessions), 0) AS unique_sessions_period,
+      COALESCE(SUM(total_sessions), 0) AS unique_sessions_total
+    FROM identities
+  `).bind(periodStart, periodEnd, slug, ANALYTICS_ROLLUP_START_DATE, today).first();
+  return {
+    unique_visitors_period: Number(row?.unique_visitors_period || 0),
+    returning_visitors_period: Number(row?.returning_visitors_period || 0),
+    returning_sessions_period: Number(row?.returning_sessions_period || 0),
+    unique_visitors_total: Number(row?.unique_visitors_total || 0),
+    returning_visitors_total: Number(row?.returning_visitors_total || 0),
+    returning_sessions_total: Number(row?.returning_sessions_total || 0),
+    unique_sessions_period: Number(row?.unique_sessions_period || 0),
+    unique_sessions_total: Number(row?.unique_sessions_total || 0),
+  };
 }
 
 async function getRollupInstagramToDirect(db, slug, startDate, endDate) {
@@ -2442,7 +2499,7 @@ function peakHourFromCounts(counts) {
   const entries = Object.entries(counts || {}).sort((a, b) => b[1] - a[1]);
   if (!entries.length) return "";
   const [hour, count] = entries[0];
-  return `${hour}h com ${count} acesso${count === 1 ? "" : "s"}`;
+  return `${hour}h com ${Number(count).toLocaleString("pt-BR")} acesso${count === 1 ? "" : "s"}`;
 }
 
 function periodLabel(startDate, endDate) {
