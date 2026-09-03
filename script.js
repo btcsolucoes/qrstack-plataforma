@@ -3534,19 +3534,22 @@ function renderConversionFunnel(periodAccesses, whatsappClicks, mapsClicks) {
 
 function renderInstagramDirectConversion(conversion = {}) {
   const instagramVisitors = Number(conversion.instagram_visitors || 0);
+  const instagramClickIdentities = Number(conversion.instagram_click_identities || instagramVisitors);
+  const webviewOnlyVisitors = Number(conversion.webview_only_visitors || 0);
+  const trackingCoverage = Number(conversion.tracking_coverage_rate || 0);
   const convertedVisitors = Number(conversion.instagram_to_direct_visitors || 0);
   const directSessions = Number(conversion.direct_sessions_after_instagram || 0);
   const rate = Number(conversion.instagram_to_direct_rate || 0);
   return `
     <article class="card insight-chart">
-      <p class="eyebrow">Conversão Instagram -> Direct</p>
-      <h3>Jornada até o restaurante</h3>
+      <p class="eyebrow">Instagram -> Direto</p>
+      <h3>Conversões rastreáveis</h3>
       <div class="funnel">
-        ${funnelStep("Pessoas que vieram do Instagram", instagramVisitors, instagramVisitors || 1)}
-        ${funnelStep("Pessoas que voltaram via direto/QR", convertedVisitors, instagramVisitors || 1)}
-        ${funnelStep("Acessos diretos feitos por essas pessoas", directSessions, instagramVisitors || 1)}
+        ${funnelStep("Visitantes IG no navegador padrão", instagramVisitors, instagramVisitors || 1)}
+        ${funnelStep("Identidades convertidas para direto/QR", convertedVisitors, instagramVisitors || 1)}
+        ${funnelStep("Sessões diretas posteriores", directSessions, instagramVisitors || 1)}
       </div>
-      <p class="muted conversion-explainer">${instagramVisitors ? `<strong>${formatNumber(convertedVisitors)} pessoas únicas retornaram.</strong> Juntas, elas abriram o cardápio ${formatNumber(directSessions)} vezes de forma direta/QR. A taxa de retorno foi ${formatPercentNumber(rate)}.` : "Ainda não há visitantes de Instagram suficientes para calcular essa jornada."}</p>
+      <p class="muted conversion-explainer">${instagramVisitors ? `<strong>${formatNumber(convertedVisitors)} conversões confirmadas entre ${formatNumber(instagramVisitors)} identidades rastreáveis: ${formatPercentNumber(rate)}.</strong> Foram ${formatNumber(directSessions)} sessões diretas posteriores. Cobertura técnica: ${formatPercentNumber(trackingCoverage)} das ${formatNumber(instagramClickIdentities)} identidades antigas do Instagram; ${formatNumber(webviewOnlyVisitors)} ficaram somente no webview e não entram na taxa principal.` : "Ainda não há visitantes de Instagram rastreáveis no navegador padrão para calcular essa jornada."}</p>
     </article>
   `;
 }
