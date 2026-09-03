@@ -19,7 +19,12 @@ const ANALYTICS_CACHE_VERSION = "v8-conversion-coverage";
 const MENU_CACHE_VERSION = "v1-unified-responses";
 const AMARO_FORM_SHEET_ID = "1wj-cHrLg-MHAzwD2CdWR-ZocaVMLQApdNif1hTIXpJI";
 const AMARO_FORM_SHEET_NAME = "Respostas ao formulário 1";
-const D1_CAPACITY_BLOCK_KEY = "insights:d1-capacity-blocked";
+const D1_READ_BLOCK_KEY = "insights:d1-read-blocked";
+const D1_WRITE_BLOCK_KEY = "analytics:d1-write-blocked";
+const ANALYTICS_STORAGE_HEALTH_KEY = "analytics:storage-health";
+const ANALYTICS_TOTAL_STATS_CACHE_VERSION = "v1";
+const ANALYTICS_WRITE_INDEX_VERSION = "v1";
+const ANALYTICS_WRITE_INDEX_KEY = `analytics:write-indexes:${ANALYTICS_WRITE_INDEX_VERSION}`;
 const BUSINESS_TIME_ZONE = "America/Recife";
 const INSIGHTS_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 1000;
 const ANALYTICS_ROLLUP_SCHEMA_VERSION = "v1";
@@ -56,11 +61,13 @@ export default {
         : url.searchParams.get("action") || "health";
 
       if (action === "health") {
+        const analyticsStorage = await getAnalyticsStorageHealth(env);
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v12-conversion-coverage",
+          version: "archive-live-v13-resilient-ingestion",
           fallback_storage: "google_sheets",
+          analytics_storage: analyticsStorage,
           story_automation: STORY_AUTOMATION_ENABLED,
           analytics_read_model: "daily_rollups",
         });
@@ -69,6 +76,10 @@ export default {
       if (action === "trackEvent") {
         const receivedPayload = request.method === "POST" ? payload : Object.fromEntries(url.searchParams);
         const eventPayload = { ...receivedPayload, id: receivedPayload.id || crypto.randomUUID() };
+        const writeBlock = await readCacheJson(env, D1_WRITE_BLOCK_KEY);
+        if (writeBlock) {
+          return storeFallbackEvent(env, eventPayload, request, writeBlock.reason || "d1_write_blocked");
+        }
         try {
           const tracked = await trackEvent(env.DB, eventPayload, request);
           if (tracked.rollupEvents?.length) {
@@ -77,18 +88,8 @@ export default {
           return json({ ok: true, event: tracked.event, storage: "d1" }, 201);
         } catch (error) {
           if (!isD1CapacityError(error)) throw error;
-          const fallback = await storeEventInSheets(env, eventPayload, request);
-          console.warn("QrStack D1 capacity reached; event stored in Google Sheets", {
-            client_event_id: eventPayload.id,
-            sheet_event_id: fallback.event?.id || "",
-          });
-          return json({
-            ok: true,
-            event: fallback.event || eventPayload,
-            client_event_id: eventPayload.id,
-            storage: "google_sheets",
-            fallback_reason: "d1_capacity",
-          }, 202);
+          await markD1WriteBlocked(env, error);
+          return storeFallbackEvent(env, eventPayload, request, "d1_capacity");
         }
       }
 
@@ -102,11 +103,13 @@ export default {
           endDate: normalizeDate(url.searchParams.get("endDate") || url.searchParams.get("end_date")),
         };
         const snapshotKey = insightsSnapshotKey(filters);
+        const analyticsStorage = await getAnalyticsStorageHealth(env);
         if (forceRefresh) {
           try {
             const refreshedSnapshot = await refreshInsightsSnapshot(env, filters, snapshotKey);
             return jsonp(url, {
               ...refreshedSnapshot,
+              analytics_storage: analyticsStorage,
               cache: { status: "forced_refreshed", generated_at: refreshedSnapshot.generated_at },
             }, 200, JSON_HEADERS);
           } catch (error) {
@@ -120,6 +123,7 @@ export default {
             });
             return jsonp(url, {
               ...savedSnapshot,
+              analytics_storage: analyticsStorage,
               cache: {
                 status: "quota_stale",
                 generated_at: savedSnapshot.generated_at || savedSnapshot.insights?.collected_at || "",
@@ -140,6 +144,7 @@ export default {
           }
           return jsonp(url, {
             ...snapshot,
+            analytics_storage: analyticsStorage,
             cache: {
               status: ageMs <= INSIGHTS_SNAPSHOT_MAX_AGE_MS ? "fresh" : "stale_while_refresh",
               generated_at: snapshot.generated_at || snapshot.insights?.collected_at || "",
@@ -149,6 +154,7 @@ export default {
         const freshSnapshot = await refreshInsightsSnapshot(env, filters, snapshotKey);
         return jsonp(url, {
           ...freshSnapshot,
+          analytics_storage: analyticsStorage,
           cache: { status: "miss_refreshed", generated_at: freshSnapshot.generated_at },
         }, 200, READ_CACHE_HEADERS);
       }
@@ -166,6 +172,11 @@ export default {
       if (action === "getRollupStatus") {
         assertOwner(url.searchParams, request, env);
         return jsonp(url, { ok: true, ...(await getAnalyticsRollupStatus(env, url.searchParams.get("slug") || "amaro")) });
+      }
+
+      if (action === "getAnalyticsHealth") {
+        assertOwner(url.searchParams, request, env);
+        return jsonp(url, { ok: true, ...(await getAnalyticsStorageHealth(env)) });
       }
 
       if (action === "runRollupBackfill") {
@@ -261,6 +272,42 @@ export default {
   async scheduled(controller, env, ctx) {
     ctx.waitUntil(runScheduledMaintenance(controller, env));
   },
+
+  async queue(batch, env) {
+    const activeBlock = await readCacheJson(env, D1_WRITE_BLOCK_KEY);
+    if (activeBlock) {
+      batch.retryAll({ delaySeconds: queueDelayUntilD1Reset() });
+      return;
+    }
+
+    let recovered = 0;
+    for (const message of batch.messages) {
+      const eventPayload = message.body?.event || message.body || {};
+      try {
+        const replayRequest = new Request("https://qrstack-replay.internal/", {
+          headers: { "user-agent": eventPayload.user_agent || eventPayload.userAgent || "" },
+        });
+        const tracked = await trackEvent(env.DB, eventPayload, replayRequest);
+        if (tracked.rollupEvents?.length) await updateAnalyticsRollups(env, tracked.rollupEvents);
+        message.ack();
+        recovered += 1;
+      } catch (error) {
+        if (isD1CapacityError(error)) {
+          await markD1WriteBlocked(env, error);
+          message.retry({ delaySeconds: queueDelayUntilD1Reset() });
+        } else {
+          const delaySeconds = Math.min(3600, 60 * (2 ** Math.min(Number(message.attempts || 1), 5)));
+          message.retry({ delaySeconds });
+        }
+      }
+    }
+    if (recovered) await recordAnalyticsStorageHealth(env, {
+      mode: "d1",
+      status: "recovered",
+      recovered_events: recovered,
+      recovered_at: new Date().toISOString(),
+    });
+  },
 };
 
 function isD1CapacityError(error) {
@@ -271,6 +318,125 @@ function isD1CapacityError(error) {
 
 function isRollupNotReadyError(error) {
   return error?.code === "ANALYTICS_ROLLUP_NOT_READY";
+}
+
+function isD1DailyQueryLimitError(error) {
+  const message = String(error?.message || error || "");
+  return /free tier daily row (?:read|write) limit|daily row (?:read|write) limit/i.test(message);
+}
+
+function secondsUntilD1Reset() {
+  const now = new Date();
+  const nextReset = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 1);
+  return Math.max(60, Math.ceil((nextReset - now.getTime()) / 1000));
+}
+
+function queueDelayUntilD1Reset() {
+  return Math.min(23 * 60 * 60, secondsUntilD1Reset());
+}
+
+async function readCacheJson(env, key) {
+  if (!env.INSIGHTS_CACHE) return null;
+  try {
+    return await env.INSIGHTS_CACHE.get(key, "json");
+  } catch (error) {
+    console.warn("QrStack operational cache read failed", { key, error: error?.message || String(error) });
+    return null;
+  }
+}
+
+async function recordAnalyticsStorageHealth(env, update) {
+  if (!env.INSIGHTS_CACHE) return;
+  const previous = await readCacheJson(env, ANALYTICS_STORAGE_HEALTH_KEY) || {};
+  await env.INSIGHTS_CACHE.put(ANALYTICS_STORAGE_HEALTH_KEY, JSON.stringify({
+    ...previous,
+    ...update,
+    updated_at: new Date().toISOString(),
+  }));
+}
+
+async function getAnalyticsStorageHealth(env) {
+  const [readBlock, writeBlock, saved, writeIndexes] = await Promise.all([
+    readCacheJson(env, D1_READ_BLOCK_KEY),
+    readCacheJson(env, D1_WRITE_BLOCK_KEY),
+    readCacheJson(env, ANALYTICS_STORAGE_HEALTH_KEY),
+    env.INSIGHTS_CACHE ? env.INSIGHTS_CACHE.get(ANALYTICS_WRITE_INDEX_KEY) : null,
+  ]);
+  return {
+    primary: "cloudflare_d1",
+    fallback: "google_sheets",
+    replay: env.ANALYTICS_RETRY_QUEUE ? "cloudflare_queue" : "manual",
+    ingestion_status: writeBlock ? "fallback_active" : "d1_active",
+    dashboard_status: readBlock ? "cached_snapshot" : "d1_rollups",
+    read_block: readBlock,
+    write_block: writeBlock,
+    last_transition: saved || null,
+    write_amplification_reduced: Boolean(writeIndexes),
+    raw_events_are_never_deleted: true,
+  };
+}
+
+async function markD1WriteBlocked(env, error) {
+  if (!env.INSIGHTS_CACHE) return;
+  const marker = {
+    reason: "d1_write_unavailable",
+    error: String(error?.message || error || "").slice(0, 500),
+    blocked_at: new Date().toISOString(),
+    resumes_after: new Date(Date.now() + secondsUntilD1Reset() * 1000).toISOString(),
+  };
+  const expirationTtl = secondsUntilD1Reset();
+  await Promise.allSettled([
+    env.INSIGHTS_CACHE.put(D1_WRITE_BLOCK_KEY, JSON.stringify(marker), { expirationTtl }),
+    recordAnalyticsStorageHealth(env, {
+      mode: "google_sheets",
+      status: "fallback_active",
+      fallback_reason: marker.reason,
+      fallback_started_at: marker.blocked_at,
+    }),
+  ]);
+}
+
+async function enqueueFallbackReplay(env, eventPayload) {
+  if (!env.ANALYTICS_RETRY_QUEUE) return false;
+  try {
+    await env.ANALYTICS_RETRY_QUEUE.send(
+      { event: eventPayload, queued_at: new Date().toISOString() },
+      { delaySeconds: queueDelayUntilD1Reset() },
+    );
+    return true;
+  } catch (error) {
+    console.warn("QrStack could not queue the Sheets fallback for automatic D1 replay", {
+      event_id: eventPayload.id,
+      error: error?.message || String(error),
+    });
+    return false;
+  }
+}
+
+async function storeFallbackEvent(env, eventPayload, request, reason) {
+  const [sheetResult, queueResult] = await Promise.allSettled([
+    storeEventInSheets(env, eventPayload, request),
+    enqueueFallbackReplay(env, eventPayload),
+  ]);
+  const fallback = sheetResult.status === "fulfilled" ? sheetResult.value : null;
+  const replayQueued = queueResult.status === "fulfilled" && queueResult.value === true;
+  if (!fallback && !replayQueued) {
+    throw new Error(`Analytics fallback unavailable: ${sheetResult.reason?.message || "Sheets failed"}`);
+  }
+  console.warn("QrStack event stored outside D1", {
+    client_event_id: eventPayload.id,
+    sheet_event_id: fallback?.event?.id || "",
+    replay_queued: replayQueued,
+  });
+  return json({
+    ok: true,
+    event: fallback?.event || eventPayload,
+    client_event_id: eventPayload.id,
+    storage: fallback ? "google_sheets" : "cloudflare_queue",
+    sheets_saved: Boolean(fallback),
+    fallback_reason: reason,
+    replay_queued: replayQueued,
+  }, 202);
 }
 
 async function storeEventInSheets(env, payload, request) {
@@ -354,7 +520,7 @@ async function readInsightsSnapshot(env, key) {
 }
 
 async function refreshInsightsSnapshot(env, filters, key = insightsSnapshotKey(filters)) {
-  if (env.INSIGHTS_CACHE && await env.INSIGHTS_CACHE.get(D1_CAPACITY_BLOCK_KEY)) {
+  if (env.INSIGHTS_CACHE && await env.INSIGHTS_CACHE.get(D1_READ_BLOCK_KEY)) {
     const error = new Error("D1 capacity is temporarily blocked (cached)");
     error.code = "D1_CAPACITY_BLOCKED_CACHED";
     throw error;
@@ -364,7 +530,7 @@ async function refreshInsightsSnapshot(env, filters, key = insightsSnapshotKey(f
   try {
     insights = await getRollupInsights(env, filters);
   } catch (error) {
-    if (isD1CapacityError(error)) await markD1CapacityBlocked(env, error);
+    if (isD1CapacityError(error)) await markD1ReadBlocked(env, error);
     throw error;
   }
   const slug = normalizeSlug(filters.slug || "amaro");
@@ -380,13 +546,27 @@ async function refreshInsightsSnapshot(env, filters, key = insightsSnapshotKey(f
   return snapshot;
 }
 
-async function markD1CapacityBlocked(env, error) {
+async function markD1ReadBlocked(env, error) {
   if (!env.INSIGHTS_CACHE || error?.code === "D1_CAPACITY_BLOCKED_CACHED") return;
   const now = new Date();
-  const nextReset = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 5);
+  const nextReset = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 1);
   const expirationTtl = Math.max(60, Math.ceil((nextReset - now.getTime()) / 1000));
+  const marker = {
+    reason: "d1_read_unavailable",
+    error: String(error?.message || error || "").slice(0, 500),
+    blocked_at: now.toISOString(),
+    resumes_after: new Date(nextReset).toISOString(),
+  };
   try {
-    await env.INSIGHTS_CACHE.put(D1_CAPACITY_BLOCK_KEY, new Date().toISOString(), { expirationTtl });
+    const updates = [
+      env.INSIGHTS_CACHE.put(D1_READ_BLOCK_KEY, JSON.stringify(marker), { expirationTtl }),
+      recordAnalyticsStorageHealth(env, {
+        dashboard_status: "cached_snapshot",
+        read_fallback_started_at: marker.blocked_at,
+      }),
+    ];
+    if (isD1DailyQueryLimitError(error)) updates.push(markD1WriteBlocked(env, error));
+    await Promise.all(updates);
   } catch (cacheError) {
     console.warn("QrStack could not persist D1 capacity marker", {
       error: cacheError?.message || String(cacheError),
@@ -396,6 +576,7 @@ async function markD1CapacityBlocked(env, error) {
 
 async function updateTodayInsightsSnapshot(env, event) {
   if (!env.INSIGHTS_CACHE || event.restaurant_slug !== "amaro") return;
+  if (event.event_type !== "page_view") return;
   const createdAt = new Date(event.created_at);
   if (Number.isNaN(createdAt.getTime())) return;
   const businessDate = todayIso(createdAt);
@@ -428,7 +609,7 @@ async function updateTodayInsightsSnapshot(env, event) {
     increment("accesses_today");
     increment("accesses_7_days");
     incrementMap("source_counts", event.source || "direct");
-    incrementMap("event_type_counts", "page_view");
+    incrementMap("event_type_counts", event.event_type);
     incrementMap("daily_accesses", businessDate);
     incrementMap("hour_counts", hour);
     incrementMap("device_counts", event.device_type || "Não identificado");
@@ -512,7 +693,12 @@ async function runScheduledMaintenance(controller, env) {
   const tasks = [syncGoogleFormDate(env, today)];
 
   try {
+    if (await readCacheJson(env, D1_READ_BLOCK_KEY)) {
+      await Promise.allSettled(tasks);
+      return;
+    }
     await ensureAnalyticsRollupSchema(env);
+    await reduceAnalyticsWriteAmplification(env);
     const backfill = await runAnalyticsRollupBackfill(env, "amaro");
 
     // Rebuild the current business day once per hour. Incremental writes keep it
@@ -541,7 +727,7 @@ async function runScheduledMaintenance(controller, env) {
       tasks.push(backfillD1MenuCache(env, "amaro"));
     }
   } catch (error) {
-    if (isD1CapacityError(error)) await markD1CapacityBlocked(env, error);
+    if (isD1CapacityError(error)) await markD1ReadBlocked(env, error);
     console.warn("QrStack analytics rollup maintenance paused", {
       error: error?.message || String(error),
     });
@@ -557,6 +743,24 @@ async function ensureAnalyticsRollupSchema(env) {
   }
   if (env.INSIGHTS_CACHE) {
     await env.INSIGHTS_CACHE.put(ANALYTICS_ROLLUP_SCHEMA_KEY, new Date().toISOString());
+  }
+}
+
+async function reduceAnalyticsWriteAmplification(env) {
+  if (env.INSIGHTS_CACHE && await env.INSIGHTS_CACHE.get(ANALYTICS_WRITE_INDEX_KEY)) return;
+  const obsoleteIndexes = [
+    "idx_events_restaurant_created",
+    "idx_events_slug_type_created",
+    "idx_events_slug_source_created",
+    "idx_events_slug_dish_created",
+    "idx_events_slug_type_dish_name_created",
+    "idx_events_slug_type_category_created",
+  ];
+  for (const indexName of obsoleteIndexes) {
+    await env.DB.prepare(`DROP INDEX IF EXISTS ${indexName}`).run();
+  }
+  if (env.INSIGHTS_CACHE) {
+    await env.INSIGHTS_CACHE.put(ANALYTICS_WRITE_INDEX_KEY, new Date().toISOString());
   }
 }
 
@@ -699,6 +903,11 @@ function aggregateAnalyticsEvents(events, metricDate, slug) {
       if (!previous || String(event.created_at) < previous) sessions.set(event.session_id, String(event.created_at || ""));
     }
 
+    if (Number(event.banner_shown || 0)) {
+      addMetric("webview_banner", "total");
+      addMetric("webview_banner_platform", event.banner_platform || "Não identificado");
+    }
+
     if (event.event_type === "page_view") {
       addMetric("page_views", "total");
       addMetric("source", event.source || "direct");
@@ -706,10 +915,6 @@ function aggregateAnalyticsEvents(events, metricDate, slug) {
       addMetric("device", event.device_type || "Não identificado");
       addMetric("browser", event.browser || "Não identificado");
       addMetric("os", event.os || "Não identificado");
-      if (Number(event.banner_shown || 0)) {
-        addMetric("webview_banner", "total");
-        addMetric("webview_banner_platform", event.banner_platform || "Não identificado");
-      }
       pageviews.push({
         event_id: String(event.id || ""),
         created_at: String(event.created_at || ""),
@@ -1049,7 +1254,7 @@ async function getRollupInsights(env, filters) {
       WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
         AND metric IN ('events', 'page_views') AND dimension = 'total'
     `).bind(slug, ANALYTICS_ROLLUP_START_DATE, today).first(),
-    getRollupVisitorStats(env.DB, slug, periodStart, periodEnd, today),
+    getRollupVisitorStats(env, slug, periodStart, periodEnd, today),
     env.DB.prepare(`
       SELECT COALESCE(NULLIF(source_detail, ''), 'sem_detalhe') AS dimension, COUNT(*) AS value
       FROM analytics_pageview_facts
@@ -1122,40 +1327,63 @@ async function getRollupInsights(env, filters) {
   return insights;
 }
 
-async function getRollupVisitorStats(db, slug, periodStart, periodEnd, today) {
+async function queryVisitorStats(db, slug, startDate, endDate) {
   const row = await db.prepare(`
     WITH identities AS (
       SELECT
         COALESCE(NULLIF(visitor_id, ''), 'session:' || COALESCE(NULLIF(session_id, ''), event_id)) AS identity_id,
-        COUNT(DISTINCT CASE
-          WHEN metric_date >= ? AND metric_date <= ?
-          THEN COALESCE(NULLIF(session_id, ''), event_id)
-        END) AS period_sessions,
-        COUNT(DISTINCT COALESCE(NULLIF(session_id, ''), event_id)) AS total_sessions
+        COUNT(DISTINCT COALESCE(NULLIF(session_id, ''), event_id)) AS sessions
       FROM analytics_pageview_facts
       WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
       GROUP BY COALESCE(NULLIF(visitor_id, ''), 'session:' || COALESCE(NULLIF(session_id, ''), event_id))
     )
     SELECT
-      COALESCE(SUM(CASE WHEN period_sessions > 0 THEN 1 ELSE 0 END), 0) AS unique_visitors_period,
-      COALESCE(SUM(CASE WHEN period_sessions > 1 THEN 1 ELSE 0 END), 0) AS returning_visitors_period,
-      COALESCE(SUM(CASE WHEN period_sessions > 1 THEN period_sessions - 1 ELSE 0 END), 0) AS returning_sessions_period,
-      COUNT(*) AS unique_visitors_total,
-      COALESCE(SUM(CASE WHEN total_sessions > 1 THEN 1 ELSE 0 END), 0) AS returning_visitors_total,
-      COALESCE(SUM(CASE WHEN total_sessions > 1 THEN total_sessions - 1 ELSE 0 END), 0) AS returning_sessions_total,
-      COALESCE(SUM(period_sessions), 0) AS unique_sessions_period,
-      COALESCE(SUM(total_sessions), 0) AS unique_sessions_total
+      COUNT(*) AS unique_visitors,
+      COALESCE(SUM(CASE WHEN sessions > 1 THEN 1 ELSE 0 END), 0) AS returning_visitors,
+      COALESCE(SUM(CASE WHEN sessions > 1 THEN sessions - 1 ELSE 0 END), 0) AS returning_sessions,
+      COALESCE(SUM(sessions), 0) AS unique_sessions
     FROM identities
-  `).bind(periodStart, periodEnd, slug, ANALYTICS_ROLLUP_START_DATE, today).first();
+  `).bind(slug, startDate, endDate).first();
   return {
-    unique_visitors_period: Number(row?.unique_visitors_period || 0),
-    returning_visitors_period: Number(row?.returning_visitors_period || 0),
-    returning_sessions_period: Number(row?.returning_sessions_period || 0),
-    unique_visitors_total: Number(row?.unique_visitors_total || 0),
-    returning_visitors_total: Number(row?.returning_visitors_total || 0),
-    returning_sessions_total: Number(row?.returning_sessions_total || 0),
-    unique_sessions_period: Number(row?.unique_sessions_period || 0),
-    unique_sessions_total: Number(row?.unique_sessions_total || 0),
+    unique_visitors: Number(row?.unique_visitors || 0),
+    returning_visitors: Number(row?.returning_visitors || 0),
+    returning_sessions: Number(row?.returning_sessions || 0),
+    unique_sessions: Number(row?.unique_sessions || 0),
+  };
+}
+
+async function getRollupVisitorStats(env, slug, periodStart, periodEnd, today) {
+  const period = await queryVisitorStats(env.DB, slug, periodStart, periodEnd);
+  const isAllTime = periodStart === ANALYTICS_ROLLUP_START_DATE && periodEnd === today;
+  let total = period;
+
+  if (!isAllTime) {
+    const hourBucket = new Date().toISOString().slice(0, 13);
+    const totalKey = [
+      "analytics-total-visitors",
+      ANALYTICS_TOTAL_STATS_CACHE_VERSION,
+      slug,
+      today,
+      hourBucket,
+    ].join(":");
+    total = await readCacheJson(env, totalKey);
+    if (!total) {
+      total = await queryVisitorStats(env.DB, slug, ANALYTICS_ROLLUP_START_DATE, today);
+      if (env.INSIGHTS_CACHE) {
+        await env.INSIGHTS_CACHE.put(totalKey, JSON.stringify(total), { expirationTtl: 2 * 60 * 60 });
+      }
+    }
+  }
+
+  return {
+    unique_visitors_period: period.unique_visitors,
+    returning_visitors_period: period.returning_visitors,
+    returning_sessions_period: period.returning_sessions,
+    unique_sessions_period: period.unique_sessions,
+    unique_visitors_total: total.unique_visitors,
+    returning_visitors_total: total.returning_visitors,
+    returning_sessions_total: total.returning_sessions,
+    unique_sessions_total: total.unique_sessions,
   };
 }
 

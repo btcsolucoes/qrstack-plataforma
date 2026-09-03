@@ -19,3 +19,15 @@ binding = "DB"
 database_name = "qrstack-db"
 database_id = "cole-o-database-id-do-d1-aqui"
 migrations_dir = "cloudflare/migrations"
+
+[[queues.producers]]
+binding = "ANALYTICS_RETRY_QUEUE"
+queue = "qrstack-analytics-retry"
+
+[[queues.consumers]]
+queue = "qrstack-analytics-retry"
+max_batch_size = 25
+max_batch_timeout = 30
+max_retries = 5
+retry_delay = 900
+dead_letter_queue = "qrstack-analytics-retry-dlq"

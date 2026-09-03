@@ -151,7 +151,7 @@ function trackEvent(payload) {
   const source = normalizeSource(payload.source || payload.origem || payload.utm_source || 'direct');
   const device = detectDevice(payload.user_agent || payload.userAgent || '');
   const event = {
-    id: uuid('event'),
+    id: payload.id || uuid('event'),
     restaurant_id: restaurant.id,
     menu_day_id: payload.menu_day_id || '',
     event_type: payload.event_type || 'page_view',
