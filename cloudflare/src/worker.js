@@ -17,6 +17,10 @@ const CORS_HEADERS = {
 const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec";
 const ANALYTICS_CACHE_VERSION = "v8-conversion-coverage";
 const MENU_CACHE_VERSION = "v1-unified-responses";
+const CATALOG_CACHE_VERSION = "v1-resilient-catalog";
+const AMARO_PUBLISHED_BASE_URL = "https://btcsolucoes.github.io/carda-pio/qrstack/";
+const AMARO_PUBLISHED_CATALOG_URL = `${AMARO_PUBLISHED_BASE_URL}amaro-catalog.json`;
+const AMARO_PUBLISHED_ASSETS_URL = `${AMARO_PUBLISHED_BASE_URL}amaro-assets.json`;
 const AMARO_FORM_SHEET_ID = "1wj-cHrLg-MHAzwD2CdWR-ZocaVMLQApdNif1hTIXpJI";
 const AMARO_FORM_SHEET_NAME = "Respostas ao formulário 1";
 const D1_READ_BLOCK_KEY = "insights:d1-read-blocked";
@@ -65,7 +69,7 @@ export default {
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v13-resilient-ingestion",
+          version: "archive-live-v14-resilient-platform",
           fallback_storage: "google_sheets",
           analytics_storage: analyticsStorage,
           story_automation: STORY_AUTOMATION_ENABLED,
@@ -161,12 +165,12 @@ export default {
 
       if (action === "getRestaurant") {
         const slug = url.searchParams.get("slug") || "amaro";
-        return jsonp(url, { ok: true, restaurant: await getRestaurant(env.DB, slug) });
+        return jsonp(url, { ok: true, ...(await getRestaurantResilient(env, slug)) }, 200, READ_CACHE_HEADERS);
       }
 
       if (action === "getCatalog") {
         const slug = url.searchParams.get("slug") || "amaro";
-        return jsonp(url, { ok: true, ...(await getCatalog(env.DB, slug)) }, 200, READ_CACHE_HEADERS);
+        return jsonp(url, { ok: true, ...(await getCatalogResilient(env, slug)) }, 200, READ_CACHE_HEADERS);
       }
 
       if (action === "getRollupStatus") {
@@ -179,6 +183,16 @@ export default {
         return jsonp(url, { ok: true, ...(await getAnalyticsStorageHealth(env)) });
       }
 
+      if (action === "refreshFallbackInsights") {
+        assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
+        const filters = {
+          slug: url.searchParams.get("slug") || payload.slug || "amaro",
+          startDate: normalizeDate(url.searchParams.get("startDate") || payload.startDate),
+          endDate: normalizeDate(url.searchParams.get("endDate") || payload.endDate),
+        };
+        return jsonp(url, await refreshInsightsFromSheets(env, filters), 200, JSON_HEADERS);
+      }
+
       if (action === "runRollupBackfill") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
         assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
@@ -188,7 +202,8 @@ export default {
 
       if (action === "saveCatalogItem") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        return json({ ok: true, item: await saveCatalogItem(env.DB, payload) });
+        const result = await saveCatalogItemResilient(env, payload);
+        return json({ ok: true, ...result }, result.storage === "d1" ? 200 : 202);
       }
 
       if (action === "getMenu") {
@@ -282,8 +297,28 @@ export default {
 
     let recovered = 0;
     for (const message of batch.messages) {
-      const eventPayload = message.body?.event || message.body || {};
+      const messageKind = message.body?.kind || "analytics_event";
       try {
+        if (messageKind === "catalog_item") {
+          const item = await saveCatalogItem(env.DB, message.body.payload || {});
+          await cacheCatalogItemMutation(env, message.body.payload?.slug || "amaro", item);
+          message.ack();
+          recovered += 1;
+          continue;
+        }
+        if (messageKind === "menu_day") {
+          const saved = await saveMenuDayD1(env.DB, message.body.payload || {});
+          await cacheMenuRecord(env, normalizeCachedMenuRecord({
+            ...saved,
+            response_source: "platform",
+            received_at: new Date().toISOString(),
+          }, "platform"));
+          message.ack();
+          recovered += 1;
+          continue;
+        }
+
+        const eventPayload = message.body?.event || message.body || {};
         const replayRequest = new Request("https://qrstack-replay.internal/", {
           headers: { "user-agent": eventPayload.user_agent || eventPayload.userAgent || "" },
         });
@@ -410,6 +445,23 @@ async function enqueueFallbackReplay(env, eventPayload) {
   } catch (error) {
     console.warn("QrStack could not queue the Sheets fallback for automatic D1 replay", {
       event_id: eventPayload.id,
+      error: error?.message || String(error),
+    });
+    return false;
+  }
+}
+
+async function enqueueDeferredMutation(env, kind, payload) {
+  if (!env.ANALYTICS_RETRY_QUEUE) return false;
+  try {
+    await env.ANALYTICS_RETRY_QUEUE.send(
+      { kind, payload, queued_at: new Date().toISOString() },
+      { delaySeconds: queueDelayUntilD1Reset() },
+    );
+    return true;
+  } catch (error) {
+    console.warn("QrStack could not queue deferred mutation", {
+      kind,
       error: error?.message || String(error),
     });
     return false;
@@ -545,6 +597,56 @@ async function refreshInsightsSnapshot(env, filters, key = insightsSnapshotKey(f
   };
   if (env.INSIGHTS_CACHE) {
     await env.INSIGHTS_CACHE.put(key, JSON.stringify(snapshot));
+  }
+  return snapshot;
+}
+
+async function refreshInsightsFromSheets(env, filters) {
+  const slug = normalizeSlug(filters.slug || "amaro");
+  if (slug !== "amaro") throw new Error("sheets_insights_fallback_not_configured");
+  const endpoint = new URL(env.SHEETS_FALLBACK_URL || DEFAULT_SHEETS_FALLBACK_URL);
+  endpoint.searchParams.set("action", "getInsights");
+  endpoint.searchParams.set("key", env.OWNER_ACCESS_TOKEN || "qrstack-berna-2026");
+  if (filters.startDate) endpoint.searchParams.set("startDate", filters.startDate);
+  if (filters.endDate) endpoint.searchParams.set("endDate", filters.endDate);
+
+  const response = await fetch(endpoint.toString(), {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!response.ok) throw new Error(`sheets_insights_unavailable:${response.status}`);
+  const result = await response.json();
+  if (result?.ok !== true || !result.insights) {
+    throw new Error(`sheets_insights_invalid:${result?.error || "missing_insights"}`);
+  }
+
+  const generatedAt = result.insights.collected_at || new Date().toISOString();
+  const allTimeSnapshot = filters.startDate || filters.endDate
+    ? await readInsightsSnapshot(env, insightsSnapshotKey({ slug, startDate: "", endDate: "" }))
+    : null;
+  const canonicalTotals = allTimeSnapshot?.insights || {};
+  const historicalFields = [
+    "total_events", "total_accesses", "total_page_views", "unique_sessions_total",
+    "unique_visitors_total", "returning_visitors_total", "returning_sessions_total",
+    "tracked_days", "event_type_counts_all",
+  ];
+  const mergedInsights = { ...result.insights };
+  for (const field of historicalFields) {
+    if (Object.hasOwn(canonicalTotals, field)) mergedInsights[field] = canonicalTotals[field];
+  }
+  const snapshot = {
+    ok: true,
+    restaurant: result.restaurant || fallbackRestaurant(slug),
+    insights: {
+      ...mergedInsights,
+      provider: "google_sheets_fallback",
+      collected_at: generatedAt,
+    },
+    generated_at: generatedAt,
+    fallback_refreshed_at: new Date().toISOString(),
+  };
+  if (env.INSIGHTS_CACHE) {
+    await env.INSIGHTS_CACHE.put(insightsSnapshotKey(filters), JSON.stringify(snapshot));
   }
   return snapshot;
 }
@@ -697,6 +799,7 @@ async function runScheduledMaintenance(controller, env) {
 
   try {
     if (await readCacheJson(env, D1_READ_BLOCK_KEY)) {
+      tasks.push(refreshInsightsFromSheets(env, { slug: "amaro", startDate: today, endDate: today }));
       await Promise.allSettled(tasks);
       return;
     }
@@ -2000,6 +2103,167 @@ async function getCatalog(db, slug) {
   return { restaurant, items: items.results || [], assets: assets.results || [] };
 }
 
+function catalogCacheKey(slug) {
+  return ["catalog", CATALOG_CACHE_VERSION, normalizeSlug(slug)].join(":");
+}
+
+async function readCatalogSnapshot(env, slug) {
+  return readCacheJson(env, catalogCacheKey(slug));
+}
+
+async function cacheCatalogSnapshot(env, slug, catalog, source) {
+  const snapshot = {
+    restaurant: catalog.restaurant || fallbackRestaurant(slug),
+    items: Array.isArray(catalog.items) ? catalog.items : [],
+    assets: Array.isArray(catalog.assets) ? catalog.assets : [],
+    catalog_source: source,
+    cached_at: new Date().toISOString(),
+  };
+  if (env.INSIGHTS_CACHE) {
+    await env.INSIGHTS_CACHE.put(catalogCacheKey(slug), JSON.stringify(snapshot));
+  }
+  return snapshot;
+}
+
+function isFreshCatalogSnapshot(snapshot) {
+  const cachedAt = Date.parse(snapshot?.cached_at || 0);
+  return Number.isFinite(cachedAt) && Date.now() - cachedAt < 5 * 60 * 1000;
+}
+
+async function fetchAmaroPublishedCatalog() {
+  const [catalogResponse, assetsResponse] = await Promise.all([
+    fetch(AMARO_PUBLISHED_CATALOG_URL, { signal: AbortSignal.timeout(5000) }),
+    fetch(AMARO_PUBLISHED_ASSETS_URL, { signal: AbortSignal.timeout(5000) }),
+  ]);
+  if (!catalogResponse.ok) throw new Error(`published_catalog_unavailable:${catalogResponse.status}`);
+  const items = await catalogResponse.json();
+  let assets = [];
+  if (assetsResponse.ok) {
+    const assetIndex = await assetsResponse.json();
+    assets = Array.isArray(assetIndex) ? assetIndex : Array.isArray(assetIndex?.assets) ? assetIndex.assets : [];
+  }
+  return {
+    restaurant: fallbackRestaurant("amaro"),
+    items: Array.isArray(items) ? items : [],
+    assets,
+  };
+}
+
+async function getRestaurantResilient(env, slugValue) {
+  const slug = normalizeSlug(slugValue);
+  const cached = await readCatalogSnapshot(env, slug);
+  if (cached?.restaurant) {
+    return { restaurant: cached.restaurant, restaurant_source: "catalog_cache" };
+  }
+  if (await readCacheJson(env, D1_READ_BLOCK_KEY)) {
+    return { restaurant: fallbackRestaurant(slug), restaurant_source: "fallback" };
+  }
+  try {
+    const restaurant = await getRestaurant(env.DB, slug);
+    return { restaurant: restaurant || fallbackRestaurant(slug), restaurant_source: restaurant ? "d1" : "fallback" };
+  } catch (error) {
+    if (!isD1CapacityError(error)) throw error;
+    await markD1ReadBlocked(env, error);
+    return { restaurant: fallbackRestaurant(slug), restaurant_source: "fallback" };
+  }
+}
+
+async function getCatalogResilient(env, slugValue) {
+  const slug = normalizeSlug(slugValue);
+  const cached = await readCatalogSnapshot(env, slug);
+  const readBlocked = await readCacheJson(env, D1_READ_BLOCK_KEY);
+  if (cached && (readBlocked || isFreshCatalogSnapshot(cached))) {
+    return { ...cached, catalog_source: readBlocked ? "kv_fallback" : "kv_fresh" };
+  }
+
+  if (!readBlocked) {
+    try {
+      const catalog = await getCatalog(env.DB, slug);
+      return cacheCatalogSnapshot(env, slug, catalog, "d1");
+    } catch (error) {
+      if (!isD1CapacityError(error)) throw error;
+      await markD1ReadBlocked(env, error);
+    }
+  }
+
+  if (cached) return { ...cached, catalog_source: "kv_fallback" };
+  if (slug === "amaro") {
+    const published = await fetchAmaroPublishedCatalog();
+    return cacheCatalogSnapshot(env, slug, published, "published_fallback");
+  }
+  return {
+    restaurant: fallbackRestaurant(slug),
+    items: [],
+    assets: [],
+    catalog_source: "empty_fallback",
+    cached_at: new Date().toISOString(),
+  };
+}
+
+async function cacheCatalogItemMutation(env, slugValue, item) {
+  const slug = normalizeSlug(slugValue);
+  const current = await getCatalogResilient(env, slug);
+  const items = current.items.filter((entry) => entry.id !== item.id);
+  items.push(item);
+  return cacheCatalogSnapshot(env, slug, { ...current, items }, current.catalog_source || "kv_mutation");
+}
+
+function optimisticCatalogItem(payload) {
+  const slug = normalizeSlug(payload.slug || "amaro");
+  const now = new Date().toISOString();
+  const sectionTitle = boundedText(payload.section_title || payload.sectionTitle || payload.category || "Catálogo", 100);
+  const sectionId = cleanIdentifier(
+    payload.section_id || payload.sectionId || normalizeKey(sectionTitle).replace(/\s+/g, "-"),
+    100,
+  ) || "catalogo";
+  return {
+    id: payload.id,
+    restaurant_id: `rest_${slug}`,
+    section_id: sectionId,
+    section_title: sectionTitle,
+    name: boundedText(payload.name, 140),
+    category: boundedText(payload.category || sectionTitle, 100),
+    description: boundedText(payload.description, 1200),
+    price: boundedText(payload.price, 40),
+    image_url: boundedText(payload.image_url || payload.imageUrl, 1000),
+    source_repo: "",
+    source_path: "",
+    source_url: "",
+    sort_order: Number.isFinite(Number(payload.sort_order ?? payload.sortOrder))
+      ? Math.max(0, Math.trunc(Number(payload.sort_order ?? payload.sortOrder)))
+      : 9999,
+    is_active: 1,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+async function saveCatalogItemResilient(env, payload) {
+  const slug = normalizeSlug(payload.slug || "amaro");
+  if (slug === "amaro") {
+    const expected = env.AMARO_ADMIN_TOKEN || "qrstack-amaro-2026";
+    if (String(payload.token || "") !== expected) throw httpError("unauthorized", 401);
+  }
+  const prepared = {
+    ...payload,
+    slug,
+    id: cleanIdentifier(payload.id || `catalog_${slug}_${crypto.randomUUID()}`, 160),
+    allow_create_with_id: !payload.id,
+  };
+  try {
+    const item = await saveCatalogItem(env.DB, prepared);
+    await cacheCatalogItemMutation(env, slug, item);
+    return { item, storage: "d1", replay_queued: false };
+  } catch (error) {
+    if (slug !== "amaro" || !isD1CapacityError(error)) throw error;
+    const item = optimisticCatalogItem(prepared);
+    const replayQueued = await enqueueDeferredMutation(env, "catalog_item", prepared);
+    if (!replayQueued) throw new Error("catalog_mutation_queue_unavailable");
+    await cacheCatalogItemMutation(env, slug, item);
+    return { item, storage: "kv_pending_d1", replay_queued: true };
+  }
+}
+
 async function saveCatalogItem(db, payload) {
   const slug = normalizeSlug(payload.slug || "amaro");
   const restaurant = await requireRestaurant(db, slug);
@@ -2013,7 +2277,7 @@ async function saveCatalogItem(db, payload) {
     ? await db.prepare("SELECT * FROM catalog_items WHERE id = ? AND restaurant_id = ? LIMIT 1")
       .bind(requestedId, restaurant.id).first()
     : null;
-  if (requestedId && !existing) throw httpError("catalog_item_not_found", 404);
+  if (requestedId && !existing && !payload.allow_create_with_id) throw httpError("catalog_item_not_found", 404);
 
   const sectionTitle = boundedText(payload.section_title || payload.sectionTitle || existing?.section_title || payload.category || "Catálogo", 100);
   const sectionId = cleanIdentifier(
@@ -2021,7 +2285,7 @@ async function saveCatalogItem(db, payload) {
     100
   ) || "catalogo";
   const now = new Date().toISOString();
-  const id = existing?.id || `catalog_${slug}_${crypto.randomUUID()}`;
+  const id = existing?.id || requestedId || `catalog_${slug}_${crypto.randomUUID()}`;
   let sortOrder = Number(payload.sort_order ?? payload.sortOrder ?? existing?.sort_order);
   if (!Number.isFinite(sortOrder)) {
     const last = await db.prepare(`
@@ -2409,7 +2673,18 @@ async function saveMenuDay(env, payload) {
     return { ...saved, storage: "d1" };
   } catch (error) {
     if (slug !== "amaro" || !isD1CapacityError(error)) throw error;
-    return { ...cachedPayload, duplicate: false, storage: "kv_pending_d1", fallback_reason: "d1_read_quota" };
+    const replayQueued = await enqueueDeferredMutation(env, "menu_day", {
+      ...payload,
+      slug,
+      menu_id: cachedPayload.menu.id,
+    });
+    return {
+      ...cachedPayload,
+      duplicate: false,
+      storage: "kv_pending_d1",
+      fallback_reason: "d1_read_quota",
+      replay_queued: replayQueued,
+    };
   }
 }
 
