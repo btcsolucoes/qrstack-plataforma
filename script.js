@@ -77,7 +77,7 @@ const DEFAULT_STATE = {
 };
 
 const STORE_KEY = "qrstack-platform-v4-amaro";
-const INSIGHTS_CACHE_KEY = "qrstack-insights-html-cache-v4";
+const INSIGHTS_CACHE_KEY = "qrstack-insights-html-cache-v5-workspace";
 const MENU_SUBMISSION_PREFIX = "qrstack:menu-submission:";
 const insightsOpenedThisSession = new Set();
 const app = document.getElementById("app");
@@ -490,6 +490,10 @@ async function router() {
   const hash = window.location.hash.replace(/^#\/?/, "");
   const [path, hashQuery = ""] = hash.split("?");
   const parts = path.split("/").filter(Boolean);
+  document.body.classList.toggle("public-mode", parts[0] === "r");
+  document.getElementById("public-styles").disabled = parts[0] !== "r";
+  document.body.classList.remove("navigation-open");
+  window.scrollTo(0, 0);
   const params = new URLSearchParams(hashQuery || window.location.search);
   const source = resolveTrafficSource(params).source;
 
@@ -511,6 +515,8 @@ function renderOwnerRoute(tab, params) {
 
 async function renderClientRoute(slug, params, version) {
   const localRestaurant = getRestaurant(slug);
+  workspaceClientView = params.get("view") || "formulario";
+  app.innerHTML = renderWorkspace({ client: true, restaurant: localRestaurant, active: "formulario", title: "Cardápio do dia", content: renderWorkspaceLoading("Sincronizando o cardápio e os pratos...") });
   if (hasClientAccess(localRestaurant, params)) return renderClientPortal(slug, version);
   const restaurant = await syncRestaurantFromApi(slug);
   if (!isCurrentRoute(version)) return;
@@ -981,42 +987,23 @@ function trackEvent(restaurant, eventType, source = "", menuDayId = null) {
 function renderHome() {
   setSystemTheme();
   const restaurant = getRestaurant(ACTIVE_CLIENT_SLUG);
-  const ownerHasSession = hasRememberedAccess(OWNER_SESSION_KEY);
-  const clientHasSession = hasRememberedAccess(clientSessionKey(restaurant));
+  const owner = hasRememberedAccess(OWNER_SESSION_KEY);
+  const client = hasRememberedAccess(clientSessionKey(restaurant));
   app.innerHTML = `
-    <section class="entry-screen">
-      <div class="entry-shell">
-        <header class="entry-header">
-          <img src="${ASSETS.qrstackWordmark}" alt="QrStack" />
-          <div>
-            <p class="eyebrow">Plataforma QrStack</p>
-            <h1>Escolha seu acesso</h1>
-            <p>Três destinos, cada um com uma função clara.</p>
-          </div>
-        </header>
-        <div class="entry-grid">
-          <a class="entry-card entry-card--owner" href="${ownerHasSession ? ownerLink("overview") : "#/hq"}">
-            <span class="entry-card__index">01</span>
-            <h2>Central QrStack</h2>
-            <p>Clientes, respostas, banco de pratos e Insights.</p>
-            <strong>${ownerHasSession ? "Continuar na Central" : "Acesso interno"}</strong>
-          </a>
-          <a class="entry-card entry-card--restaurant" href="${clientHasSession ? clientPortalLink(restaurant) : `#/cliente/${restaurant.slug}`}">
-            <span class="entry-card__index">02</span>
-            <h2>Portal do restaurante</h2>
-            <p>Formulário diário e publicação do cardápio.</p>
-            <strong>${clientHasSession ? `Continuar como ${restaurant.name}` : "Acesso privado"}</strong>
-          </a>
-          <a class="entry-card entry-card--menu" href="${publicMenuHash(restaurant, "platform")}">
-            <span class="entry-card__index">03</span>
-            <h2>Cardápio público</h2>
-            <p>Visualização fiel do cardápio que o cliente acessa.</p>
-            <strong>Abrir cardápio</strong>
-          </a>
+    <div class="access-screen">
+      <header>${workspaceBrand()}<span>Seu negócio. Mais conectado.</span></header>
+      <main class="access-content">
+        <p class="eyebrow">Bem-vindo à QrStack</p>
+        <h1>Seu próximo passo<br>começa aqui.</h1>
+        <p class="muted">Escolha o seu espaço de trabalho.</p>
+        <div class="access-options">
+          <a href="${owner ? ownerLink() : "#/hq"}">${uiIcon("chart-no-axes-combined")}<span><strong>Central QrStack</strong><small>Gestão e resultados dos restaurantes</small></span>${uiIcon("arrow-up-right")}</a>
+          <a href="${client ? clientPortalLink(restaurant) : "#/cliente/" + restaurant.slug}">${uiIcon("store")}<span><strong>Sou restaurante</strong><small>Cardápio do dia e catálogo de pratos</small></span>${uiIcon("arrow-up-right")}</a>
+          <a href="${publicMenuHash(restaurant, "platform")}">${uiIcon("utensils")}<span><strong>Ver o cardápio</strong><small>${escapeHtml(restaurant.name)}</small></span>${uiIcon("arrow-up-right")}</a>
         </div>
-      </div>
-    </section>
-  `;
+      </main>
+      <footer>QrStack Workspace <span>Cardápios. Conexões. Resultados.</span></footer>
+    </div>`;
 }
 
 function renderOwnerGate() {
@@ -1065,37 +1052,32 @@ function renderClientGate(restaurant) {
 
 function renderHq(tab = "overview") {
   setSystemTheme();
-  const restaurants = state.restaurants;
-  app.innerHTML = `
-    <div class="admin-layout">
-      ${renderAdminHero("Central QrStack", "Sua visão interna dos clientes, formulários, respostas e insights.", ASSETS.qrstackMark)}
-      ${renderTopbar([
-        [ownerLink("overview"), "Visão Geral", tab === "overview"],
-        [ownerLink("clientes"), "Clientes", tab === "clientes"],
-        [ownerLink("respostas"), "Respostas", tab === "respostas"],
-        [ownerLink("banco"), "Banco", tab === "banco"],
-        [ownerLink("cardapios"), "Cardápios", tab === "cardapios"],
-        ...(STORY_AUTOMATION_ENABLED ? [[ownerLink("stories"), "Stories", tab === "stories"]] : []),
-        [ownerLink("insights"), "Insights", tab === "insights"],
-      ])}
-      <main class="page">
-        ${tab === "clientes" ? renderHqClients(restaurants) : ""}
-        ${tab === "respostas" ? renderHqResponses() : ""}
-        ${tab === "banco" ? renderHqCatalogBank() : ""}
-        ${tab === "cardapios" ? renderHqPublicMenus() : ""}
-        ${tab === "stories" && STORY_AUTOMATION_ENABLED ? renderHqStories() : ""}
-        ${tab === "insights" ? renderHqInsights() : ""}
-        ${tab === "overview" ? renderHqOverview() : ""}
-      </main>
-    </div>
-  `;
+  const titles = { overview: "Visão geral", clientes: "Restaurantes", respostas: "Respostas", banco: "Pratos e marca", cardapios: "Cardápios e links", insights: "Insights", stories: "Stories" };
+  if (!titles[tab] || (tab === "stories" && !STORY_AUTOMATION_ENABLED)) tab = "overview";
+  const restaurant = state.restaurants[0];
+  const content = {
+    overview: renderHqOverview,
+    clientes: () => renderHqClients(state.restaurants),
+    respostas: renderHqResponses,
+    banco: renderHqCatalogBank,
+    cardapios: renderHqPublicMenus,
+    insights: renderHqInsights,
+    stories: renderHqStories,
+  }[tab]();
+  app.innerHTML = renderWorkspace({
+    active: tab, title: titles[tab], restaurant, content,
+    subtitle: { overview: "Bem-vindo de volta. Vamos acompanhar o que importa.", insights: "Entenda cada acesso. Encontre a próxima oportunidade.", banco: "O catálogo e a identidade de cada restaurante.", respostas: "Publicações recebidas pela plataforma e pelo Google Forms." }[tab] || "",
+    actions: tab === "insights" ? `<a class="button secondary" href="${publicMenuHash(restaurant, "hq")}">${uiIcon("external-link")}Ver cardápio</a>` : "",
+  });
   if (tab === "insights") {
-    const restaurant = restaurants[0];
-    const shouldRefreshOnOpen = !insightsOpenedThisSession.has(restaurant.slug);
+    setWorkspaceInsightsView();
+    const refreshAfterLoad = !insightsOpenedThisSession.has(restaurant.slug);
     insightsOpenedThisSession.add(restaurant.slug);
-    hydrateInsights(restaurant, { refreshAfterLoad: shouldRefreshOnOpen });
+    hydrateInsights(restaurant, { refreshAfterLoad });
   }
+  if (tab === "overview") hydrateWorkspaceOverview();
   if (tab === "respostas") hydrateMenuResponses();
+  if (tab === "banco") hydrateWorkspaceCatalog();
 }
 
 function renderAdminHero(title, subtitle, logoUrl) {
@@ -1134,75 +1116,11 @@ function renderTopbar(links, restaurant = null, brandHref = null) {
 }
 
 function renderHqOverview() {
-  const totalRestaurants = state.restaurants.length;
-  const todayEvents = state.events.filter((event) => isToday(event.createdAt)).length;
-  const menus = state.menuDays.length;
-  const catalogItems = getAllCatalogItems().length;
-  return `
-    <section class="section">
-      <div class="section__head">
-        <p class="eyebrow">Operação</p>
-        <h2>Painel central dos clientes</h2>
-        <p>Aqui ficam seus restaurantes, respostas recebidas, banco de pratos com fotos, links dos cardápios públicos e insights internos.</p>
-      </div>
-      <div class="grid grid--three">
-        ${metric("Clientes", totalRestaurants)}
-        ${metric("Pratos no banco", catalogItems)}
-        ${metric("Cardápios", menus)}
-      </div>
-      <div class="grid grid--three">
-        ${metric("Acessos hoje", todayEvents)}
-        ${metric("Fotos", getAllCatalogItems().filter((item) => item.image_url).length)}
-      </div>
-      <div class="card">
-        <h3>Próxima automação</h3>
-        <p class="muted">A estrutura de lembretes já está modelada por cliente. No futuro, a API de WhatsApp usa horário, status ativo/inativo e mensagem padrão para enviar o link do painel.</p>
-      </div>
-      <div class="card">
-        <h3>Como substitui o Google Forms</h3>
-        <p class="muted">No Amaro, o cardápio público busca um endpoint do Google Apps Script, filtra as respostas da planilha pela data de hoje e renderiza o almoço automaticamente. Na QrStack, os dados gerenciais e os analytics ficam no Cloudflare D1, enquanto o GitHub segue só para código/deploy.</p>
-      </div>
-      <div class="card">
-        <h3>Cardápios publicados</h3>
-        <p class="muted">${menus} publicação cadastrada na plataforma.</p>
-      </div>
-    </section>
-  `;
+  return renderWorkspaceOverview();
 }
 
 function renderHqClients(restaurants) {
-  return `
-    <section class="section">
-      <div class="section__head">
-        <p class="eyebrow">Clientes</p>
-        <h2>Restaurantes cadastrados</h2>
-        <p>Links internos para você copiar, conferir o formulário e abrir o cardápio público de cada cliente.</p>
-      </div>
-      <div class="grid">
-        ${restaurants
-          .map(
-            (restaurant) => `
-              <article class="card">
-                <p class="eyebrow">${restaurant.slug}</p>
-                <h3>${restaurant.name}</h3>
-                <p class="muted">${restaurant.address || "Endereço não informado"}</p>
-                <div class="brand-swatch">
-                  <span style="background:${restaurant.primaryColor}"></span>
-                  <span style="background:${restaurant.secondaryColor}"></span>
-                  <img src="${restaurant.logoUrl}" alt="${restaurant.name}" />
-                </div>
-                <div class="actions">
-                  <a class="button" href="${clientPortalLink(restaurant)}">Link do restaurante</a>
-                  <button type="button" class="secondary" data-copy="${escapeAttr(restaurantAccessUrl(restaurant))}">Copiar acesso</button>
-                  <a class="button secondary" href="${publicMenuHash(restaurant, "hq")}">Cardápio público</a>
-                </div>
-              </article>
-            `
-          )
-          .join("")}
-      </div>
-    </section>
-  `;
+  return `<section class="workspace-restaurants"><div class="section-title-row"><h2>Restaurantes cadastrados</h2><span>${restaurants.length} ${restaurants.length === 1 ? "restaurante" : "restaurantes"}</span></div>${restaurants.map((restaurant) => `${renderRestaurantRow(restaurant)}<div class="restaurant-context-links"><a class="text-link" href="${ownerLink("insights")}">${uiIcon("chart-no-axes-combined")}Insights</a><button type="button" class="text-link" data-copy="${escapeAttr(restaurantAccessUrl(restaurant))}">${uiIcon("copy")}Copiar acesso do restaurante</button><a class="text-link" href="${ownerLink("cardapios")}">${uiIcon("link")}Links de divulgação</a></div>`).join("")}</section>`;
 }
 
 function renderHqResponses() {
@@ -1325,69 +1243,7 @@ function renderHqStories() {
 }
 
 function renderHqCatalogBank() {
-  const databases = getAllRestaurantDatabases();
-  const catalog = databases.flatMap((database) => database.dishes);
-  const assets = databases.flatMap((database) => database.assets);
-  return `
-    <section class="section">
-      <div class="section__head">
-        <p class="eyebrow">Banco QrStack</p>
-        <h2>Banco por restaurante</h2>
-        <p>Cada cliente tem uma base separada com pratos, preços, fotos, logo e origem do repositório GitHub Pages usado no cardápio.</p>
-      </div>
-      <div class="grid grid--three">
-        ${metric("Pratos", catalog.length)}
-        ${metric("Fotos e logos", assets.length)}
-        ${metric("Repos conectados", databases.filter((database) => database.source.isConnected).length)}
-      </div>
-      ${databases
-        .map((database) => {
-          const { restaurant, source, dishes, assets: restaurantAssets, logoAssets, dishPhotos } = database;
-          const groups = groupBy(dishes, "section_title");
-          return `
-            <div class="section restaurant-database">
-              <div class="section__head">
-                <p class="eyebrow">${source.isConnected ? "GitHub Pages conectado" : "Banco local"}</p>
-                <h3>${restaurant.name}</h3>
-              </div>
-              <div class="grid grid--three">
-                ${databaseSourceCard(database)}
-                ${databaseAssetSummaryCard(database)}
-                ${databaseLinksCard(database)}
-              </div>
-              ${restaurantAssets.length ? `
-                <div class="section catalog-section">
-                  <div class="section__head">
-                    <p class="eyebrow">${restaurantAssets.length} arquivos</p>
-                    <h3>Fotos usadas e identidade</h3>
-                  </div>
-                  <div class="asset-grid">
-                    ${logoAssets.map((asset) => renderAssetCard(asset, true)).join("")}
-                    ${dishPhotos.slice(0, 12).map((asset) => renderAssetCard(asset)).join("")}
-                  </div>
-                </div>
-              ` : ""}
-              ${Object.entries(groups)
-                .map(
-                  ([category, categoryItems]) => `
-                    <div class="section catalog-section">
-                      <div class="section__head">
-                        <p class="eyebrow">${categoryItems.length} itens</p>
-                        <h3>${category}</h3>
-                      </div>
-                      <div class="rail">
-                        ${categoryItems.map((item) => renderMenuItemCard(item, true, restaurant)).join("")}
-                      </div>
-                    </div>
-                  `
-                )
-                .join("")}
-            </div>
-          `;
-        })
-        .join("")}
-    </section>
-  `;
+  return renderWorkspaceCatalog();
 }
 
 function databaseSourceCard(database) {
@@ -1447,133 +1303,27 @@ function renderAssetCard(asset, featured = false) {
 }
 
 function renderHqPublicMenus() {
-  const menus = state.restaurants
-    .map((restaurant) => {
-      const menu = getLatestMenu(restaurant.id);
-      const itemCount = menu ? getMenuItems(menu.id).length : 0;
-      const publicUrl = restaurantPublicUrl(restaurant);
-      const qrUrl = restaurantOriginalMenuUrl(restaurant, "qr");
-      const instagramUrl = restaurantOriginalMenuUrl(restaurant, "instagram");
-      const whatsappUrl = restaurantOriginalMenuUrl(restaurant, "whatsapp");
-      const privateUrl = restaurantAccessUrl(restaurant);
-      return `
-        <article class="card public-menu-card">
-          <div class="public-menu-card__brand">
-            <img src="${restaurant.logoUrl}" alt="${restaurant.name}" />
-            <div>
-              <p class="eyebrow">${restaurant.slug}</p>
-              <h3>${restaurant.name}</h3>
-              <p class="muted">${restaurant.address || "Endereço não informado"}</p>
-            </div>
-          </div>
-          <div class="table">
-            <div class="table-row"><span>Última publicação</span><strong>${menu ? formatDate(menu.date) : "Nenhuma"}</strong></div>
-            <div class="table-row"><span>Itens do dia</span><strong>${itemCount}</strong></div>
-            <div class="table-row"><span>Preço exibido</span><strong>${menu ? priceSummary(menu, getMenuItems(menu.id)) : "Consulte"}</strong></div>
-          </div>
-          <p class="copy-url">${publicUrl}</p>
-          <p class="copy-url">QR: ${qrUrl}</p>
-          <p class="copy-url">Instagram: ${instagramUrl}</p>
-          <p class="copy-url">WhatsApp: ${whatsappUrl}</p>
-          <p class="copy-url">${privateUrl}</p>
-              <div class="actions">
-            <a class="button" href="${publicMenuHash(restaurant, "hq")}">Abrir cardápio</a>
-            <a class="button secondary" href="${clientPortalLink(restaurant)}">Atualizar</a>
-            <button type="button" class="secondary" data-copy="${escapeAttr(privateUrl)}">Copiar acesso</button>
-            <button type="button" class="ghost" data-copy="${escapeAttr(qrUrl)}">Copiar QR</button>
-            <button type="button" class="ghost" data-copy="${escapeAttr(instagramUrl)}">Copiar Instagram</button>
-            <button type="button" class="ghost" data-copy="${escapeAttr(whatsappUrl)}">Copiar WhatsApp</button>
-          </div>
-        </article>
-      `;
-    })
-    .join("");
-  return `
-    <section class="section">
-      <div class="section__head">
-        <p class="eyebrow">Cardápios públicos</p>
-        <h2>Links que os clientes acessam</h2>
-        <p>Aqui você confere o cardápio final de cada restaurante, o link de QR Code e o status da última publicação.</p>
-      </div>
-      <div class="grid">${menus}</div>
-    </section>
-  `;
+  return renderWorkspaceLinks();
 }
 
 function renderHqInsights() {
-  const grouped = groupBy(state.events, "source");
-  const clicksWhats = state.events.filter((event) => event.eventType === "whatsapp_click").length;
-  const clicksMaps = state.events.filter((event) => event.eventType === "maps_click").length;
-  const localSourceCounts = Object.fromEntries(Object.entries(grouped).map(([source, events]) => [source, events.length]));
   return `
-    <section class="section insights-page">
-      <div class="section__head">
-        <p class="eyebrow">Insights internos</p>
-        <h2>Dashboard de acessos</h2>
-        <p>Leitura rápida de tráfego, origem dos acessos, ações importantes e comportamento do cardápio público.</p>
-      </div>
-      <form class="card insights-filter" data-insights-filter>
-        <div>
-          <p class="eyebrow">Período</p>
-          <h3>Recorte do dashboard</h3>
-          <p class="muted">Escolha um período para comparar acessos, origem e ações registradas.</p>
-        </div>
-        <div class="insights-filter__presets">
-          <button type="button" class="secondary" data-insights-preset="today" aria-pressed="false">Hoje</button>
-          <button type="button" class="secondary" data-insights-preset="7" aria-pressed="false">7 dias</button>
-          <button type="button" class="secondary" data-insights-preset="30" aria-pressed="false">30 dias</button>
-          <button type="button" class="secondary is-active" data-insights-preset="all" aria-pressed="true">Todos</button>
+    <section class="insights-page">
+      <form class="insights-filter" data-insights-filter>
+        <div class="insights-filter__presets" aria-label="Períodos">
+          ${[["today", "Hoje"], ["7", "7 dias"], ["30", "30 dias"], ["all", "Todos"]].map(([value, label]) => `<button type="button" data-insights-preset="${value}" class="${value === "all" ? "is-active" : ""}" aria-pressed="${value === "all"}">${label}</button>`).join("")}
         </div>
         <div class="insights-filter__dates">
-          <label>
-            Início
-            <input type="date" name="startDate" value="" />
-          </label>
-          <label>
-            Fim
-            <input type="date" name="endDate" value="" />
-          </label>
-          <button type="submit">Aplicar</button>
+          <label><span>De</span><input type="date" name="startDate" aria-label="Data inicial" /></label>
+          <label><span>Até</span><input type="date" name="endDate" aria-label="Data final" /></label>
+          <button type="submit">${uiIcon("refresh-cw")}Aplicar</button>
         </div>
       </form>
-      <div id="insights-live" class="insights-dashboard">
-        <article class="card dashboard-hero">
-          <div>
-            <p class="eyebrow">Carregando</p>
-            <h3>Buscando analytics reais</h3>
-            <p class="muted">A plataforma está carregando o consolidado salvo na base analítica QrStack.</p>
-          </div>
-          <span class="status-pill status-pill--pending">Sincronizando</span>
-        </article>
+      <div class="insights-tabs" role="tablist" aria-label="Análises">
+        ${[["overview", "Visão geral"], ["audience", "Público e origens"], ["dishes", "Pratos"], ["technical", "Diagnóstico"]].map(([id, label]) => `<button type="button" role="tab" id="tab-${id}" aria-controls="panel-${id}" data-insight-view="${id}">${label}</button>`).join("")}
       </div>
-      <details class="local-insights card">
-        <summary>
-          <span>
-            <span class="eyebrow">Diagnóstico</span>
-            <strong>Eventos deste navegador</strong>
-          </span>
-          <small>${formatNumber(state.events.length)} evento(s) local(is)</small>
-        </summary>
-        <div class="local-insights__content">
-          <p class="muted">Área técnica para testes. Estes números ficam separados dos analytics reais da base QrStack.</p>
-          <div class="compact-kpis">
-            ${insightKpi("Eventos locais", state.events.length)}
-            ${insightKpi("WhatsApp", clicksWhats)}
-            ${insightKpi("Como chegar", clicksMaps)}
-            ${insightKpi("7 dias locais", lastDaysEvents(7).length)}
-          </div>
-          <div class="dashboard-grid dashboard-grid--two">
-            ${renderInsightBars("Origem local", localSourceCounts, { empty: "Sem eventos locais registrados ainda." })}
-            <article class="insight-card local-peak">
-              <p class="eyebrow">Pico local</p>
-              <h3>Horário de pico</h3>
-              <p class="muted">${peakHour()}</p>
-            </article>
-          </div>
-        </div>
-      </details>
-    </section>
-  `;
+      <div id="insights-live" class="insights-dashboard" aria-live="polite">${renderWorkspaceLoading("Carregando os dados do restaurante...")}</div>
+    </section>`;
 }
 
 async function renderClientPortal(slug, version, { skipCatalogSync = false } = {}) {
@@ -1589,19 +1339,9 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
   const menu = remote.menu || createBlankMenu(restaurant.id);
   const menuItems = remote.items.length ? remote.items : getMenuItems(menu.id);
   const storyLink = menu.storyLink || restaurantStoryLink(restaurant);
-  setTheme(restaurant);
-  app.innerHTML = `
-    <div class="client-form-shell">
-      <header class="client-form-header">
-        <img src="${restaurant.logoUrl}" alt="${restaurant.name}" />
-        <div>
-          <p class="eyebrow">QrStack</p>
-          <h1>${restaurant.name}</h1>
-          <p>Atualize e publique o cardápio do dia.</p>
-        </div>
-      </header>
-      ${renderClientTopbar(restaurant)}
-      <main class="client-form-page">
+  setSystemTheme();
+  const content = `
+    <div class="client-form-page">
         <section class="section client-step" id="formulario">
           <div class="section__head">
             <p class="eyebrow">Formulário</p>
@@ -1660,10 +1400,18 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
             </div>
           </div>
         </section>` : ""}
-      </main>
     </div>
   `;
+  app.innerHTML = renderWorkspace({ client: true, active: workspaceClientView, title: "Cardápio do dia", restaurant, content, actions: `<a class="button secondary" href="${publicMenuHash(restaurant, "cliente")}">${uiIcon("external-link")}Ver cardápio</a>` });
   attachClientHandlers(restaurant, menu);
+  setWorkspaceClientView(workspaceClientView);
+  const requestedDish = new URLSearchParams(location.hash.split("?")[1] || "").get("dish");
+  if (requestedDish) {
+    document.querySelector(`[data-catalog-id="${CSS.escape(requestedDish)}"]`)?.click();
+    const routeParams = new URLSearchParams(location.hash.split("?")[1] || "");
+    routeParams.delete("dish");
+    history.replaceState(null, "", location.hash.split("?")[0] + "?" + routeParams);
+  }
   if (STORY_AUTOMATION_ENABLED) drawStory(restaurant, menu, getMenuItems(menu.id));
 }
 
@@ -1772,7 +1520,9 @@ function renderCatalogManager(restaurant) {
   const sections = [...new Map(catalog.map((item) => [item.section_id, item.section_title || item.category || "Catálogo"])).entries()];
   return `
     <div class="catalog-manager-layout">
-      <form id="catalog-item-form" class="card form-grid catalog-editor">
+      <dialog id="catalog-dialog" class="catalog-dialog">
+      <div class="dialog-header"><div><p class="eyebrow">Catálogo</p><h2 id="catalog-dialog-title">Novo prato</h2></div><button class="icon-button" type="button" data-close-catalog aria-label="Fechar edição">${uiIcon("x")}</button></div>
+      <form id="catalog-item-form" class="form-grid catalog-editor">
         <input type="hidden" name="catalogItemId" value="" />
         <div class="field field--full">
           <label for="catalog-name">Nome do prato</label>
@@ -1806,7 +1556,9 @@ function renderCatalogManager(restaurant) {
           <button type="reset" class="secondary">Limpar</button>
         </div>
       </form>
-      <div class="card catalog-library">
+      </dialog>
+      <div class="catalog-library">
+        <div class="section-title-row"><span>${catalog.length} pratos no catálogo</span><button type="button" data-catalog-create>${uiIcon("plus")}Novo prato</button></div>
         <div class="field">
           <label for="catalog-search">Buscar no catálogo</label>
           <input id="catalog-search" type="search" placeholder="Digite o nome do prato" />
@@ -1819,7 +1571,7 @@ function renderCatalogManager(restaurant) {
                 <strong>${escapeHtml(item.name)}</strong>
                 <small>${escapeHtml(item.price || "Sem preço informado")}</small>
               </div>
-              <button type="button" class="ghost catalog-edit" data-catalog-id="${escapeAttr(item.id)}">Editar</button>
+              <button type="button" class="icon-button catalog-edit" data-catalog-id="${escapeAttr(item.id)}" aria-label="Editar ${escapeAttr(item.name)}" title="Editar prato">${uiIcon("pencil")}</button>
             </article>
           `).join("")}
         </div>
@@ -1838,15 +1590,16 @@ function attachClientHandlers(restaurant, menu) {
   }
   menuForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (event.currentTarget.dataset.submitting === "true") return;
-    event.currentTarget.dataset.submitting = "true";
-    const submitButton = event.currentTarget.querySelector('button[type="submit"]');
+    const form = event.currentTarget;
+    if (form.dataset.submitting === "true") return;
+    form.dataset.submitting = "true";
+    const submitButton = form.querySelector('button[type="submit"]');
     if (submitButton) {
       submitButton.disabled = true;
       submitButton.textContent = "Preparando publicação...";
     }
     if (restaurant.slug === "amaro" && hasRepeatedMenuSelections(event.currentTarget)) {
-      delete event.currentTarget.dataset.submitting;
+      delete form.dataset.submitting;
       if (submitButton) {
         submitButton.disabled = false;
         submitButton.textContent = STORY_AUTOMATION_ENABLED ? "Enviar e publicar Story" : "Enviar e publicar cardápio";
@@ -1890,6 +1643,11 @@ function attachClientHandlers(restaurant, menu) {
             : "Story enviado ao telefone QrStack."
       );
     } catch (error) {
+      if (!STORY_AUTOMATION_ENABLED) {
+        console.warn("QrStack menu publication unavailable:", error);
+        toast("Não foi possível confirmar a publicação. Suas escolhas foram mantidas; tente enviar novamente.");
+        return;
+      }
       console.warn("QrStack automated Story queue unavailable:", error);
       setStoryAutomationStatus(
         "failed_attention",
@@ -1897,7 +1655,7 @@ function attachClientHandlers(restaurant, menu) {
       );
       toast("Não foi possível colocar o Story na fila automática.");
     } finally {
-      delete event.currentTarget.dataset.submitting;
+      delete form.dataset.submitting;
       if (!submitButton || !document.body.contains(submitButton)) return;
       submitButton.disabled = false;
       submitButton.textContent = STORY_AUTOMATION_ENABLED ? "Enviar e publicar Story" : "Enviar e publicar cardápio";
@@ -1959,6 +1717,8 @@ function attachCatalogManagerHandlers(restaurant) {
         form.elements.catalogNewSection.value = catalogItem.section_title || catalogItem.category || "";
       }
       syncNewSectionField();
+      document.getElementById("catalog-dialog-title").textContent = "Editar prato";
+      document.getElementById("catalog-dialog").showModal();
       form.scrollIntoView({ behavior: "smooth", block: "start" });
       form.elements.catalogName.focus({ preventScroll: true });
     });
@@ -2017,7 +1777,7 @@ function attachCatalogManagerHandlers(restaurant) {
       runtimeCatalogs.set(restaurant.id, nextCatalog);
       toast(form.elements.catalogItemId.value ? "Prato atualizado no cardápio." : "Prato adicionado ao cardápio.");
       await renderClientPortal(restaurant.slug, routeVersion, { skipCatalogSync: true });
-      document.getElementById("catalog-manager")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      setWorkspaceClientView("catalog-manager");
     } catch (error) {
       console.warn("QrStack catalog save unavailable:", error);
       toast("Não foi possível salvar o prato. Tente novamente.");
@@ -2389,6 +2149,8 @@ function renderFullCatalog(restaurant) {
 async function hydrateInsights(restaurant, options = {}) {
   const target = document.getElementById("insights-live");
   if (!target || !restaurant) return;
+  const requestId = String(Number(target.dataset.requestId || 0) + 1);
+  target.dataset.requestId = requestId;
   const forceRefresh = options.forceRefresh === true;
   const refreshAfterLoad = options.refreshAfterLoad === true;
   const silentRefresh = options.silentRefresh === true;
@@ -2396,6 +2158,7 @@ async function hydrateInsights(restaurant, options = {}) {
   const cachedBeforeFetch = getCachedInsightsHtml(restaurant, filters);
   if (cachedBeforeFetch?.html && !forceRefresh) {
     target.innerHTML = cachedBeforeFetch.html;
+    setWorkspaceInsightsView();
   }
   const applyButton = document.querySelector('[data-insights-filter] button[type="submit"]');
   if (forceRefresh && !silentRefresh && applyButton) {
@@ -2413,6 +2176,7 @@ async function hydrateInsights(restaurant, options = {}) {
       refresh: forceRefresh ? "1" : "",
       refresh_nonce: forceRefresh ? Date.now() : "",
     });
+    if (!target.isConnected || target.dataset.requestId !== requestId) return;
     const insights = data.insights || {};
     const sourceCounts = normalizeCountKeys(insights.source_counts || {}, normalizeSource);
     const eventTypeCounts = insights.event_type_counts || {};
@@ -2488,180 +2252,94 @@ async function hydrateInsights(restaurant, options = {}) {
     const topCategory = sortedCountEntries(dishCategoryCounts)[0];
     const topDevice = sortedCountEntries(deviceCounts)[0];
     target.innerHTML = `
-      <article class="card dashboard-hero">
-        <div>
-          <p class="eyebrow">Analytics reais</p>
-          <h3>${restaurant.name} · ${periodLabel}</h3>
-          <p class="muted">Dados carregados da base analítica QrStack. A leitura abaixo separa origem, volume, visitantes únicos, dispositivos e ações de intenção.</p>
+      <div class="dashboard-status">
+        <div><strong>${escapeHtml(restaurant.name)}</strong><span>${periodLabel}</span></div>
+        <div class="dashboard-status__sync"><span class="status-pill ${fallbackActive || cachedDashboard ? "status-pill--pending" : ""}" title="${escapeAttr(collectionDetail)}">${fallbackActive ? "Contingência ativa" : cachedDashboard ? "Leitura salva" : "Coleta ativa"}</span><small>Atualizado: ${collectedAt}</small></div>
+      </div>
+      <section id="panel-overview" data-insight-panel="overview" role="tabpanel" aria-labelledby="tab-overview">
+        <div class="kpi-strip">
+          ${workspaceKpi("Acessos ao cardápio", periodAccesses, "Aberturas no período", "scan-line", true)}
+          ${workspaceKpi("Visitantes únicos", uniqueVisitors, `${formatNumber(uniqueSessions)} sessões no período`, "users")}
+          ${workspaceKpi("Visitantes recorrentes", returningVisitors, `${formatPercentNumber(returnRate)} dos visitantes`, "refresh-cw")}
+          ${workspaceKpi("Instagram → Direto", instagramToDirectVisitors, `${formatNumber(instagramToDirectSessions)} sessões posteriores`, "arrow-up-right")}
         </div>
-        <div class="dashboard-hero__status">
-          <span class="status-pill">${collectionLabel}</span>
-          <small>${collectionDetail}</small>
-          <small>Atualizado: ${collectedAt}</small>
-          ${testEvents ? `<small>${formatNumber(testEvents)} evento(s) de teste filtrado(s)</small>` : ""}
+        <div class="dashboard-grid dashboard-grid--main">
+          ${renderAreaChart("Acessos ao longo do tempo", dailyAccesses, { empty: "Nenhum acesso registrado no período.", labeler: formatDateShort })}
+          ${renderDonutChart("De onde vêm os acessos", sourceCounts, { labeler: formatSourceLabel })}
         </div>
-      </article>
-      <section class="history-overview" aria-label="Histórico completo">
-        <div class="history-overview__heading">
-          <div>
-            <p class="eyebrow">Histórico completo</p>
-            <h3>Todos os dados preservados desde o início da coleta</h3>
-          </div>
-          <span>${formatNumber(trackedDays)} dia(s) consolidados</span>
+        <div class="dashboard-grid dashboard-grid--two">
+          ${renderColumnChart("Horários de acesso", hourCounts, { labeler: formatHourLabel })}
+          <article class="insight-chart"><div class="chart-heading"><span class="eyebrow">Em destaque</span><h3>O que movimenta o cardápio</h3></div>${renderInsightHighlights([
+            ["Origem principal", topSource ? formatSourceLabel(topSource[0]) : "Sem dados", topSource ? formatNumber(topSource[1]) + " acessos" : ""],
+            ["Prato com maior atenção", topDish ? topDish[0] : "Sem dados", topDish ? formatScore(topDish[1]) + " pontos" : ""],
+            ["Mais observado", topObservedDish ? topObservedDish[0] : "Sem dados", topObservedDish ? formatDurationShort(topObservedDish[1]) : ""],
+          ])}</article>
         </div>
-        <div class="history-metrics">
-          ${insightKpi("Todos os acessos", totalAccesses ?? periodAccesses, "aberturas do cardápio")}
-          ${insightKpi("Pessoas únicas", uniqueVisitorsTotal, "IDs de visitante ou sessão")}
-          ${insightKpi("Pessoas que voltaram", returningVisitorsTotal, "em duas ou mais sessões")}
-          ${insightKpi("Sessões de retorno", returningSessionsTotal, "sessões além da primeira")}
-          ${insightKpi("Todas as sessões", uniqueSessionsTotal, "sessões identificadas")}
-          ${insightKpi("Todas as interações", totalEvents, "eventos preservados")}
-        </div>
+        <details class="history-overview"><summary><span>${uiIcon("layers")}Histórico completo</span><small>${formatNumber(trackedDays)} dias consolidados</small>${uiIcon("chevron-down")}</summary><div class="history-metrics">
+          ${insightKpi("Todos os acessos", totalAccesses ?? periodAccesses, "Aberturas do cardápio")}
+          ${insightKpi("Visitantes únicos", uniqueVisitorsTotal, "IDs de visitante ou sessão")}
+          ${insightKpi("Visitantes recorrentes", returningVisitorsTotal, "Duas ou mais sessões")}
+          ${insightKpi("Sessões de retorno", returningSessionsTotal, "Além da primeira sessão")}
+          ${insightKpi("Todas as sessões", uniqueSessionsTotal, "Sessões identificadas")}
+          ${insightKpi("Todas as interações", totalEvents, "Eventos registrados")}
+        </div></details>
       </section>
-      <section class="control-room">
-        <article class="card command-panel">
-          <div class="command-panel__copy">
-            <p class="eyebrow">Leitura executiva</p>
-            <h3>${formatNumber(periodAccesses)} acessos no recorte</h3>
-            <p class="muted">O filtro atual contém ${formatNumber(uniqueVisitors)} pessoa(s), ${formatNumber(uniqueSessions)} sessão(ões) e ${formatNumber(periodEvents)} interações.</p>
-          </div>
-          <div class="command-metrics">
-            ${insightKpi("Pessoas únicas", uniqueVisitors, "visitantes no período")}
-            ${insightKpi("Sessões", uniqueSessions, "sessões no período")}
-            ${insightKpi("Pessoas recorrentes", returningVisitors, `${formatPercentNumber(returnRate)} voltaram no período`)}
-            ${insightKpi("Hoje", accessesToday, "acessos no dia")}
-            ${insightKpi("7 dias", accesses7Days, "janela recente")}
-            ${insightKpi("Pico", peak || "Sem dados", "maior horário")}
-          </div>
-        </article>
-        <article class="card decision-panel">
-          <p class="eyebrow">O que merece atenção</p>
-          ${renderInsightHighlights([
-            ["Origem líder", topSource ? formatSourceLabel(topSource[0]) : "Sem origem", topSource ? `${formatNumber(topSource[1])} acessos` : "sem dados"],
-            ["Prato líder", topDish ? topDish[0] : "Sem ranking", topDish ? `${formatScore(topDish[1])} pontos` : "sem dados"],
-            ["Mais observado", topObservedDish ? topObservedDish[0] : "Sem tempo", topObservedDish ? formatDurationShort(topObservedDish[1]) : "sem dados"],
-            ["Categoria quente", topCategory ? topCategory[0] : "Sem categoria", topCategory ? `${formatNumber(topCategory[1])} visualizações` : "sem dados"],
-            ["Recorrência geral", `${formatNumber(returningVisitors)} pessoa(s) voltaram`, `${formatNumber(returningSessions)} sessão(ões) de retorno no recorte`],
-            ["Instagram -> Direto", `${formatNumber(instagramToDirectVisitors)} pessoa(s) voltaram`, `${formatNumber(instagramToDirectSessions)} sessão(ões) diretas após Instagram`],
-          ])}
-          <p class="muted decision-panel__note">${insightSummary(periodAccesses, sourceCounts, whatsappClicks, mapsClicks)}</p>
-        </article>
-      </section>
-      <section class="insight-section insight-section--traffic">
-        <div class="section-title-row">
-          <div>
-            <p class="eyebrow">Entrada</p>
-            <h3>Canais que trazem gente para o cardápio</h3>
-          </div>
-          <span>${topDevice ? `${formatDeviceLabel(topDevice[0])} domina o acesso` : "Sem dispositivo dominante"}</span>
-        </div>
+      <section id="panel-audience" data-insight-panel="audience" role="tabpanel" aria-labelledby="tab-audience" hidden>
+        <div class="section-title-row"><h2>Origens dos acessos</h2><span>${formatNumber(periodAccesses)} acessos no período</span></div>
         ${renderChannelCards(sourceCounts, periodAccesses)}
-        <div class="dashboard-grid dashboard-grid--three">
-          ${renderDonutChart("Composição dos acessos", sourceCounts, { empty: "Sem origem registrada neste período.", labeler: formatSourceLabel })}
-          ${renderDonutChart("Novos e recorrentes", visitorMix, { empty: "Sem visitantes identificados neste período." })}
+        <div class="dashboard-grid dashboard-grid--two">
           ${renderInstagramDirectConversion(instagramToDirect)}
+          ${renderDonutChart("Visitantes novos e recorrentes", visitorMix)}
         </div>
         <div class="dashboard-grid dashboard-grid--two">
-          ${renderInsightBars("Detalhamento das origens", sourceDetailCounts, { empty: "Sem detalhamento de origem neste período.", labeler: formatSourceDetailLabel, limit: 8 })}
-          <article class="card insight-chart traffic-audit">
-            <p class="eyebrow">Leitura correta</p>
-            <h3>Acessos, pessoas e sessões não são a mesma coisa</h3>
-            <div class="traffic-audit__rows">
-              <p><strong>${formatNumber(periodAccesses)}</strong><span>aberturas do cardápio</span></p>
-              <p><strong>${formatNumber(uniqueVisitors)}</strong><span>pessoas identificadas</span></p>
-              <p><strong>${formatNumber(uniqueSessions)}</strong><span>sessões iniciadas</span></p>
-              <p><strong>${formatNumber(returningVisitors)}</strong><span>pessoas que abriram em mais de uma sessão</span></p>
-            </div>
-          </article>
-        </div>
-      </section>
-      <section class="insight-section insight-section--menu">
-        <div class="section-title-row">
-          <div>
-            <p class="eyebrow">Cardápio</p>
-            <h3>Pratos com mais força comercial</h3>
-          </div>
-          <span>Score = visualização + toque + tempo</span>
-        </div>
-        <div class="menu-command-grid">
-          ${renderInsightBars("Ranking principal", dishAttentionScores, { empty: "Sem score de interesse suficiente neste período.", labeler: (value) => value, valueFormatter: formatScore, limit: 8 })}
-          <div class="menu-side-stack">
-            ${renderInsightBars("Tempo observado", dishObserveSeconds, { empty: "Ainda não há tempo observado por prato neste período.", labeler: (value) => value, valueFormatter: formatDurationShort, limit: 6 })}
-            ${renderInsightBars("Toques nos pratos", dishTouchCounts, { empty: "Ainda não houve toque nos cards de pratos neste período.", labeler: (value) => value, limit: 6 })}
-          </div>
-        </div>
-        <div class="dashboard-kpis dashboard-kpis--engagement">
-          ${insightKpi("Pratos vistos", totalDishViews, "cards com permanência mínima")}
-          ${insightKpi("Toques", totalDishTouches, "interações nos cards")}
-          ${insightKpi("Tempo observado", formatDurationShort(totalDishObserveSeconds), "soma do período")}
-          ${insightKpi("Interações", periodEvents, "eventos no período")}
-        </div>
-      </section>
-      <section class="insight-section insight-section--patterns">
-        <div class="section-title-row">
-          <div>
-            <p class="eyebrow">Padrões</p>
-            <h3>Quando e como o cliente navega</h3>
-          </div>
-          <span>Separado de acesso real para evitar leitura inflada</span>
-        </div>
-        <div class="dashboard-grid dashboard-grid--three">
-          ${renderAreaChart("Evolução diária", dailyAccesses, { empty: "Sem série diária neste período.", labeler: formatDateShort })}
-          ${renderColumnChart("Horários de acesso", hourCounts, { empty: "Sem horário suficiente neste período.", labeler: formatHourLabel })}
-          ${renderDonutChart("Dispositivos", deviceCounts, { empty: "Sem dispositivo registrado neste período.", labeler: formatDeviceLabel })}
-        </div>
-      </section>
-      <section class="insight-section insight-section--technology">
-        <div class="section-title-row">
-          <div>
-            <p class="eyebrow">Tecnologia</p>
-            <h3>Navegadores, sistemas e webviews</h3>
-          </div>
-          <span>${formatNumber(webviewBannerShown)} aviso(s) de navegador interno do Instagram</span>
-        </div>
-        <div class="dashboard-grid dashboard-grid--three">
-          ${renderDonutChart("Navegadores", browserCounts, { empty: "Sem navegador identificado neste período." })}
-          ${renderDonutChart("Sistemas operacionais", osCounts, { empty: "Sem sistema identificado neste período." })}
-          ${renderInsightBars("Webview do Instagram", webviewPlatformCounts, { empty: "Nenhum aviso de webview neste período.", labeler: formatDeviceLabel, limit: 4 })}
-        </div>
-      </section>
-      <section class="insight-section insight-section--categories">
-        <div class="section-title-row">
-          <div>
-            <p class="eyebrow">Categorias</p>
-            <h3>Onde o usuário passa mais tempo</h3>
-          </div>
-        </div>
-        <div class="dashboard-grid dashboard-grid--three">
-          ${renderInsightBars("Categorias vistas", dishCategoryCounts, { empty: "Sem categorias visualizadas neste período.", labeler: (value) => value, limit: 8 })}
-          ${renderInsightBars("Tempo por categoria", dishObserveCategorySeconds, { empty: "Sem tempo por categoria neste período.", labeler: (value) => value, valueFormatter: formatDurationShort, limit: 8 })}
-          ${renderInsightBars("Categorias tocadas", dishTouchCategoryCounts, { empty: "Sem toques por categoria neste período.", labeler: (value) => value, limit: 8 })}
-        </div>
-      </section>
-      <section class="insight-section insight-section--audit">
-        <div class="section-title-row">
-          <div>
-            <p class="eyebrow">Auditoria</p>
-            <h3>Base bruta para conferir os dados</h3>
-          </div>
-          <span>${totalAccesses !== undefined ? `${formatNumber(totalAccesses)} acessos totais · ` : ""}${formatNumber(totalEvents)} interações totais</span>
+          ${renderInsightBars("Detalhamento das origens", sourceDetailCounts, { labeler: formatSourceDetailLabel, limit: 10 })}
+          ${renderConversionFunnel(periodAccesses, whatsappClicks, mapsClicks)}
         </div>
         <div class="dashboard-grid dashboard-grid--two">
-          ${renderInsightBars("Tipos de evento", eventTypeCounts, { empty: "Sem eventos registrados neste período.", labeler: formatEventLabel })}
-          <article class="card insight-table-card">
-            <p class="eyebrow">Eventos recentes</p>
-            <h3>Últimas movimentações</h3>
-            ${renderRecentEvents(recentEvents)}
-          </article>
+          ${renderDonutChart("Dispositivos", deviceCounts, { labeler: formatDeviceLabel })}
+          <article class="insight-chart"><p class="eyebrow">Contexto</p><h3>Sobre a atribuição</h3><div class="definition-list"><p><strong>Direto não significa visita presencial.</strong>Também inclui links salvos e acessos sem origem identificável.</p><p><strong>Instagram → Direto</strong> conta identidades rastreáveis que acessaram pelo Instagram e voltaram em sessões diretas posteriores. Não é uma confirmação de compra.</p><p><strong>Visitantes</strong> são identificados pelo navegador. Uma pessoa pode usar mais de um dispositivo.</p></div></article>
         </div>
+      </section>
+      <section id="panel-dishes" data-insight-panel="dishes" role="tabpanel" aria-labelledby="tab-dishes" hidden>
+        <div class="kpi-strip">${workspaceKpi("Visualizações de pratos", totalDishViews, "Permanência mínima no cardápio", "utensils")}${workspaceKpi("Toques", totalDishTouches, "Interações nos pratos", "smartphone")}${workspaceKpi("Tempo observado", formatDurationShort(totalDishObserveSeconds), "Soma do período", "activity")}${workspaceKpi("Interações totais", periodEvents, "Eventos do período", "layers")}</div>
+        <div class="dashboard-grid dashboard-grid--two">
+          ${renderInsightBars("Pratos com maior atenção", dishAttentionScores, { valueFormatter: formatScore, limit: 8 })}
+          ${renderInsightBars("Tempo observado por prato", dishObserveSeconds, { valueFormatter: formatDurationShort, limit: 8 })}
+        </div>
+        <div class="dashboard-grid dashboard-grid--two">
+          ${renderInsightBars("Visualizações por prato", dishViewCounts, { limit: 8 })}
+          ${renderInsightBars("Toques por prato", dishTouchCounts, { limit: 8 })}
+        </div>
+        <details class="history-overview"><summary><span>${uiIcon("utensils")}Rankings completos</span>${uiIcon("chevron-down")}</summary><div class="dashboard-grid dashboard-grid--two"><article class="insight-chart"><h3>Visualizações</h3>${renderInsightTable(dishViewCounts)}</article><article class="insight-chart"><h3>Toques</h3>${renderInsightTable(dishTouchCounts)}</article>${renderInsightBars("Atenção", dishAttentionScores, { valueFormatter: formatScore, limit: Number.MAX_SAFE_INTEGER })}${renderInsightBars("Tempo observado", dishObserveSeconds, { valueFormatter: formatDurationShort, limit: Number.MAX_SAFE_INTEGER })}</div></details>
+        <div class="section-title-row"><h2>Interesse por categoria</h2></div>
+        <div class="dashboard-grid dashboard-grid--three">
+          ${renderInsightBars("Visualizações", dishCategoryCounts)}
+          ${renderInsightBars("Tempo observado", dishObserveCategorySeconds, { valueFormatter: formatDurationShort })}
+          ${renderInsightBars("Toques", dishTouchCategoryCounts)}
+        </div>
+      </section>
+      <section id="panel-technical" data-insight-panel="technical" role="tabpanel" aria-labelledby="tab-technical" hidden>
+        <div class="technical-status"><h2>Estado da coleta</h2><p>${collectionDetail}</p><small>${formatNumber(testEvents)} eventos de teste excluídos da contagem.</small></div>
+        <div class="dashboard-grid dashboard-grid--three">
+          ${renderDonutChart("Navegadores", browserCounts)}
+          ${renderDonutChart("Sistemas operacionais", osCounts)}
+          ${renderInsightBars("Avisos no Instagram", webviewPlatformCounts, { labeler: formatDeviceLabel })}
+        </div>
+        <div class="dashboard-grid dashboard-grid--two">
+          ${renderInsightBars("Tipos de evento", eventTypeCounts, { labeler: formatEventLabel })}
+          <article class="insight-chart"><p class="eyebrow">Auditoria</p><h3>Movimentações recentes</h3>${renderRecentEvents(recentEvents)}</article>
+        </div>
+        <details class="history-overview"><summary><span>${uiIcon("smartphone")}Diagnóstico deste navegador</span><small>${formatNumber(state.events.length)} eventos locais</small>${uiIcon("chevron-down")}</summary><p class="muted">Registros locais para diagnóstico, separados dos dados consolidados.</p>${renderInsightBars("Origens locais", Object.fromEntries(Object.entries(groupBy(state.events, "source")).map(([source, events]) => [source, events.length])))}</details>
       </section>
     `;
+    setWorkspaceInsightsView();
     saveCachedInsightsHtml(restaurant, filters, target.innerHTML);
     clearInsightsRetry(restaurant);
     if (refreshAfterLoad && !forceRefresh && document.getElementById("insights-live")) {
       scheduleInsightsRefresh(restaurant);
     }
   } catch (error) {
+    if (!target.isConnected || target.dataset.requestId !== requestId) return;
     console.warn("QrStack insights unavailable:", error);
     const cached = getCachedInsightsHtml(restaurant, filters);
     scheduleInsightsRetry(restaurant);
@@ -2680,6 +2358,7 @@ async function hydrateInsights(restaurant, options = {}) {
         </article>
         ${cached.html}
       `;
+      setWorkspaceInsightsView();
       return;
     }
     target.innerHTML = `
@@ -3295,6 +2974,7 @@ function renderInsightBars(title, counts, options = {}) {
             </div>`
           : `<p class="muted">${options.empty || "Sem dados registrados."}</p>`
       }
+      <output class="chart-tooltip" data-chart-tooltip aria-live="polite"></output>
     </article>
   `;
 }
@@ -3306,12 +2986,12 @@ function renderAreaChart(title, counts, options = {}) {
   if (!entries.length) {
     return chartShell(title, `<p class="muted">${options.empty || "Sem dados registrados."}</p>`);
   }
-  const width = 320;
-  const height = 150;
-  const left = 18;
-  const right = 18;
-  const top = 16;
-  const bottom = 24;
+  const width = 640;
+  const height = 250;
+  const left = 40;
+  const right = 16;
+  const top = 22;
+  const bottom = 30;
   const plotWidth = width - left - right;
   const plotHeight = height - top - bottom;
   const points = entries.map(([, value], index) => {
@@ -3321,10 +3001,10 @@ function renderAreaChart(title, counts, options = {}) {
   });
   const line = points.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
   const area = `${left},${height - bottom} ${line} ${width - right},${height - bottom}`;
-  const last = points[points.length - 1];
   return chartShell(title, `
     <div class="chart-figure chart-figure--area">
       <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${title}">
+        ${[0, 0.5, 1].map((fraction) => `<line x1="${left}" x2="${width - right}" y1="${top + plotHeight * fraction}" y2="${top + plotHeight * fraction}" class="chart-gridline"/><text x="${left - 10}" y="${top + plotHeight * fraction + 4}" text-anchor="end">${formatNumber(Math.round(max * (1 - fraction)))}</text>`).join("")}
         <polygon points="${area}" class="area-fill"></polygon>
         <polyline points="${line}" class="area-line"></polyline>
         ${points.map((point, index) => `
@@ -3335,7 +3015,7 @@ function renderAreaChart(title, counts, options = {}) {
         `).join("")}
         <text x="${left}" y="${height - 5}">${labeler(entries[0][0])}</text>
         <text x="${width - right}" y="${height - 5}" text-anchor="end">${labeler(entries[entries.length - 1][0])}</text>
-        <text x="${Math.min(width - right, last.x + 8)}" y="${Math.max(14, last.y - 8)}" text-anchor="${last.x > width - 78 ? "end" : "start"}">${formatNumber(last.value)}</text>
+
       </svg>
     </div>
   `);
@@ -3366,13 +3046,16 @@ function renderColumnChart(title, counts, options = {}) {
 }
 
 function renderDonutChart(title, counts, options = {}) {
-  const entries = sortedCountEntries(counts).slice(0, options.limit || 5);
+  const allEntries = sortedCountEntries(counts);
+  const entries = allEntries.slice(0, options.limit || 5);
+  const remaining = allEntries.slice(entries.length).reduce((sum, [, value]) => sum + Number(value || 0), 0);
+  if (remaining) entries.push(["Outros", remaining]);
   const labeler = options.labeler || ((value) => value);
   const total = entries.reduce((sum, [, value]) => sum + Number(value || 0), 0);
   if (!entries.length || !total) {
     return chartShell(title, `<p class="muted">${options.empty || "Sem dados registrados."}</p>`);
   }
-  const colors = ["var(--primary)", "var(--secondary)", "#153f2e", "#d9a441", "#6b7280"];
+  const colors = ["#2a7466", "#91c6b3", "#b88a3c", "#3e647e", "#a5aba8", "#726c81"];
   let cursor = 0;
   const gradient = entries.map(([, value], index) => {
     const percent = (Number(value || 0) / total) * 100;
@@ -3411,7 +3094,7 @@ function chartShell(title, body) {
       <p class="eyebrow">Gráfico</p>
       <h3>${title}</h3>
       ${body}
-      <output class="chart-tooltip" data-chart-tooltip aria-live="polite">Toque ou passe sobre o gráfico para ver os valores.</output>
+      <output class="chart-tooltip" data-chart-tooltip aria-live="polite"></output>
     </article>
   `;
 }
@@ -3552,26 +3235,21 @@ function renderInstagramDirectConversion(conversion = {}) {
   const instagramVisitors = Number(conversion.instagram_visitors || 0);
   const instagramClickIdentities = Number(conversion.instagram_click_identities || instagramVisitors);
   const webviewOnlyVisitors = Number(conversion.webview_only_visitors || 0);
-  const trackingCoverage = Number(conversion.tracking_coverage_rate || 0);
   const convertedVisitors = Number(conversion.instagram_to_direct_visitors || 0);
   const directSessions = Number(conversion.direct_sessions_after_instagram || 0);
   const rate = Number(conversion.instagram_to_direct_rate || 0);
   return `
-    <article class="card insight-chart">
-      <p class="eyebrow">Instagram -> Direto</p>
-      <h3>Conversões rastreáveis</h3>
-      <div class="funnel">
-        ${funnelStep("Visitantes IG no navegador padrão", instagramVisitors, instagramVisitors || 1)}
-        ${funnelStep("Identidades convertidas para direto/QR", convertedVisitors, instagramVisitors || 1)}
-        ${funnelStep("Sessões diretas posteriores", directSessions, instagramVisitors || 1)}
-      </div>
-      <p class="muted conversion-explainer">${instagramVisitors ? `<strong>${formatNumber(convertedVisitors)} conversões confirmadas entre ${formatNumber(instagramVisitors)} identidades rastreáveis: ${formatPercentNumber(rate)}.</strong> Foram ${formatNumber(directSessions)} sessões diretas posteriores. Cobertura técnica: ${formatPercentNumber(trackingCoverage)} das ${formatNumber(instagramClickIdentities)} identidades antigas do Instagram; ${formatNumber(webviewOnlyVisitors)} ficaram somente no webview e não entram na taxa principal.` : "Ainda não há visitantes de Instagram rastreáveis no navegador padrão para calcular essa jornada."}</p>
-    </article>
-  `;
+    <article class="insight-chart conversion-chart">
+      <p class="eyebrow">Instagram → Direto</p><h3>Retornos rastreáveis</h3>
+      <div class="conversion-total"><strong>${formatNumber(convertedVisitors)}</strong><span>identidades retornaram<br>em acessos diretos</span><small>${formatPercentNumber(rate)}</small></div>
+      <div class="conversion-journey"><div><strong>${formatNumber(instagramVisitors)}</strong><span>Instagram no navegador</span></div>${uiIcon("arrow-right")}<div><strong>${formatNumber(convertedVisitors)}</strong><span>Voltaram como direto</span></div></div>
+      <p class="conversion-sessions">Essas <strong>${formatNumber(convertedVisitors)} identidades</strong> geraram <strong>${formatNumber(directSessions)} sessões diretas</strong> depois do Instagram. São pessoas identificadas e suas sessões, não duas contagens para somar.</p>
+      <details class="conversion-method"><summary>Cobertura da medição</summary><p>${formatPercentNumber(conversion.tracking_coverage_rate || 0)} das ${formatNumber(instagramClickIdentities)} identidades antigas do Instagram. ${formatNumber(webviewOnlyVisitors)} ficaram somente no navegador interno e não entram na taxa principal. O retorno direto não confirma uma visita presencial ou compra.</p></details>
+    </article>`;
 }
 
 function funnelStep(label, value, max) {
-  const width = Math.max(8, Math.round((Number(value || 0) / Number(max || 1)) * 100));
+  const width = Math.min(100, Math.max(0, Math.round((Number(value || 0) / Number(max || 1)) * 100)));
   return `
     <div class="funnel-step">
       <div><span>${label}</span><strong>${formatNumber(value)}</strong></div>
@@ -3825,6 +3503,11 @@ document.addEventListener("submit", (event) => {
   const insightsFilter = event.target.closest("[data-insights-filter]");
   if (insightsFilter) {
     event.preventDefault();
+    const filters = getInsightsFilters();
+    if (filters.startDate && filters.endDate && filters.startDate > filters.endDate) {
+      toast("A data inicial precisa ser anterior à data final.");
+      return;
+    }
     insightsFilter.querySelectorAll("[data-insights-preset]").forEach((button) => {
       button.classList.remove("is-active");
       button.setAttribute("aria-pressed", "false");
