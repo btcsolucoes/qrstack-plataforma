@@ -44,6 +44,12 @@ const STORY_AGENT_MIN_VERSION = "0.1.23";
 const STORY_AGENT_RELEASE_VERSION = "0.1.23";
 const STORY_AGENT_APK_URL = "https://github.com/btcsolucoes/qrstack-plataforma/releases/latest/download/QrStack-Agent-latest.apk";
 const STORY_AGENT_APK_SHA256 = "04c8d4d1fb3e7979906beb908cd174f8df31eaf25e2ee4e63e27f8882de28670";
+const CATALOG_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const CATALOG_IMAGE_TYPES = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+};
 
 const EVENT_COLUMNS = [
   "id", "restaurant_id", "restaurant_slug", "menu_day_id", "event_type", "source",
@@ -59,6 +65,17 @@ export default {
 
     try {
       const url = new URL(request.url);
+      const routedAction = url.searchParams.get("action") || "";
+      if (routedAction === "getCatalogImage") {
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          return json({ ok: false, error: "method_not_allowed" }, 405);
+        }
+        return serveCatalogImage(env, request, url);
+      }
+      if (routedAction === "uploadCatalogImage") {
+        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+        return uploadCatalogImage(env, request);
+      }
       const payload = request.method === "POST" ? await readPayload(request) : {};
       const action = request.method === "POST"
         ? payload.action || url.searchParams.get("action") || "trackEvent"
@@ -69,7 +86,7 @@ export default {
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v14-resilient-platform",
+          version: "archive-live-v15-catalog-upload",
           fallback_storage: "google_sheets",
           analytics_storage: analyticsStorage,
           story_automation: STORY_AUTOMATION_ENABLED,
@@ -2086,6 +2103,70 @@ function httpError(message, status) {
   const error = new Error(message);
   error.status = status;
   return error;
+}
+
+async function uploadCatalogImage(env, request) {
+  if (!env.MEDIA_STORAGE) throw httpError("media_storage_unavailable", 503);
+  const form = await request.formData();
+  const slug = normalizeSlug(form.get("slug") || "amaro");
+  const token = String(form.get("token") || "");
+  if (slug === "amaro") {
+    const expected = env.AMARO_ADMIN_TOKEN || "qrstack-amaro-2026";
+    if (token !== expected) throw httpError("unauthorized", 401);
+  } else {
+    const restaurant = await requireRestaurant(env.DB, slug);
+    assertRestaurantToken(restaurant, token);
+  }
+
+  const file = form.get("file");
+  if (!file || typeof file.arrayBuffer !== "function") throw httpError("catalog_image_required", 400);
+  const contentType = String(file.type || "").toLowerCase();
+  const extension = CATALOG_IMAGE_TYPES[contentType];
+  if (!extension) throw httpError("catalog_image_type_not_allowed", 415);
+  if (!file.size || file.size > CATALOG_IMAGE_MAX_BYTES) throw httpError("catalog_image_too_large", 413);
+
+  const key = `catalog/${slug}/${crypto.randomUUID()}.${extension}`;
+  const bytes = await file.arrayBuffer();
+  await env.MEDIA_STORAGE.put(key, bytes, {
+    metadata: {
+      contentType,
+      originalName: boundedText(file.name, 180),
+      restaurantSlug: slug,
+      uploadedAt: new Date().toISOString(),
+    },
+  });
+
+  const imageUrl = new URL(request.url);
+  imageUrl.pathname = "/";
+  imageUrl.search = "";
+  imageUrl.searchParams.set("action", "getCatalogImage");
+  imageUrl.searchParams.set("key", key);
+  return json({
+    ok: true,
+    image_url: imageUrl.toString(),
+    key,
+    content_type: contentType,
+    size: bytes.byteLength,
+  }, 201);
+}
+
+async function serveCatalogImage(env, request, url) {
+  if (!env.MEDIA_STORAGE) return new Response("Not found", { status: 404, headers: CORS_HEADERS });
+  const key = String(url.searchParams.get("key") || "");
+  if (!/^catalog\/[a-z0-9-]+\/[a-f0-9-]+\.(?:jpg|png|webp)$/.test(key)) {
+    return new Response("Not found", { status: 404, headers: CORS_HEADERS });
+  }
+  const object = await env.MEDIA_STORAGE.get(key, { type: "stream", cacheTtl: 86400 });
+  if (!object) return new Response("Not found", { status: 404, headers: CORS_HEADERS });
+  const extension = key.split(".").pop();
+  const contentType = extension === "png" ? "image/png" : extension === "webp" ? "image/webp" : "image/jpeg";
+  const headers = {
+    ...CORS_HEADERS,
+    "content-type": contentType,
+    "cache-control": "public, max-age=31536000, immutable",
+    "x-content-type-options": "nosniff",
+  };
+  return new Response(request.method === "HEAD" ? null : object, { status: 200, headers });
 }
 
 async function getCatalog(db, slug) {

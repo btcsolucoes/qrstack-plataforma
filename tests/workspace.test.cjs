@@ -50,6 +50,14 @@ test('catalog preserves item information and produces valid photo URLs', () => {
   assert.doesNotMatch(html, /\[object Object\]/);
 });
 
+test('catalog editor uses authenticated photo upload and preserves the current image', () => {
+  const html = runtime()('renderCatalogManager(getRestaurant("amaro"))');
+  assert.match(html, /type="file" name="catalogImageFile"/);
+  assert.match(html, /accept="image\/jpeg,image\/png,image\/webp"/);
+  assert.match(html, /type="hidden" name="catalogImageExisting"/);
+  assert.doesNotMatch(html, /Foto \(URL ou caminho publicado\)/);
+});
+
 test('donut includes all categories in its total', () => {
   const html = runtime()('renderDonutChart("Origins", {a:50,b:40,c:30,d:20,e:10,f:5,g:1})');
   assert.match(html, /data-donut-total>156</);

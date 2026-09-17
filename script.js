@@ -338,6 +338,62 @@ async function apiPost(payload) {
   return data;
 }
 
+async function uploadCatalogImage(file, restaurant) {
+  if (!QRSTACK_API_URL) throw new Error("missing_api_url");
+  const optimized = await optimizeCatalogImage(file);
+  const body = new FormData();
+  body.set("slug", restaurant.slug);
+  body.set("token", restaurant.adminToken || ACTIVE_CLIENT_TOKEN);
+  body.set("file", optimized, optimized.name);
+  const url = new URL(QRSTACK_API_URL);
+  url.searchParams.set("action", "uploadCatalogImage");
+  const response = await fetchWithRetry(
+    url.toString(),
+    { method: "POST", body },
+    { timeoutMs: 45000, attempts: 2 }
+  );
+  const text = await response.text();
+  if (!text.trim().startsWith("{")) throw new Error("catalog_image_upload_invalid_response");
+  const data = JSON.parse(text);
+  if (!response.ok || data.ok === false || !data.image_url) {
+    throw new Error(data.error || "catalog_image_upload_failed");
+  }
+  return data;
+}
+
+async function optimizeCatalogImage(file) {
+  const allowed = new Set(["image/jpeg", "image/png", "image/webp"]);
+  if (!file || !allowed.has(String(file.type || "").toLowerCase())) {
+    throw new Error("catalog_image_type_not_allowed");
+  }
+  if (file.size > 15 * 1024 * 1024) throw new Error("catalog_image_source_too_large");
+  if (typeof createImageBitmap !== "function") {
+    if (file.size > 8 * 1024 * 1024) throw new Error("catalog_image_too_large");
+    return file;
+  }
+
+  const bitmap = await createImageBitmap(file);
+  try {
+    const maxSide = 1600;
+    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { alpha: false });
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(bitmap, 0, 0, width, height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", 0.86));
+    if (!blob) throw new Error("catalog_image_optimization_failed");
+    const baseName = String(file.name || "foto-do-prato").replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 80);
+    return new File([blob], `${baseName || "foto-do-prato"}.webp`, { type: "image/webp" });
+  } finally {
+    bitmap.close();
+  }
+}
+
 function sendAnalyticsEvent(endpoint, payload) {
   if (!endpoint) return Promise.resolve();
   const body = JSON.stringify(payload);
@@ -1548,8 +1604,9 @@ function renderCatalogManager(restaurant) {
           <textarea id="catalog-description" name="catalogDescription" maxlength="1200" placeholder="Ingredientes e acompanhamentos"></textarea>
         </div>
         <div class="field field--full">
-          <label for="catalog-image">Foto (URL ou caminho publicado)</label>
-          <input id="catalog-image" name="catalogImage" maxlength="1000" placeholder="https://... ou fotos de pratos/prato.jpg" />
+          <label for="catalog-image">Foto do prato</label>
+          <input type="hidden" name="catalogImageExisting" value="" />
+          <input id="catalog-image" type="file" name="catalogImageFile" accept="image/jpeg,image/png,image/webp" />
         </div>
         <div class="actions field--full">
           <button type="submit">Salvar prato</button>
@@ -1707,7 +1764,8 @@ function attachCatalogManagerHandlers(restaurant) {
       form.elements.catalogName.value = catalogItem.name || "";
       form.elements.catalogPrice.value = catalogItem.price || "";
       form.elements.catalogDescription.value = catalogItem.description || "";
-      form.elements.catalogImage.value = catalogItem.image_url || "";
+      form.elements.catalogImageExisting.value = catalogItem.image_url || "";
+      form.elements.catalogImageFile.value = "";
       const existingOption = [...sectionSelect.options].find((option) => option.value === catalogItem.section_id);
       if (existingOption) {
         sectionSelect.value = catalogItem.section_id;
@@ -1734,6 +1792,7 @@ function attachCatalogManagerHandlers(restaurant) {
   form.addEventListener("reset", () => {
     window.setTimeout(() => {
       form.elements.catalogItemId.value = "";
+      form.elements.catalogImageExisting.value = "";
       syncNewSectionField();
     }, 0);
   });
@@ -1758,6 +1817,14 @@ function attachCatalogManagerHandlers(restaurant) {
       submitButton.textContent = "Salvando...";
     }
     try {
+      let imageUrl = form.elements.catalogImageExisting.value.trim();
+      const imageFile = form.elements.catalogImageFile.files?.[0];
+      if (imageFile) {
+        if (submitButton) submitButton.textContent = "Enviando foto...";
+        const upload = await uploadCatalogImage(imageFile, restaurant);
+        imageUrl = upload.image_url;
+        if (submitButton) submitButton.textContent = "Salvando...";
+      }
       const data = await apiPost({
         action: "saveCatalogItem",
         slug: restaurant.slug,
@@ -1769,7 +1836,7 @@ function attachCatalogManagerHandlers(restaurant) {
         category: sectionTitle,
         description: form.elements.catalogDescription.value.trim(),
         price: form.elements.catalogPrice.value.trim(),
-        image_url: form.elements.catalogImage.value.trim(),
+        image_url: imageUrl,
       });
       const savedItem = normalizeCatalogItem(data.item, restaurant);
       const nextCatalog = getCatalogForRestaurant(restaurant).filter((item) => item.id !== savedItem.id);
