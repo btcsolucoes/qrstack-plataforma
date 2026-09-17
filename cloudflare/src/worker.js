@@ -70,11 +70,11 @@ export default {
         if (request.method !== "GET" && request.method !== "HEAD") {
           return json({ ok: false, error: "method_not_allowed" }, 405);
         }
-        return serveCatalogImage(env, request, url);
+        return await serveCatalogImage(env, request, url);
       }
       if (routedAction === "uploadCatalogImage") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        return uploadCatalogImage(env, request);
+        return await uploadCatalogImage(env, request);
       }
       const payload = request.method === "POST" ? await readPayload(request) : {};
       const action = request.method === "POST"
