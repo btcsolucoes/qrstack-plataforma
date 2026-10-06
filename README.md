@@ -18,9 +18,9 @@ Plataforma QrStack para gerenciar clientes, formulários, cardápios dinâmicos,
 - Dados gerenciais e analytics persistidos no Cloudflare D1, com fallback preservado para Google Sheets.
 - Formulário próprio para cardápio do dia.
 - Publicação automática do cardápio público.
-- Geração de Story 1080x1920 em canvas.
+- Story 1080x1920 por upload ou gerado com logo, cores e conteúdo do restaurante.
 - Fila transacional e idempotente para publicacao de Story.
-- Agente Android privado com retomada por checkpoint, protecao contra interrupcoes e confirmacao visual de publicacao.
+- Publicador Python no Windows, conectado à fila Cloudflare; agente Android aposentado.
 - Eventos e insights internos para a central QrStack, sem dados de demonstração.
 - Schema legado Supabase preservado em `supabase/schema.sql`.
 - Nova migração gratuita Cloudflare D1 em `cloudflare/`.
@@ -39,17 +39,21 @@ No produto QrStack, esse fluxo pode continuar para clientes que já usam Forms/S
 4. Dashboard QrStack consulta D1, não a planilha pesada.
 5. Story usa a identidade, o catálogo e o link definidos na base QrStack.
 
-## Publicacao automatica de Story
+## Publicação de Story
 
-O envio do formulario cria um job unico em `story_publish_jobs`. A arte fica temporariamente no KV por 48 horas, enquanto metadados, estado e historico permanecem no D1. O agente Android pareado reivindica o job e atualiza a plataforma em cada etapa.
+Salvar o formulário atualiza apenas o cardápio. Na tela Stories, o usuário escolhe **Gerar automaticamente** ou **Enviar imagem**, confere a prévia e o link HTTPS e clica em **Publicar Story**. A conta vinculada aparece antes do envio. Sem conta configurada, é possível preparar e baixar a arte, mas publicar fica bloqueado.
 
-- `story_agents`: aparelhos pareados.
-- `story_publish_jobs`: fila e estado atual.
-- `story_job_events`: historico auditavel de checkpoints.
-- `cloudflare/migrations/0007_story_automation.sql`: migracao aditiva, sem exclusao de analytics.
-- `android-agent/`: projeto Android instalavel sem conexao USB permanente.
+- `instagram_publishers`: serviços Windows autorizados, com token armazenado somente como hash.
+- `instagram_account_bindings`: restaurante, publicador e identidade Instagram exclusivos.
+- `instagram_story_jobs` e `instagram_story_job_events`: fila e histórico transacional.
+- `cloudflare/migrations/0010_instagram_python_publisher.sql`: tabelas novas e desativação dos agentes antigos, sem apagar histórico.
+- Arte temporária no KV por 48 horas; sessão Instagram e senha não passam pelo navegador ou D1.
 
-O agente nunca rejeita chamadas nem apaga notificacoes. Durante a publicacao ele ativa temporariamente Nao Perturbe, mantem a tela acordada e, se outro aplicativo tomar a tela, pausa e retoma do ultimo ponto seguro.
+O publicador roda em `qrstack-instagram` neste Windows e consome a fila por HTTPS. Precisa de uma sessão conectada explicitamente e do mapa local restaurante/conta. Não há login nem repetição de publicação automáticos. Um resultado incerto bloqueia a conta para conferência; uma confirmação perdida pode ser recuperada sem republicar.
+
+As rotas Android retornam HTTP 410. A fila Android não é copiada para a fila nova. No aparelho antigo, usar **Parar agente** e desativar a acessibilidade: um trabalho já salvo offline no telefone não pode ser interrompido apenas pelo servidor.
+
+Operação e implantação: [STORIES_WINDOWS.md](STORIES_WINDOWS.md). A validação real desta integração continua restrita à conta interna; clientes não são habilitados automaticamente.
 
 ## Analytics
 

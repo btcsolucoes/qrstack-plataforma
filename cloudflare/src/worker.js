@@ -1,3 +1,5 @@
+import { handleInstagramStories, MAX_STORY_REQUEST_BYTES } from "./instagram-stories.js";
+
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
@@ -11,7 +13,7 @@ const READ_CACHE_HEADERS = {
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
-  "access-control-allow-headers": "content-type, authorization",
+  "access-control-allow-headers": "content-type, authorization, x-claim-token",
 };
 
 const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec";
@@ -36,14 +38,6 @@ const ANALYTICS_ROLLUP_SCHEMA_KEY = `analytics:rollup-schema:${ANALYTICS_ROLLUP_
 const ANALYTICS_ROLLUP_START_DATE = "2026-07-03";
 const ANALYTICS_ROLLUP_PAGE_SIZE = 2000;
 const ANALYTICS_ROLLUP_SQL_CHUNK_BYTES = 70 * 1024;
-const STORY_MEDIA_TTL_SECONDS = 48 * 60 * 60;
-const STORY_MEDIA_MAX_BYTES = 6 * 1024 * 1024;
-const STORY_AUTOMATION_ENABLED = false;
-const STORY_ACTIVE_STATUSES = ["claimed", "preparing", "publishing", "paused_interruption"];
-const STORY_AGENT_MIN_VERSION = "0.1.23";
-const STORY_AGENT_RELEASE_VERSION = "0.1.23";
-const STORY_AGENT_APK_URL = "https://github.com/btcsolucoes/qrstack-plataforma/releases/latest/download/QrStack-Agent-latest.apk";
-const STORY_AGENT_APK_SHA256 = "04c8d4d1fb3e7979906beb908cd174f8df31eaf25e2ee4e63e27f8882de28670";
 const CATALOG_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 const CATALOG_IMAGE_TYPES = {
   "image/jpeg": "jpg",
@@ -81,15 +75,20 @@ export default {
         ? payload.action || url.searchParams.get("action") || "trackEvent"
         : url.searchParams.get("action") || "health";
 
+      const instagramResponse = await handleInstagramStories(request, env, payload, action);
+      if (instagramResponse) return instagramResponse;
+
       if (action === "health") {
         const analyticsStorage = await getAnalyticsStorageHealth(env);
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v15-catalog-upload",
+          version: "archive-live-v16-instagram-publisher",
           fallback_storage: "google_sheets",
           analytics_storage: analyticsStorage,
-          story_automation: STORY_AUTOMATION_ENABLED,
+          story_automation: env.INSTAGRAM_PUBLISHING_ENABLED !== "false",
+          story_publisher: "private_api",
+          android_story_agent: "retired",
           analytics_read_model: "daily_rollups",
         });
       }
@@ -252,47 +251,6 @@ export default {
       if (action === "backfillMenuCache") {
         assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
         return jsonp(url, { ok: true, ...(await backfillD1MenuCache(env, url.searchParams.get("slug") || payload.slug || "amaro")) });
-      }
-
-      if (action === "registerStoryAgent") {
-        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        return json({ ok: true, agent: await registerStoryAgent(env.DB, payload, env) }, 201);
-      }
-
-      if (action === "getAgentRelease") {
-        return jsonp(url, {
-          ok: true,
-          version: STORY_AGENT_RELEASE_VERSION,
-          minimum_version: STORY_AGENT_MIN_VERSION,
-          apk_url: STORY_AGENT_APK_URL,
-          sha256: STORY_AGENT_APK_SHA256,
-        }, 200, READ_CACHE_HEADERS);
-      }
-
-      if (action === "createStoryJob") {
-        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        if (!STORY_AUTOMATION_ENABLED) return json({ ok: false, error: "story_automation_paused" }, 503);
-        return json({ ok: true, ...(await createStoryJob(env, payload, request)) }, 201);
-      }
-
-      if (action === "getNextStoryJob") {
-        if (!STORY_AUTOMATION_ENABLED) return jsonp(url, { ok: true, job: null, automation_paused: true, poll_after_seconds: 60 });
-        const result = await claimNextStoryJob(env.DB, request, url);
-        return jsonp(url, { ok: true, ...result }, 200, JSON_HEADERS);
-      }
-
-      if (action === "updateStoryJob") {
-        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        return json({ ok: true, job: await updateStoryJob(env.DB, payload, request) });
-      }
-
-      if (action === "getStoryJob") {
-        const job = await getStoryJobForRestaurant(env.DB, url.searchParams);
-        return jsonp(url, { ok: true, job }, 200, JSON_HEADERS);
-      }
-
-      if (action === "getStoryMedia") {
-        return getStoryMedia(env, url);
       }
 
       return jsonp(url, { ok: false, error: "unknown_action", action }, 404);
@@ -552,7 +510,25 @@ async function storeEventInSheets(env, payload, request) {
 }
 
 async function readPayload(request) {
-  const text = await request.text();
+  if (Number(request.headers.get("content-length") || 0) > MAX_STORY_REQUEST_BYTES) throw httpError("request_too_large", 413);
+  const reader = request.body?.getReader();
+  if (!reader) return {};
+  const chunks = [];
+  let size = 0;
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    size += chunk.value.byteLength;
+    if (size > MAX_STORY_REQUEST_BYTES) {
+      await reader.cancel();
+      throw httpError("request_too_large", 413);
+    }
+    chunks.push(chunk.value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  const text = new TextDecoder().decode(bytes);
   if (!text) return {};
   try {
     return JSON.parse(text);
@@ -1810,289 +1786,6 @@ function mergeNumberMaps(maps) {
     });
     return merged;
   }, {});
-}
-
-async function registerStoryAgent(db, payload, env) {
-  const deviceId = cleanIdentifier(payload.device_id || payload.deviceId, 100);
-  const deviceToken = String(payload.device_token || payload.deviceToken || "").trim();
-  const label = String(payload.label || "Telefone QrStack").trim().slice(0, 120);
-  const appVersion = String(payload.app_version || payload.appVersion || "").trim().slice(0, 40);
-  if (!deviceId || deviceToken.length < 32) throw httpError("invalid_agent_credentials", 400);
-  const now = new Date().toISOString();
-  const tokenHash = await sha256Hex(deviceToken);
-  const existing = await db.prepare(
-    "SELECT device_id FROM story_agents WHERE device_id = ? AND token_hash = ? LIMIT 1"
-  ).bind(deviceId, tokenHash).first();
-  const ownerKey = String(payload.owner_key || payload.ownerKey || "").trim();
-  const authorizedOwner = ownerKey && ownerKey === String(env.OWNER_ACCESS_TOKEN || "");
-  const active = await db.prepare("SELECT COUNT(*) AS total FROM story_agents WHERE is_active = 1").first();
-  const firstAgent = Number(active?.total || 0) === 0;
-  if (!existing && !authorizedOwner && !firstAgent) {
-    throw httpError("pairing_requires_owner_approval", 403);
-  }
-  await db.prepare(`
-    INSERT INTO story_agents (
-      device_id, label, token_hash, platform, app_version, is_active,
-      last_seen_at, created_at, updated_at
-    ) VALUES (?, ?, ?, 'android', ?, 1, ?, ?, ?)
-    ON CONFLICT(device_id) DO UPDATE SET
-      label = excluded.label,
-      token_hash = excluded.token_hash,
-      app_version = excluded.app_version,
-      is_active = 1,
-      last_seen_at = excluded.last_seen_at,
-      updated_at = excluded.updated_at
-  `).bind(deviceId, label, tokenHash, appVersion, now, now, now).run();
-  return { device_id: deviceId, label, platform: "android", app_version: appVersion, registered_at: now };
-}
-
-async function createStoryJob(env, payload) {
-  const slug = normalizeSlug(payload.slug || "amaro");
-  const restaurant = await requireRestaurant(env.DB, slug);
-  assertRestaurantToken(restaurant, payload.token);
-  const menuDayId = String(payload.menu_day_id || payload.menuDayId || "").trim().slice(0, 160);
-  const storyLink = String(payload.story_link || payload.storyLink || restaurant.story_link || "").trim();
-  const clientRequestId = cleanIdentifier(payload.client_request_id || payload.clientRequestId, 160);
-  const retryFailed = payload.retry_failed === true || payload.retryFailed === true;
-  const base64 = String(payload.image_base64 || payload.imageBase64 || "").replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "");
-  if (!storyLink || !base64) throw httpError("missing_story_payload", 400);
-
-  let effectiveClientRequestId = clientRequestId;
-  let retriedFrom = "";
-  if (clientRequestId) {
-    const existing = await env.DB.prepare(`
-      SELECT * FROM story_publish_jobs
-      WHERE restaurant_id = ?
-        AND (client_request_id = ? OR client_request_id LIKE ?)
-      ORDER BY created_at DESC
-      LIMIT 1
-    `).bind(restaurant.id, clientRequestId, `${clientRequestId}:retry:%`).first();
-    if (existing) {
-      if (existing.status !== "failed_attention" || !retryFailed) {
-        return { job: publicStoryJob(existing), duplicate: true, historical: existing.status === "failed_attention" };
-      }
-      retriedFrom = existing.id;
-      effectiveClientRequestId = `${clientRequestId}:retry:${crypto.randomUUID().slice(0, 8)}`;
-    }
-  }
-
-  const media = decodeBase64(base64);
-  if (!media.byteLength || media.byteLength > STORY_MEDIA_MAX_BYTES) throw httpError("invalid_story_media_size", 413);
-  const contentType = String(payload.content_type || payload.contentType || "image/png").toLowerCase();
-  if (!/^image\/(png|jpeg|webp)$/.test(contentType)) throw httpError("invalid_story_media_type", 415);
-
-  const jobId = `story_${crypto.randomUUID()}`;
-  const mediaToken = crypto.randomUUID().replaceAll("-", "") + crypto.randomUUID().replaceAll("-", "");
-  const mediaKey = `story-media/${slug}/${jobId}`;
-  const now = new Date().toISOString();
-  await env.INSIGHTS_CACHE.put(mediaKey, media, {
-    expirationTtl: STORY_MEDIA_TTL_SECONDS,
-    metadata: { contentType, restaurant: slug, jobId },
-  });
-
-  await env.DB.batch([
-    env.DB.prepare(`
-      INSERT INTO story_publish_jobs (
-        id, restaurant_id, restaurant_slug, menu_day_id, story_link,
-        media_key, media_token, status, checkpoint, client_request_id,
-        queued_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'queued', ?, ?, ?, ?)
-    `).bind(
-      jobId, restaurant.id, slug, menuDayId, storyLink,
-      mediaKey, mediaToken, effectiveClientRequestId || null, now, now, now
-    ),
-    env.DB.prepare(`
-      INSERT INTO story_job_events (id, job_id, event_type, checkpoint, detail, created_at)
-      VALUES (?, ?, 'queued', 'queued', ?, ?)
-    `).bind(
-      `story_event_${crypto.randomUUID()}`,
-      jobId,
-      retriedFrom ? `Nova tentativa solicitada após falha do job ${retriedFrom}` : "Story recebido pela plataforma",
-      now
-    ),
-  ]);
-  return {
-    job: publicStoryJob(await getStoryJobById(env.DB, jobId)),
-    duplicate: false,
-    retried_from: retriedFrom || null,
-  };
-}
-
-async function claimNextStoryJob(db, request, url) {
-  const deviceId = cleanIdentifier(url.searchParams.get("device_id") || url.searchParams.get("deviceId"), 100);
-  const agent = await assertStoryAgent(db, deviceId, bearerToken(request));
-  const reportedVersion = String(url.searchParams.get("app_version") || url.searchParams.get("appVersion") || "").trim().slice(0, 40);
-  if (reportedVersion) {
-    await db.prepare("UPDATE story_agents SET app_version = ?, last_seen_at = ?, updated_at = ? WHERE device_id = ?")
-      .bind(reportedVersion, new Date().toISOString(), new Date().toISOString(), deviceId).run();
-  }
-  const effectiveVersion = reportedVersion || String(agent.app_version || "");
-  if (compareVersions(effectiveVersion, STORY_AGENT_MIN_VERSION) < 0) {
-    return {
-      job: null,
-      poll_after_seconds: 60,
-      update_required: true,
-      current_version: effectiveVersion || null,
-      minimum_version: STORY_AGENT_MIN_VERSION,
-    };
-  }
-  const activePlaceholders = STORY_ACTIVE_STATUSES.map(() => "?").join(", ");
-  let job = await db.prepare(`
-    SELECT * FROM story_publish_jobs
-    WHERE assigned_device_id = ? AND status IN (${activePlaceholders})
-      AND NOT (status = 'paused_interruption' AND checkpoint = 'paused_by_operator')
-    ORDER BY updated_at DESC LIMIT 1
-  `).bind(deviceId, ...STORY_ACTIVE_STATUSES).first();
-
-  if (!job) {
-    const candidate = await db.prepare(`
-      SELECT * FROM story_publish_jobs
-      WHERE status IN ('pending', 'retry')
-      ORDER BY queued_at ASC LIMIT 1
-    `).first();
-    if (candidate) {
-      const now = new Date().toISOString();
-      const claim = await db.prepare(`
-        UPDATE story_publish_jobs
-        SET status = 'claimed', checkpoint = 'claimed', assigned_device_id = ?,
-            attempts = attempts + 1, claimed_at = COALESCE(claimed_at, ?), updated_at = ?
-        WHERE id = ? AND status IN ('pending', 'retry')
-      `).bind(deviceId, now, now, candidate.id).run();
-      if (Number(claim.meta?.changes || 0) > 0) {
-        await appendStoryJobEvent(db, candidate.id, deviceId, "claimed", "claimed", `Agente ${agent.label} assumiu a publicação`);
-        job = await getStoryJobById(db, candidate.id);
-      }
-    }
-  }
-
-  await db.prepare("UPDATE story_agents SET last_seen_at = ?, updated_at = ? WHERE device_id = ?")
-    .bind(new Date().toISOString(), new Date().toISOString(), deviceId).run();
-  if (!job) return { job: null, poll_after_seconds: 12 };
-  const mediaUrl = new URL(request.url);
-  mediaUrl.search = "";
-  mediaUrl.searchParams.set("action", "getStoryMedia");
-  mediaUrl.searchParams.set("job", job.id);
-  mediaUrl.searchParams.set("token", job.media_token);
-  return { job: { ...publicStoryJob(job), media_url: mediaUrl.toString() }, poll_after_seconds: 3 };
-}
-
-function compareVersions(left, right) {
-  const normalizeVersion = (value) => String(value || "")
-    .split(/[+-]/, 1)[0]
-    .split(".")
-    .map((part) => Number.parseInt(part, 10) || 0);
-  const a = normalizeVersion(left);
-  const b = normalizeVersion(right);
-  const length = Math.max(a.length, b.length, 3);
-  for (let index = 0; index < length; index += 1) {
-    const delta = (a[index] || 0) - (b[index] || 0);
-    if (delta !== 0) return delta < 0 ? -1 : 1;
-  }
-  return 0;
-}
-
-async function updateStoryJob(db, payload, request) {
-  const deviceId = cleanIdentifier(payload.device_id || payload.deviceId, 100);
-  await assertStoryAgent(db, deviceId, bearerToken(request));
-  const jobId = cleanIdentifier(payload.job_id || payload.jobId, 160);
-  const status = String(payload.status || "").trim().toLowerCase();
-  const checkpoint = cleanIdentifier(payload.checkpoint || status, 100) || "unknown";
-  const detail = String(payload.detail || payload.error || "").trim().slice(0, 1000);
-  const allowed = new Set(["claimed", "preparing", "publishing", "paused_interruption", "retry", "completed", "failed_attention"]);
-  if (!jobId || !allowed.has(status)) throw httpError("invalid_story_job_update", 400);
-  const current = await getStoryJobById(db, jobId);
-  if (!current || current.assigned_device_id !== deviceId) throw httpError("story_job_not_assigned", 409);
-  const now = new Date().toISOString();
-  const startedAt = ["preparing", "publishing"].includes(status) ? now : current.started_at;
-  const completedAt = status === "completed" ? now : current.completed_at;
-  await db.prepare(`
-    UPDATE story_publish_jobs
-    SET status = ?, checkpoint = ?, last_error = ?,
-        interruption_count = interruption_count + ?,
-        started_at = COALESCE(started_at, ?), completed_at = ?, updated_at = ?
-    WHERE id = ? AND assigned_device_id = ?
-  `).bind(
-    status, checkpoint, status === "failed_attention" ? detail : null,
-    status === "paused_interruption" ? 1 : 0,
-    startedAt || null, completedAt || null, now, jobId, deviceId
-  ).run();
-  await appendStoryJobEvent(db, jobId, deviceId, status, checkpoint, detail);
-  return publicStoryJob(await getStoryJobById(db, jobId));
-}
-
-async function getStoryJobForRestaurant(db, params) {
-  const slug = normalizeSlug(params.get("slug") || "amaro");
-  const restaurant = await requireRestaurant(db, slug);
-  assertRestaurantToken(restaurant, params.get("token"));
-  const jobId = cleanIdentifier(params.get("job") || params.get("job_id"), 160);
-  const row = jobId
-    ? await db.prepare("SELECT * FROM story_publish_jobs WHERE id = ? AND restaurant_id = ? LIMIT 1").bind(jobId, restaurant.id).first()
-    : await db.prepare("SELECT * FROM story_publish_jobs WHERE restaurant_id = ? ORDER BY created_at DESC LIMIT 1").bind(restaurant.id).first();
-  return row ? publicStoryJob(row) : null;
-}
-
-async function getStoryMedia(env, url) {
-  const jobId = cleanIdentifier(url.searchParams.get("job"), 160);
-  const token = String(url.searchParams.get("token") || "");
-  const job = jobId ? await getStoryJobById(env.DB, jobId) : null;
-  if (!job || !token || token !== job.media_token) return json({ ok: false, error: "unauthorized" }, 401);
-  const object = await env.INSIGHTS_CACHE.getWithMetadata(job.media_key, "arrayBuffer");
-  if (!object?.value) return json({ ok: false, error: "story_media_expired" }, 410);
-  return new Response(object.value, {
-    headers: {
-      "content-type": object.metadata?.contentType || "image/png",
-      "cache-control": "private, max-age=300",
-      "content-disposition": `inline; filename="${job.restaurant_slug}-${job.id}.png"`,
-    },
-  });
-}
-
-async function assertStoryAgent(db, deviceId, token) {
-  if (!deviceId || !token) throw httpError("unauthorized_agent", 401);
-  const agent = await db.prepare("SELECT * FROM story_agents WHERE device_id = ? AND is_active = 1 LIMIT 1")
-    .bind(deviceId).first();
-  if (!agent || (await sha256Hex(token)) !== agent.token_hash) throw httpError("unauthorized_agent", 401);
-  return agent;
-}
-
-async function appendStoryJobEvent(db, jobId, deviceId, eventType, checkpoint, detail = "") {
-  await db.prepare(`
-    INSERT INTO story_job_events (id, job_id, device_id, event_type, checkpoint, detail, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).bind(
-    `story_event_${crypto.randomUUID()}`, jobId, deviceId || null,
-    eventType, checkpoint || null, String(detail || "").slice(0, 1000), new Date().toISOString()
-  ).run();
-}
-
-function getStoryJobById(db, jobId) {
-  return db.prepare("SELECT * FROM story_publish_jobs WHERE id = ? LIMIT 1").bind(jobId).first();
-}
-
-function publicStoryJob(job) {
-  if (!job) return null;
-  const { media_key, media_token, ...safe } = job;
-  return safe;
-}
-
-function decodeBase64(value) {
-  try {
-    const binary = atob(value.replace(/\s/g, ""));
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-    return bytes;
-  } catch {
-    throw httpError("invalid_story_media", 400);
-  }
-}
-
-async function sha256Hex(value) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value)));
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function bearerToken(request) {
-  return String(request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
 }
 
 function cleanIdentifier(value, maxLength = 160) {

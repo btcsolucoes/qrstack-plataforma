@@ -14,7 +14,7 @@ function renderWorkspace({ active = "overview", title, subtitle = "", content, r
   const links = client ? [
     ["formulario", "Cardápio do dia", "utensils", ""],
     ["catalog-manager", "Meus pratos", "layers", ""],
-    ...(STORY_AUTOMATION_ENABLED ? [["story-panel", "Story", "smartphone", ""]] : []),
+    ...(STORY_AUTOMATION_ENABLED ? [["story-panel", "Stories", "layers", ""]] : []),
     ["public", "Cardápio público", "external-link", publicMenuHash(restaurant, "cliente")],
   ] : [
     ["overview", "Visão geral", "house", ownerLink("overview")],
@@ -23,7 +23,7 @@ function renderWorkspace({ active = "overview", title, subtitle = "", content, r
     ["banco", "Pratos e marca", "utensils", ownerLink("banco")],
     ["respostas", "Respostas", "inbox", ownerLink("respostas")],
     ["cardapios", "Cardápios e links", "link", ownerLink("cardapios")],
-    ...(STORY_AUTOMATION_ENABLED ? [["stories", "Stories", "smartphone", ownerLink("stories")]] : []),
+    ...(STORY_AUTOMATION_ENABLED ? [["stories", "Stories", "layers", ownerLink("stories")]] : []),
   ];
   const navItem = ([id, label, icon, href], mobile = false) => {
     const attrs = href ? `href="${href}"` : `type="button" data-client-view="${id}"`;

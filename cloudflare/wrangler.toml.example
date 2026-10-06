@@ -4,7 +4,9 @@ compatibility_date = "2026-08-04"
 workers_dev = true
 
 [vars]
-OWNER_ACCESS_TOKEN = "troque-por-sua-chave-da-central"
+# Set OWNER_ACCESS_TOKEN with `wrangler secret put OWNER_ACCESS_TOKEN`.
+# Global kill switch; account bindings must also be enabled individually.
+INSTAGRAM_PUBLISHING_ENABLED = "true"
 SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/SEU_DEPLOY_DO_APPS_SCRIPT/exec"
 
 [triggers]

@@ -4,19 +4,20 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function runtime() {
+function runtime(overrides = {}) {
   const root = path.resolve(__dirname, '..');
   const storage = () => {
     const values = new Map();
     return { getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value) };
   };
   const context = vm.createContext({
-    console, URL, URLSearchParams, Intl, Date, Math, JSON, Map, Set, structuredClone,
+    console, URL, URLSearchParams, Intl, Date, Math, JSON, Map, Set, structuredClone, TextEncoder, Blob, setTimeout, clearTimeout,
     crypto: require('node:crypto').webcrypto,
     localStorage: storage(), sessionStorage: storage(),
     window: { addEventListener() {} },
     location: { origin: 'http://localhost', pathname: '/', hash: '' },
     document: { addEventListener() {}, getElementById: () => ({ innerHTML: '' }), querySelectorAll: () => [], querySelector: () => null },
+    ...overrides,
   });
   for (const file of ['data/amaro-catalog.js', 'workspace.js', 'script.js']) {
     const source = fs.readFileSync(path.join(root, file), 'utf8').replace(/\nrouter\(\);\r?\n/, '\n');
@@ -25,12 +26,12 @@ function runtime() {
   return expression => vm.runInContext(expression, context);
 }
 
-test('central has persistent navigation and keeps automatic Stories disabled', () => {
+test('central has persistent navigation and an explicit Stories workspace', () => {
   const html = runtime()('renderWorkspace({title: "Insights", active:"insights", content:""})');
   assert.match(html, /mobile-navigation/);
   assert.match(html, /workspace-sidebar/);
   assert.match(html, /aria-current="page"/);
-  assert.doesNotMatch(html, /href="[^\"]*stories/);
+  assert.match(html, /href="[^\"]*stories/);
 });
 
 test('restaurant form starts blank and contains the executive catalog', () => {
@@ -90,4 +91,146 @@ test('public menu remains an iframe of the original restaurant menu', () => {
   assert.match(html, /<iframe/);
   assert.match(html, /src="https:\/\/btcsolucoes.github.io\/carda-pio\/\?src=hq"/);
   assert.match(html, /Voltar à Central/);
+});
+
+test('Story composer offers branded generation or upload and starts with publishing blocked', () => {
+  const html = runtime()('renderStoryComposer(getRestaurant("amaro"), "https://example.com/menu")');
+  assert.match(html, /name="storyImageSource" value="auto" checked/);
+  assert.match(html, /name="storyImageSource" value="upload"/);
+  assert.match(html, /accept="image\/jpeg,image\/png,image\/webp"/);
+  assert.match(html, /id="publish-story" disabled/);
+  assert.match(html, /width="1080" height="1920"/);
+  assert.doesNotMatch(html, /telefone|Android|APK|type="password"/i);
+});
+
+test('account configuration contains only public identifiers and no Instagram login', () => {
+  const html = runtime()('renderHqStories()');
+  assert.match(html, /name="publisher_id"/);
+  assert.match(html, /name="instagram_username"/);
+  assert.match(html, /name="instagram_user_id"/);
+  assert.match(html, /view=story-panel/);
+  assert.doesNotMatch(html, /type="password"|name="(?:password|service_token)"|APK|Android/);
+});
+
+test('publication requires an enabled ready private publisher with a complete account identity', () => {
+  const run = runtime();
+  run('var readyPublishing = {provider:"private_api",enabled:true,state:"ready",publisher_id:"pub",instagram_username:"test",instagram_user_id:"123"}');
+  assert.equal(run('storyPublishingReady(readyPublishing)'), true);
+  for (const expression of ['null', '{...readyPublishing, enabled:false}', '{...readyPublishing, state:"outcome_unknown"}', '{...readyPublishing,state:"publisher_inactive"}', '{...readyPublishing,instagram_user_id:""}', '{...readyPublishing,provider:"android"}']) {
+    assert.equal(run(`storyPublishingReady(${expression})`), false);
+  }
+});
+
+test('Story validation rejects unsafe URLs, unsupported files and excessive dimensions', () => {
+  const run = runtime();
+  assert.equal(run('validateStoryLink("https://example.com/menu")'), 'https://example.com/menu');
+  for (const value of ['http://example.com', 'javascript:alert(1)', 'https://user:secret@example.com', 'not a link']) {
+    assert.throws(() => run(`validateStoryLink(${JSON.stringify(value)})`), /invalid_story_link/);
+  }
+  assert.doesNotThrow(() => run('validateStoryUpload({type:"image/webp",size:1000})'));
+  assert.throws(() => run('validateStoryUpload({type:"image/svg+xml",size:1000})'), /story_upload_type/);
+  assert.throws(() => run('validateStoryUpload({type:"image/png",size:0})'), /story_upload_size/);
+  assert.throws(() => run('validateStoryUpload({type:"image/png",size:16*1024*1024})'), /story_upload_size/);
+  assert.throws(() => run('storyContainRect(10000,10000)'), /story_upload_dimensions/);
+  assert.throws(() => run('storyContainRect(0,100)'), /story_upload_dimensions/);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(storyContainRect(1600,900))')), { x: 0, y: 656.25, width: 1080, height: 607.5 });
+});
+
+test('idempotency is stable for a retry and changes with media, URL, restaurant or menu', async () => {
+  const run = runtime();
+  const key = await run('storyPublicationKey("a","m1","data:image/jpeg;base64,a","https://example.com")');
+  assert.equal(key, await run('storyPublicationKey("a","m1","data:image/jpeg;base64,a","https://example.com/")'));
+  assert.match(key, /^story:[a-f0-9]{64}$/);
+  const alternatives = await Promise.all([
+    run('storyPublicationKey("b","m1","data:image/jpeg;base64,a","https://example.com")'),
+    run('storyPublicationKey("a","m2","data:image/jpeg;base64,a","https://example.com")'),
+    run('storyPublicationKey("a","m1","data:image/jpeg;base64,b","https://example.com")'),
+    run('storyPublicationKey("a","m1","data:image/jpeg;base64,a","https://example.com/other")'),
+  ]);
+  assert.equal(new Set([key, ...alternatives]).size, 5);
+});
+
+test('remote Story errors are rendered as text and unknown outcomes require reconciliation', () => {
+  const target = { dataset: {}, innerHTML: '' };
+  const run = runtime({ document: { addEventListener() {}, getElementById: () => target } });
+  run('setStoryAutomationStatus("failed_attention", \'<img src=x onerror="alert(1)">\')');
+  assert.doesNotMatch(target.innerHTML, /<img/);
+  assert.match(target.innerHTML, /&lt;img/);
+  assert.match(run('storyJobMessage({status:"outcome_unknown"})'), /resolva no publicador/);
+  assert.doesNotMatch(run('storyJobMessage({status:"completed"})'), /visualmente/);
+});
+
+test('submitting a menu saves the menu without publishing an Instagram Story', async () => {
+  const button = {};
+  const form = { dataset: {}, querySelector: () => button, addEventListener(type, handler) { this[type] = handler; } };
+  class Fields extends Map {
+    constructor() { super([['date', '2026-10-05'], ['title', 'Menu']]); }
+  }
+  const run = runtime({
+    FormData: Fields, testForm: form,
+    document: { addEventListener() {}, getElementById: id => id === 'menu-form' ? form : null, querySelector: () => null, body: { contains: () => true } },
+  });
+  run('var savedMenuCalls=0; saveMenuForm=async()=>{savedMenuCalls++;return {ok:true}}; queueStoryPublication=async()=>{throw new Error("unexpected_publication")}; toast=()=>{}; attachClientHandlers({id:"restaurant",slug:"other"},{id:"menu"})');
+  await form.submit({ preventDefault() {}, currentTarget: form });
+  assert.equal(run('savedMenuCalls'), 1);
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, 'Enviar e publicar cardápio');
+});
+
+test('an older asynchronous image render cannot overwrite the latest Story preview', async () => {
+  const nodes = new Map();
+  const previewDraws = [];
+  const preview = { getContext: () => ({ drawImage: canvas => previewDraws.push(canvas.id), clearRect() {} }) };
+  nodes.set('#story-canvas', preview);
+  nodes.set('[name="storyLink"]', { value: 'https://example.com' });
+  const panel = { isConnected: true, querySelector: key => { if (!nodes.has(key)) nodes.set(key, {}); return nodes.get(key); }, querySelectorAll: () => [] };
+  let sequence = 0;
+  const run = runtime({ testPanel: panel, document: { addEventListener() {}, getElementById: id => id === 'story-panel' ? panel : {}, createElement: () => ({ id: ++sequence, toDataURL() { return `data:image/jpeg;base64,${this.id}`; } }) } });
+  run('var releaseFirst; var renderCount=0; drawStory=async()=>{if(++renderCount===1) await new Promise(resolve=>{releaseFirst=resolve})}; storyComposer={panel:testPanel,restaurant:{slug:"amaro",name:"Amaro"},menu:{id:"menu"},mode:"auto",renderVersion:0}; var first=prepareStoryImage(storyComposer)');
+  await run('prepareStoryImage(storyComposer)');
+  run('releaseFirst()');
+  await run('first');
+  assert.deepEqual(previewDraws, [2]);
+  assert.equal(run('storyComposer.media.dataUrl'), 'data:image/jpeg;base64,2');
+});
+
+test('publication queue preserves the supplied media identity and never requests automatic retries', async () => {
+  const run = runtime();
+  run('var queuedPayload; apiPost=async payload=>{queuedPayload=payload;return {job:{id:"j",status:"pending"},duplicate:false}}; setStoryAutomationStatus=()=>{}');
+  await run('queueStoryPublication({slug:"test",adminToken:"local-test"},{id:"m",storyLink:"https://example.com"},"story:stable",{dataUrl:"data:image/jpeg;base64,abc",contentType:"image/jpeg",source:"upload"},null)');
+  const payload = JSON.parse(run('JSON.stringify(queuedPayload)'));
+  assert.equal(payload.client_request_id, 'story:stable');
+  assert.equal(payload.content_type, 'image/jpeg');
+  assert.equal(payload.image_source, 'upload');
+  assert.equal(payload.retry_failed, undefined);
+});
+
+test('an unavailable publishing configuration allows downloading but blocks publication', async () => {
+  const nodes = new Map([['[name="storyLink"]', { value: 'https://example.com' }]]);
+  const panel = { isConnected: true, querySelector: key => { if (!nodes.has(key)) nodes.set(key, {}); return nodes.get(key); }, querySelectorAll: () => [] };
+  const run = runtime({ testPanel: panel, document: { addEventListener() {}, getElementById: () => panel } });
+  run('apiGet=async()=>{throw new Error("offline")}; storyComposer={panel:testPanel,restaurant:{slug:"test",adminToken:"test"},media:{dataUrl:"data:image/jpeg;base64,a"},pollVersion:0,rendering:false,busy:false,locked:false}');
+  await run('refreshStoryPublishing(storyComposer)');
+  assert.equal(nodes.get('#publish-story').disabled, true);
+  assert.equal(nodes.get('#download-story').disabled, false);
+  assert.match(nodes.get('#story-publishing-account').textContent, /indisponível/);
+});
+
+test('an unknown publication outcome ends polling and locks further publication', async () => {
+  const panel = { isConnected: true };
+  const run = runtime({ testPanel: panel, document: { addEventListener() {}, getElementById: () => panel } });
+  run('var timers=[]; window.setTimeout=callback=>timers.push(callback); updateStoryControls=()=>{}; setStoryAutomationStatus=()=>{}; apiGet=async()=>({job:{id:"j",status:"outcome_unknown"}}); storyComposer={panel:testPanel,pollVersion:1}; pollStoryPublication({slug:"test",adminToken:"test"},"j",0,storyComposer,1)');
+  await run('timers.shift()()');
+  assert.equal(run('storyComposer.locked'), true);
+  assert.equal(run('timers.length'), 0);
+});
+
+test('a polling response from the previous route cannot change the current Story panel', async () => {
+  const panel = { isConnected: true };
+  const run = runtime({ testPanel: panel, document: { addEventListener() {}, getElementById: () => panel } });
+  run('var timers=[],statusChanges=0,releasePoll; window.setTimeout=callback=>timers.push(callback); updateStoryControls=()=>{}; setStoryAutomationStatus=()=>{statusChanges++}; apiGet=()=>new Promise(resolve=>{releasePoll=resolve}); storyComposer={panel:testPanel,pollVersion:1}; pollStoryPublication({slug:"test",adminToken:"test"},"j",0,storyComposer,1); var polling=timers.shift()()');
+  run('storyComposer={panel:testPanel,pollVersion:1}; releasePoll({job:{id:"j",status:"publishing"}})');
+  await run('polling');
+  assert.equal(run('statusChanges'), 0);
+  assert.equal(run('timers.length'), 0);
 });

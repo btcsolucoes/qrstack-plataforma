@@ -1,0 +1,387 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { DatabaseSync } = require('node:sqlite');
+
+const root = path.resolve(__dirname, '..');
+const modulePromise = import(pathToFileURL(path.join(root, 'cloudflare/src/instagram-stories.js')).href);
+const workerPromise = import(pathToFileURL(path.join(root, 'cloudflare/src/worker.js')).href);
+const ownerKey = 'test-owner-key-not-a-real-secret';
+const publisherToken = 'test-publisher-credential-'.repeat(3);
+const secondToken = 'test-second-publisher-token-'.repeat(3);
+// Valid 1x1 PNG; media dimensions are normalized by the UI and decoded by the runner.
+const imageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=';
+
+function fixture(t) {
+  const sqlite = new DatabaseSync(':memory:');
+  t.after(() => sqlite.close());
+  sqlite.exec(`PRAGMA foreign_keys = ON;
+    CREATE TABLE restaurants(id TEXT PRIMARY KEY, slug TEXT UNIQUE, admin_token TEXT, story_link TEXT);
+    INSERT INTO restaurants VALUES ('r-internal','internal','internal-test-token','https://example.test/menu');
+    INSERT INTO restaurants VALUES ('r-other','other','other-test-token','https://example.test/other');`);
+  sqlite.exec(fs.readFileSync(path.join(root, 'cloudflare/migrations/0007_story_automation.sql'), 'utf8'));
+  sqlite.exec("INSERT INTO story_agents(device_id,label,token_hash) VALUES ('legacy-phone','Retired','unused')");
+  sqlite.exec(`INSERT INTO story_publish_jobs(id,restaurant_id,restaurant_slug,story_link,media_key,media_token,queued_at)
+    VALUES ('legacy-job','r-internal','internal','https://example.test/menu','old-media','old-token','2026-01-01')`);
+  const migration = fs.readFileSync(path.join(root, 'cloudflare/migrations/0010_instagram_python_publisher.sql'), 'utf8');
+  sqlite.exec(migration);
+  sqlite.exec(migration); // Retry-safe migration, preserving old records.
+  const kv = new Map();
+  const env = {
+    OWNER_ACCESS_TOKEN: ownerKey,
+    DB: {
+      prepare(sql) {
+        let values = [];
+        const statement = {
+          bind(...args) { values = args; return statement; },
+          run() { const result = sqlite.prepare(sql).run(...values); return { success: true, meta: { changes: Number(result.changes) } }; },
+          first() { return sqlite.prepare(sql).get(...values) || null; },
+          all() { return { results: sqlite.prepare(sql).all(...values) }; },
+        };
+        return statement;
+      },
+      batch(statements) {
+        sqlite.exec('BEGIN');
+        try { const results = statements.map(statement => statement.run()); sqlite.exec('COMMIT'); return results; }
+        catch (error) { sqlite.exec('ROLLBACK'); throw error; }
+      },
+    },
+    INSIGHTS_CACHE: {
+      async put(key, value, options) { kv.set(key, { value: new Uint8Array(value).slice().buffer, metadata: options?.metadata }); },
+      async getWithMetadata(key) { return kv.get(key) || { value: null, metadata: null }; },
+      async delete(key) { kv.delete(key); },
+    },
+  };
+  async function call(action, bodyOrQuery = {}, options = {}) {
+    const { handleInstagramStories } = await modulePromise;
+    const method = options.method || (['registerInstagramPublisher', 'bindInstagramAccount', 'createStoryJob', 'updateInstagramStoryJob'].includes(action) ? 'POST' : 'GET');
+    const url = new URL('https://worker.example.test/');
+    url.searchParams.set('action', action);
+    if (method === 'GET') for (const [name, value] of Object.entries(bodyOrQuery)) url.searchParams.set(name, value);
+    const headers = new Headers();
+    if (options.token) headers.set('authorization', `Bearer ${options.token}`);
+    if (options.claimToken) headers.set('x-claim-token', options.claimToken);
+    const request = new Request(url, { method, headers });
+    const response = await handleInstagramStories(request, env, method === 'POST' ? bodyOrQuery : {}, action);
+    if (response.headers.get('content-type')?.includes('application/json')) return { status: response.status, data: await response.json() };
+    return { status: response.status, bytes: new Uint8Array(await response.arrayBuffer()), headers: response.headers };
+  }
+  async function setupAccount({ slug = 'internal', publisherId = 'test-windows', username = 'internal_test', userId = '12345', token = publisherToken, enabled = true } = {}) {
+    assert.equal((await call('registerInstagramPublisher', { owner_key: ownerKey, publisher_id: publisherId, publisher_token: token, label: 'Test Windows', version: '1.0.0' })).status, 200);
+    assert.equal((await call('bindInstagramAccount', { owner_key: ownerKey, slug, publisher_id: publisherId, instagram_username: username, instagram_user_id: userId, enabled })).status, 200);
+  }
+  async function enqueue(overrides = {}) {
+    return call('createStoryJob', { slug: 'internal', token: 'internal-test-token', client_request_id: 'test-request',
+      menu_day_id: 'internal-menu', story_link: 'https://example.test/menu', image_base64: imageBase64, content_type: 'image/png', ...overrides });
+  }
+  async function claim(publisherId = 'test-windows', token = publisherToken) {
+    return call('getNextInstagramStoryJob', { publisher_id: publisherId }, { token });
+  }
+  async function update(job, status, extra = {}, options = {}) {
+    return call('updateInstagramStoryJob', { publisher_id: job.publisher_id, job_id: job.id, claim_token: job.claim_token, status, ...extra }, { token: publisherToken, ...options });
+  }
+  return { env, sqlite, kv, call, setupAccount, enqueue, claim, update };
+}
+
+test('migration is retry-safe, disables Android and never imports its queue', async t => {
+  const f = fixture(t);
+  assert.equal(f.sqlite.prepare('SELECT is_active FROM story_agents').get().is_active, 0);
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM story_publish_jobs').get().n, 1);
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM instagram_story_jobs').get().n, 0);
+  for (const action of ['registerStoryAgent', 'getAgentRelease', 'getNextStoryJob', 'updateStoryJob', 'getStoryMedia']) {
+    const result = await f.call(action, {}, { method: action.startsWith('register') || action.startsWith('update') ? 'POST' : 'GET' });
+    assert.equal(result.status, 410);
+    assert.equal(result.data.error, 'android_story_agent_retired');
+  }
+});
+
+test('first publisher registration and account binding both require owner authorization', async t => {
+  const f = fixture(t);
+  const registration = { publisher_id: 'test-windows', publisher_token: publisherToken };
+  assert.equal((await f.call('registerInstagramPublisher', registration)).status, 401);
+  assert.equal((await f.call('registerInstagramPublisher', { ...registration, owner_key: 'wrong' })).status, 401);
+  await f.setupAccount();
+  assert.notEqual(f.sqlite.prepare('SELECT token_hash FROM instagram_publishers').get().token_hash, publisherToken);
+  const binding = { slug: 'internal', publisher_id: 'test-windows', instagram_username: 'internal_test', instagram_user_id: '12345', enabled: true };
+  assert.equal((await f.call('bindInstagramAccount', binding)).status, 401);
+  assert.equal((await f.call('bindInstagramAccount', { ...binding, owner_key: ownerKey, instagram_user_id: 'not-an-id' })).status, 400);
+  assert.equal((await f.call('getStoryPublishingConfig', { slug: 'internal', token: 'wrong' })).status, 401);
+});
+
+test('enqueue requires an enabled restaurant binding and exposes no private claim/media storage credentials', async t => {
+  const f = fixture(t);
+  assert.equal((await f.enqueue()).data.error, 'instagram_account_not_ready');
+  await f.setupAccount({ enabled: false });
+  assert.equal((await f.enqueue()).status, 409);
+  await f.setupAccount();
+  const result = await f.enqueue();
+  assert.equal(result.status, 201);
+  assert.equal(result.data.job.instagram_user_id, '12345');
+  assert.equal(result.data.job.instagram_username, 'internal_test');
+  assert.equal(result.data.job.provider, 'private_api');
+  assert.equal('claim_token' in result.data.job, false);
+  assert.equal('media_key' in result.data.job, false);
+  assert.equal('request_sha256' in result.data.job, false);
+  assert.equal((await f.enqueue({ token: 'wrong' })).status, 401);
+  const other = await f.call('getStoryJob', { slug: 'other', token: 'other-test-token', job: result.data.job.id });
+  assert.equal(other.data.job, null);
+});
+
+test('concurrent duplicate submissions return one job while changed payload conflicts', async t => {
+  const f = fixture(t);
+  await f.setupAccount();
+  const results = await Promise.all([f.enqueue(), f.enqueue(), f.enqueue()]);
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 200, 201]);
+  assert.equal(new Set(results.map(result => result.data.job.id)).size, 1);
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM instagram_story_jobs').get().n, 1);
+  assert.equal(f.kv.size, 1);
+  assert.equal((await f.enqueue({ story_link: 'https://example.test/changed' })).data.error, 'idempotency_key_conflict');
+  assert.equal((await f.enqueue({ client_request_id: '' })).status, 400);
+});
+
+test('media and link validation rejects invalid bytes, unsupported schemes and over-limit input', async t => {
+  const f = fixture(t);
+  await f.setupAccount();
+  assert.equal((await f.enqueue({ image_base64: Buffer.from('not a png').toString('base64') })).status, 415);
+  assert.equal((await f.enqueue({ content_type: 'image/jpeg' })).status, 415);
+  assert.equal((await f.enqueue({ content_type: '__proto__' })).status, 415);
+  assert.equal((await f.enqueue({ content_type: 'constructor' })).status, 415);
+  assert.equal((await f.enqueue({ image_base64: '***' })).status, 400);
+  assert.equal((await f.enqueue({ story_link: 'http://example.test/menu' })).status, 400);
+  assert.equal((await f.enqueue({ story_link: 'https://user:password@example.test/menu' })).status, 400);
+  assert.equal((await f.enqueue({ image_base64: 'A'.repeat(8 * 1024 * 1024 + 4) })).status, 413);
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM instagram_story_jobs').get().n, 0);
+});
+
+test('claims are account scoped and concurrent workers cannot claim multiple jobs for one publisher', async t => {
+  const f = fixture(t);
+  await f.setupAccount();
+  await f.setupAccount({ slug: 'other', publisherId: 'second-publisher', username: 'other_test', userId: '67890', token: secondToken });
+  await f.enqueue();
+  await f.enqueue({ client_request_id: 'second-request' });
+  const otherJob = await f.enqueue({ slug: 'other', token: 'other-test-token', client_request_id: 'other-request' });
+  const claims = await Promise.all([f.claim(), f.claim(), f.claim()]);
+  assert.ok(claims.every(result => result.status === 200));
+  assert.equal(new Set(claims.map(result => result.data.job.id)).size, 1);
+  assert.ok(claims.every(result => result.data.job.restaurant_slug === 'internal'));
+  assert.equal(f.sqlite.prepare("SELECT count(*) n FROM instagram_story_jobs WHERE status='claimed' AND publisher_id='test-windows'").get().n, 1);
+  const secondClaim = await f.claim('second-publisher', secondToken);
+  assert.equal(secondClaim.data.job.id, otherJob.data.job.id);
+  assert.equal((await f.claim('test-windows', secondToken)).status, 401);
+});
+
+test('private job and media require the assigned publisher and claim token', async t => {
+  const f = fixture(t);
+  await f.setupAccount();
+  await f.setupAccount({ slug: 'other', publisherId: 'second-publisher', username: 'other_test', userId: '67890', token: secondToken });
+  await f.enqueue();
+  const job = (await f.claim()).data.job;
+  const query = { publisher_id: job.publisher_id, job_id: job.id };
+  assert.equal((await f.call('getInstagramStoryMedia', query, { token: publisherToken })).status, 409);
+  assert.equal((await f.call('getInstagramPublisherJob', query, { token: publisherToken, claimToken: 'wrong' })).status, 409);
+  assert.equal((await f.call('getInstagramStoryMedia', { ...query, publisher_id: 'second-publisher' }, { token: secondToken, claimToken: job.claim_token })).status, 409);
+  const media = await f.call('getInstagramStoryMedia', query, { token: publisherToken, claimToken: job.claim_token });
+  assert.equal(media.status, 200);
+  assert.equal(media.headers.get('content-type'), 'image/png');
+  assert.deepEqual(Buffer.from(media.bytes), Buffer.from(imageBase64, 'base64'));
+  const mediaUrl = new URL(job.media_url);
+  assert.equal(mediaUrl.origin, 'https://worker.example.test');
+  assert.equal(mediaUrl.searchParams.has('token'), false);
+  assert.equal(mediaUrl.searchParams.has('claim_token'), false);
+  const publicResult = await f.call('getStoryJob', { slug: 'internal', token: 'internal-test-token', job: job.id });
+  assert.equal('claim_token' in publicResult.data.job, false);
+});
+
+test('publishing permission is atomic, one-use, audited and cannot be retried', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  const job = (await f.claim()).data.job;
+  assert.equal((await f.update(job, 'preparing')).status, 200);
+  const permissions = await Promise.all([f.update(job, 'publishing'), f.update(job, 'publishing'), f.update(job, 'publishing')]);
+  assert.deepEqual(permissions.map(result => result.status).sort(), [200, 409, 409]);
+  assert.equal(f.sqlite.prepare("SELECT count(*) n FROM instagram_story_job_events WHERE status='publishing'").get().n, 1);
+  assert.equal((await f.update(job, 'preparing')).status, 409);
+  assert.equal((await f.update(job, 'failed_attention')).status, 409);
+  assert.equal((await f.update(job, 'retry')).status, 400);
+  assert.equal((await f.update(job, '__proto__')).status, 400);
+  assert.equal((await f.claim()).data.job.status, 'publishing');
+});
+
+test('completion acknowledgement is idempotent and completed jobs never return to the queue', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  const job = (await f.claim()).data.job;
+  assert.equal((await f.update(job, 'completed', { media_id: '999_12345' })).status, 409);
+  await f.update(job, 'publishing');
+  assert.equal((await f.update(job, 'completed')).status, 400);
+  const complete = await f.update(job, 'completed', { media_id: '999_12345' });
+  assert.equal(complete.status, 200);
+  const ack = await f.update(job, 'completed', { media_id: '999_12345' });
+  assert.equal(ack.status, 200);
+  assert.equal(ack.data.duplicate, true);
+  assert.equal((await f.update(job, 'completed', { media_id: '888_12345' })).status, 409);
+  assert.equal((await f.update(job, 'publishing')).status, 409);
+  assert.equal((await f.claim()).data.job, null);
+  assert.equal((await f.enqueue({ retry_failed: true })).data.job.id, job.id);
+});
+
+test('failed preflight acknowledgements may repeat without creating a new publication attempt', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  const job = (await f.claim()).data.job;
+  const acknowledgements = await Promise.all([
+    f.update(job, 'failed_attention', { error_code: 'image_invalid' }),
+    f.update(job, 'failed_attention', { error_code: 'image_invalid' }),
+  ]);
+  assert.ok(acknowledgements.every(result => result.status === 200));
+  assert.equal((await f.update(job, 'failed_attention')).data.duplicate, true);
+  assert.equal((await f.update(job, 'publishing')).status, 409);
+  assert.equal((await f.claim()).data.job, null);
+  assert.equal((await f.enqueue({ retry_failed: true })).data.job.id, job.id);
+});
+
+test('publishing permission rolls back if its audit event cannot be persisted', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  const job = (await f.claim()).data.job;
+  f.sqlite.exec(`CREATE TRIGGER reject_publish_event BEFORE INSERT ON instagram_story_job_events
+    WHEN NEW.status = 'publishing' BEGIN SELECT RAISE(ABORT, 'simulated audit failure'); END;`);
+  const result = await f.update(job, 'publishing');
+  assert.equal(result.status, 500);
+  assert.equal(result.data.error, 'instagram_story_internal_error');
+  assert.equal(f.sqlite.prepare('SELECT status FROM instagram_story_jobs WHERE id = ?').get(job.id).status, 'claimed');
+  assert.equal(f.sqlite.prepare("SELECT count(*) n FROM instagram_story_job_events WHERE status='publishing'").get().n, 0);
+});
+
+test('a pause arriving between preflight and atomic permission still prevents publishing', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  const job = (await f.claim()).data.job;
+  const original = f.env.DB.batch;
+  f.env.DB.batch = statements => {
+    f.sqlite.exec("UPDATE instagram_account_bindings SET enabled = 0 WHERE restaurant_id = 'r-internal'");
+    return original(statements);
+  };
+  assert.equal((await f.update(job, 'publishing')).status, 409);
+  assert.equal(f.sqlite.prepare('SELECT status FROM instagram_story_jobs WHERE id = ?').get(job.id).status, 'claimed');
+});
+
+test('enqueue refuses a stale account snapshot if the binding changes before insertion', async t => {
+  const f = fixture(t);
+  await f.setupAccount();
+  const original = f.env.DB.batch;
+  f.env.DB.batch = statements => {
+    f.sqlite.exec("UPDATE instagram_account_bindings SET instagram_user_id = '99999', instagram_username = 'changed_account'");
+    return original(statements);
+  };
+  assert.equal((await f.enqueue()).status, 409);
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM instagram_story_jobs').get().n, 0);
+  assert.equal(f.kv.size, 0);
+});
+
+test('account reassignment cannot race a newly enqueued unresolved job', async t => {
+  const f = fixture(t);
+  await f.setupAccount();
+  const original = f.env.DB.prepare;
+  f.env.DB.prepare = sql => {
+    const statement = original(sql);
+    if (sql.startsWith('INSERT INTO instagram_account_bindings')) {
+      const run = statement.run;
+      statement.run = () => {
+        f.sqlite.exec(`INSERT INTO instagram_story_jobs(id,restaurant_id,restaurant_slug,publisher_id,instagram_username,instagram_user_id,
+          story_link,media_key,media_sha256,content_type,media_bytes,client_request_id,request_sha256,queued_at,created_at,updated_at)
+          VALUES ('racing-job','r-internal','internal','test-windows','internal_test','12345','https://example.test/menu',
+          'test-media','hash','image/png',1,'race-request','hash','2026-01-01','2026-01-01','2026-01-01')`);
+        return run();
+      };
+    }
+    return statement;
+  };
+  const result = await f.call('bindInstagramAccount', { owner_key: ownerKey, slug: 'internal', publisher_id: 'test-windows',
+    instagram_username: 'new_account', instagram_user_id: '99999', enabled: true });
+  assert.equal(result.status, 409);
+  assert.equal(f.sqlite.prepare('SELECT instagram_user_id FROM instagram_account_bindings').get().instagram_user_id, '12345');
+});
+
+test('uncertain publication blocks the account and is only cleared by a confirmed completion', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  await f.enqueue({ client_request_id: 'queued-second' });
+  const job = (await f.claim()).data.job;
+  await f.update(job, 'publishing');
+  assert.equal((await f.update(job, 'outcome_unknown', { error_code: 'publish_response_lost' })).status, 200);
+  assert.equal((await f.update(job, 'outcome_unknown', { error_code: 'publish_response_lost' })).status, 200);
+  assert.equal((await f.claim()).data.job, null);
+  const config = await f.call('getStoryPublishingConfig', { slug: 'internal', token: 'internal-test-token' });
+  assert.equal(config.data.publishing.enabled, false);
+  assert.equal(config.data.publishing.state, 'outcome_unknown');
+  assert.equal((await f.enqueue({ client_request_id: 'another-new-request' })).data.error, 'instagram_outcome_unknown');
+  assert.equal((await f.update(job, 'failed_attention')).status, 409);
+  assert.equal((await f.update(job, 'completed', { media_id: 'confirmed_12345' })).status, 200);
+  assert.equal((await f.claim()).data.job.status, 'claimed');
+});
+
+test('ambiguous permission transport failure can conservatively freeze a job before publishing state', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  const job = (await f.claim()).data.job;
+  assert.equal((await f.update(job, 'outcome_unknown', { error_code: 'permission_response_lost' })).status, 200);
+  assert.equal((await f.update(job, 'publishing')).status, 409);
+  assert.equal((await f.claim()).data.job, null);
+});
+
+test('disabled binding prevents publication but still accepts safe reconciliation', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  const job = (await f.claim()).data.job;
+  await f.update(job, 'preparing');
+  await f.setupAccount({ enabled: false });
+  const check = await f.call('getInstagramPublisherJob', { publisher_id: job.publisher_id, job_id: job.id }, { token: publisherToken, claimToken: job.claim_token });
+  assert.equal(check.data.can_publish, false);
+  assert.equal(check.data.publishing.enabled, false);
+  assert.equal((await f.update(job, 'publishing')).status, 409);
+  await f.setupAccount();
+  await f.update(job, 'publishing');
+  await f.setupAccount({ enabled: false });
+  assert.equal((await f.update(job, 'completed', { media_id: 'confirmed_12345' })).status, 200);
+});
+
+test('binding identity cannot be switched under unresolved jobs and duplicate Instagram ownership is rejected', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  const binding = { owner_key: ownerKey, slug: 'internal', publisher_id: 'test-windows', instagram_username: 'other_account', instagram_user_id: '44444', enabled: true };
+  assert.equal((await f.call('bindInstagramAccount', binding)).data.error, 'account_has_unresolved_jobs');
+  assert.equal((await f.call('bindInstagramAccount', { ...binding, slug: 'other', instagram_user_id: '12345' })).data.error, 'instagram_account_already_bound');
+});
+
+test('global pause prevents claim and permission while leaving job inspection available', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  f.env.INSTAGRAM_PUBLISHING_ENABLED = 'false';
+  assert.equal((await f.claim()).data.job, null);
+  f.env.INSTAGRAM_PUBLISHING_ENABLED = 'true';
+  const job = (await f.claim()).data.job;
+  f.env.INSTAGRAM_PUBLISHING_ENABLED = 'false';
+  assert.equal((await f.update(job, 'publishing')).status, 409);
+  const check = await f.call('getInstagramPublisherJob', { publisher_id: job.publisher_id, job_id: job.id }, { token: publisherToken, claimToken: job.claim_token });
+  assert.equal(check.status, 200);
+  assert.equal(check.data.can_publish, false);
+});
+
+test('real Worker dispatch retires Android and bounds bodies with or without Content-Length', async t => {
+  const f = fixture(t);
+  const worker = (await workerPromise).default;
+  const { MAX_STORY_REQUEST_BYTES } = await modulePromise;
+  const context = { waitUntil() {} };
+  const retired = await worker.fetch(new Request('https://worker.example.test/?action=getNextStoryJob'), f.env, context);
+  assert.equal(retired.status, 410);
+  const declared = new Request('https://worker.example.test/', { method: 'POST', headers: { 'content-length': String(MAX_STORY_REQUEST_BYTES + 1) }, body: '{}' });
+  assert.equal((await worker.fetch(declared, f.env, context)).status, 413);
+  const chunked = new Request('https://worker.example.test/', { method: 'POST', body: 'x'.repeat(MAX_STORY_REQUEST_BYTES + 1) });
+  assert.equal((await worker.fetch(chunked, f.env, context)).status, 413);
+  const realConfig = await worker.fetch(new Request('https://worker.example.test/?action=getStoryPublishingConfig&slug=internal&token=internal-test-token'), f.env, context);
+  assert.equal(realConfig.status, 200);
+  assert.equal((await realConfig.json()).publishing.state, 'unconfigured');
+});

@@ -9,7 +9,7 @@ const QRSTACK_API_URL = QRSTACK_D1_API_URL;
 const ACTIVE_CLIENT_SLUG = "amaro";
 const ACTIVE_CLIENT_TOKEN = "qrstack-amaro-2026";
 const OWNER_ACCESS_TOKEN = "qrstack-berna-2026";
-const STORY_AUTOMATION_ENABLED = false;
+const STORY_AUTOMATION_ENABLED = true;
 const OWNER_SESSION_KEY = "qrstack:owner-access";
 const CLIENT_SESSION_PREFIX = "qrstack:client-access:";
 const AMARO_ASSETS_BASE_URL = "https://btcsolucoes.github.io/carda-pio/";
@@ -82,9 +82,9 @@ const MENU_SUBMISSION_PREFIX = "qrstack:menu-submission:";
 const insightsOpenedThisSession = new Set();
 const app = document.getElementById("app");
 let state = loadState();
-let lastStoryDataUrl = "";
-let lastStoryBlob = null;
-let lastStorySlug = "";
+let storyComposer = null;
+const STORY_UPLOAD_MAX_BYTES = 15 * 1024 * 1024;
+const STORY_MEDIA_MAX_BYTES = 6 * 1024 * 1024;
 let routeVersion = 0;
 const runtimeCatalogs = new Map();
 const insightsRetryTimers = new Map();
@@ -1134,6 +1134,7 @@ function renderHq(tab = "overview") {
   if (tab === "overview") hydrateWorkspaceOverview();
   if (tab === "respostas") hydrateMenuResponses();
   if (tab === "banco") hydrateWorkspaceCatalog();
+  if (tab === "stories") attachStoryAccountHandlers();
 }
 
 function renderAdminHero(title, subtitle, logoUrl) {
@@ -1260,8 +1261,8 @@ function renderHqStories() {
       const restaurant = state.restaurants.find((rest) => rest.id === story.restaurantId);
       return `
         <div class="table-row">
-          <span><strong>${restaurant?.name || "Cliente"}</strong><br><span class="muted">${formatDateTime(story.createdAt)}</span></span>
-          <span>${story.templateName}</span>
+          <span><strong>${escapeHtml(restaurant?.name || "Cliente")}</strong><br><span class="muted">${formatDateTime(story.createdAt)}</span></span>
+          <span>${escapeHtml(story.templateName)}</span>
         </div>
       `;
     })
@@ -1270,30 +1271,41 @@ function renderHqStories() {
     <section class="section">
       <div class="section__head">
         <p class="eyebrow">Stories</p>
-        <h2>Artes geradas</h2>
-        <p>O gerador usa a paleta do restaurante e coloca a logo na arte. O histórico abaixo registra o que cada cliente gerou.</p>
+        <h2>Stories dos restaurantes</h2>
+        <p>Prepare uma imagem enviada ou gere uma arte com a identidade do restaurante. A publicação é feita pelo publicador QrStack na conta vinculada.</p>
       </div>
       <div class="grid">
         ${state.restaurants
           .map(
             (restaurant) => `
-              <article class="card story-brand-card">
+              <article class="card story-brand-card" data-story-account-card="${escapeAttr(restaurant.slug)}">
                 <div class="brand-swatch">
                   <span style="background:${restaurant.primaryColor}"></span>
                   <span style="background:${restaurant.secondaryColor}"></span>
                   <img src="${restaurant.logoUrl}" alt="${restaurant.name}" />
                 </div>
-                <h3>${restaurant.name}</h3>
-                <p class="muted">Story com logo, cor primária, cor secundária e itens publicados no formulário do dia.</p>
+                <h3>${escapeHtml(restaurant.name)}</h3>
+                <p class="muted">Use logo e cores do restaurante ou envie sua própria imagem.</p>
                 <div class="actions">
-                  <a class="button" href="${clientPortalLink(restaurant)}">Gerar Story</a>
+                  <a class="button" href="${clientPortalLink(restaurant)}&view=story-panel">Preparar Story</a>
                 </div>
+                <p class="story-account-summary" data-story-account-summary role="status">Consultando a conta vinculada...</p>
+                <details class="story-account-settings"><summary>Configurar conta de publicação</summary>
+                  <form class="form-grid" data-story-account-form="${escapeAttr(restaurant.slug)}">
+                    <div class="field field--full"><label>Identificador do publicador<input name="publisher_id" required maxlength="160" autocomplete="off" /></label></div>
+                    <div class="field"><label>Usuário do Instagram<input name="instagram_username" required maxlength="30" placeholder="restaurante" autocomplete="off" /></label></div>
+                    <div class="field"><label>ID da conta Instagram<input name="instagram_user_id" required inputmode="numeric" pattern="[0-9]+" autocomplete="off" /></label></div>
+                    <label class="story-checkbox field--full"><input type="checkbox" name="enabled" /> Habilitar publicação nesta conta</label>
+                    <p class="muted field--full">Use os dados da conta já conectada no publicador. Credenciais de login são configuradas no servidor.</p>
+                    <div class="actions field--full"><button type="submit" disabled>Salvar vínculo</button></div>
+                  </form>
+                </details>
               </article>
             `
           )
           .join("")}
       </div>
-      <div class="card table">${stories || "<p class='muted'>Nenhum Story gerado ainda.</p>"}</div>
+      <div class="card table">${stories || "<p class='muted'>Nenhuma arte preparada neste navegador ainda.</p>"}</div>
     </section>
   `;
 }
@@ -1382,6 +1394,252 @@ function renderHqInsights() {
     </section>`;
 }
 
+function renderStoryComposer(restaurant, storyLink) {
+  return `<section class="section client-step" id="story-panel">
+    <div class="section__head"><p class="eyebrow">Instagram Stories</p><h2>Prepare sua publicação</h2><p class="muted">Escolha a imagem, confira a prévia e publique na conta do restaurante.</p></div>
+    <div class="story-workbench">
+      <div class="story-controls">
+        <div class="story-account-summary" id="story-publishing-account" role="status">Consultando a conta vinculada...</div>
+        <fieldset class="story-source-options"><legend>Imagem do Story</legend>
+          <label><input type="radio" name="storyImageSource" value="auto" checked /><span><strong>Gerar automaticamente</strong><small>Logo e cores de ${escapeHtml(restaurant.name)}.</small></span></label>
+          <label><input type="radio" name="storyImageSource" value="upload" /><span><strong>Enviar imagem</strong><small>Escolha uma arte ou foto do seu dispositivo.</small></span></label>
+        </fieldset>
+        <div class="field" id="story-upload-field" hidden><label for="story-image-file">Imagem</label><input id="story-image-file" type="file" name="storyImageFile" accept="image/jpeg,image/png,image/webp" /><small class="muted">JPG, PNG ou WebP, até 15 MB. A imagem inteira será ajustada a 1080 × 1920, com fundo da marca quando necessário.</small></div>
+        <div class="field"><label for="storyLink">Link do sticker</label><input id="storyLink" name="storyLink" type="url" value="${escapeAttr(storyLink)}" placeholder="https://seu-cardapio.com" required /><small class="muted">O publicador adiciona o sticker clicável com este endereço HTTPS.</small></div>
+        <p id="story-image-status" class="story-image-status" role="status">Preparando a imagem...</p>
+        <div class="actions"><button type="button" id="publish-story" disabled>Publicar Story</button><button type="button" class="secondary" id="download-story" disabled>Baixar imagem</button><button type="button" class="ghost" id="refresh-story-publishing">Atualizar conta</button></div>
+        <p id="story-publish-hint" class="muted">Aguarde a imagem e a verificação da conta.</p>
+        <div class="story-automation-status" id="story-automation-status" aria-live="polite"><span class="status-pill">Prévia</span><p>Seu Story será enviado quando você clicar em Publicar Story.</p></div>
+      </div>
+      <figure class="story-preview"><div class="story-frame"><canvas id="story-canvas" width="1080" height="1920" aria-label="Prévia da imagem do Story"></canvas></div><figcaption>Prévia 9:16 · O sticker será adicionado pelo Instagram.</figcaption></figure>
+    </div>
+  </section>`;
+}
+
+function storyPublishingReady(publishing) {
+  return publishing?.provider === "private_api" && publishing.enabled === true && publishing.state === "ready"
+    && Boolean(publishing.publisher_id && publishing.instagram_username && publishing.instagram_user_id);
+}
+
+function storyPublishingDescription(publishing) {
+  const account = publishing?.instagram_username ? `@${publishing.instagram_username}` : "Nenhuma conta vinculada";
+  const states = { unconfigured: "Configure a conta na central QrStack.", disabled: "Publicação desabilitada.", ready: "Pronta para publicar.", outcome_unknown: "Há uma publicação com resultado incerto. Confira o Instagram e resolva no publicador antes de continuar.", publisher_inactive: "Publicador indisponível." };
+  return `${account} — ${states[publishing?.state] || "Não foi possível verificar a conta. Atualize para tentar novamente."}`;
+}
+
+function storyComposerIsCurrent(draft) {
+  return Boolean(draft && storyComposer === draft && draft.panel.isConnected && document.getElementById("story-panel") === draft.panel);
+}
+
+function validateStoryLink(value) {
+  let url;
+  try { url = new URL(String(value || "").trim()); } catch { throw new Error("invalid_story_link"); }
+  if (url.protocol !== "https:" || !url.hostname || url.username || url.password) throw new Error("invalid_story_link");
+  return url.toString();
+}
+
+function validateStoryUpload(file) {
+  if (!file || !["image/jpeg", "image/png", "image/webp"].includes(String(file.type || "").toLowerCase())) throw new Error("story_upload_type");
+  if (!file.size || file.size > STORY_UPLOAD_MAX_BYTES) throw new Error("story_upload_size");
+}
+
+function storyContainRect(width, height) {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1 || width * height > 40000000) throw new Error("story_upload_dimensions");
+  const scale = Math.min(1080 / width, 1920 / height);
+  return { x: (1080 - width * scale) / 2, y: (1920 - height * scale) / 2, width: width * scale, height: height * scale };
+}
+
+async function storyPublicationKey(slug, menuId, dataUrl, storyLink) {
+  const value = JSON.stringify([String(slug), String(menuId), String(dataUrl), validateStoryLink(storyLink)]);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return `story:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function updateStoryControls(draft) {
+  if (!storyComposerIsCurrent(draft)) return;
+  let linkValid = true;
+  try { validateStoryLink(draft.panel.querySelector('[name="storyLink"]').value); } catch { linkValid = false; }
+  const ready = storyPublishingReady(draft.publishing);
+  const canPublish = ready && draft.media && linkValid && !draft.busy && !draft.locked && !draft.rendering;
+  draft.panel.querySelector("#publish-story").disabled = !canPublish;
+  draft.panel.querySelector("#download-story").disabled = !draft.media || draft.rendering;
+  draft.panel.querySelector("#refresh-story-publishing").disabled = draft.busy;
+  draft.panel.querySelectorAll('[name="storyImageSource"], #story-image-file, [name="storyLink"]').forEach((input) => { input.disabled = draft.busy; });
+  draft.panel.querySelector("#story-publish-hint").textContent = draft.busy ? "Enviando esta publicação..."
+    : draft.locked ? "Aguarde a conclusão ou resolva a publicação anterior antes de enviar outra."
+    : !ready ? "Você pode preparar e baixar a imagem. A publicação aguarda uma conta habilitada na central QrStack."
+    : !linkValid ? "Informe um link HTTPS válido para o sticker."
+    : !draft.media || draft.rendering ? "Prepare uma imagem antes de publicar."
+    : `Ao publicar, este Story será enviado para @${draft.publishing.instagram_username}.`;
+}
+
+function initializeStoryComposer(restaurant, menu) {
+  const panel = document.getElementById("story-panel");
+  if (!panel) return;
+  const draft = { panel, restaurant, menu, mode: "auto", file: null, media: null, publishing: null, renderVersion: 0, pollVersion: 0, busy: false, locked: false, rendering: false };
+  storyComposer = draft;
+  panel.querySelectorAll('[name="storyImageSource"]').forEach((input) => input.addEventListener("change", () => {
+    draft.mode = input.value;
+    panel.querySelector("#story-upload-field").hidden = draft.mode !== "upload";
+    prepareStoryImage(draft);
+  }));
+  panel.querySelector("#story-image-file").addEventListener("change", (event) => {
+    draft.file = event.currentTarget.files?.[0] || null;
+    prepareStoryImage(draft);
+  });
+  panel.querySelector('[name="storyLink"]').addEventListener("input", () => prepareStoryImage(draft));
+  panel.querySelector("#refresh-story-publishing").addEventListener("click", () => refreshStoryPublishing(draft));
+  panel.querySelector("#download-story").addEventListener("click", () => {
+    if (!draft.media || !storyComposerIsCurrent(draft)) return;
+    const link = document.createElement("a");
+    link.href = draft.media.dataUrl;
+    link.download = `story-${restaurant.slug}-${todayIso()}.jpg`;
+    link.click();
+    trackEvent(restaurant, "story_downloaded", "admin", draft.menu.id);
+  });
+  panel.querySelector("#publish-story").addEventListener("click", () => publishPreparedStory(draft));
+  prepareStoryImage(draft);
+  refreshStoryPublishing(draft);
+}
+
+async function prepareStoryImage(draft) {
+  if (!storyComposerIsCurrent(draft)) return;
+  const version = ++draft.renderVersion;
+  draft.media = null;
+  draft.rendering = true;
+  draft.panel.querySelector("#story-canvas").getContext("2d").clearRect(0, 0, 1080, 1920);
+  const status = draft.panel.querySelector("#story-image-status");
+  status.textContent = draft.mode === "upload" && !draft.file ? "Escolha uma imagem para continuar." : "Preparando a imagem...";
+  updateStoryControls(draft);
+  try {
+    if (draft.mode === "upload" && !draft.file) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = 1080;
+    canvas.height = 1920;
+    const menu = { ...draft.menu, storyLink: draft.panel.querySelector('[name="storyLink"]').value.trim() };
+    if (draft.mode === "upload") {
+      validateStoryUpload(draft.file);
+      const objectUrl = URL.createObjectURL(draft.file);
+      try {
+        const image = await loadCanvasImage(objectUrl);
+        if (!image) throw new Error("story_upload_decode");
+        const rect = storyContainRect(image.naturalWidth, image.naturalHeight);
+        const context = canvas.getContext("2d");
+        context.fillStyle = draft.restaurant.storyBackgroundColor || draft.restaurant.primaryColor || "#182f28";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(image, rect.x, rect.y, rect.width, rect.height);
+      } finally { URL.revokeObjectURL(objectUrl); }
+    } else {
+      if (document.fonts?.ready) await Promise.race([document.fonts.ready, new Promise((resolve) => setTimeout(resolve, 2000))]);
+      await drawStory(draft.restaurant, menu, getMenuItems(menu.id), canvas);
+    }
+    if (!storyComposerIsCurrent(draft) || draft.renderVersion !== version) return;
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    const base64 = dataUrl.split(",")[1] || "";
+    if (!base64 || Math.ceil(base64.length * 3 / 4) > STORY_MEDIA_MAX_BYTES) throw new Error("invalid_story_media_size");
+    const preview = draft.panel.querySelector("#story-canvas");
+    preview.getContext("2d").drawImage(canvas, 0, 0);
+    draft.media = { dataUrl, contentType: "image/jpeg", source: draft.mode };
+    status.textContent = draft.mode === "upload" ? "Imagem pronta. Confira a composição na prévia." : `Arte pronta com a identidade de ${draft.restaurant.name}.`;
+  } catch (error) {
+    if (storyComposerIsCurrent(draft) && draft.renderVersion === version) {
+      status.textContent = storyQueueErrorMessage(error);
+      draft.panel.querySelector("#story-canvas").getContext("2d").clearRect(0, 0, 1080, 1920);
+    }
+  } finally {
+    if (storyComposerIsCurrent(draft) && draft.renderVersion === version) {
+      draft.rendering = false;
+      updateStoryControls(draft);
+    }
+  }
+}
+
+async function refreshStoryPublishing(draft) {
+  if (!storyComposerIsCurrent(draft)) return;
+  const version = (draft.configVersion || 0) + 1;
+  draft.configVersion = version;
+  draft.pollVersion += 1;
+  draft.publishing = null;
+  draft.panel.querySelector("#story-publishing-account").textContent = "Consultando a conta vinculada...";
+  updateStoryControls(draft);
+  try {
+    const params = { slug: draft.restaurant.slug, token: draft.restaurant.adminToken, fresh: Date.now() };
+    const [config, latest] = await Promise.all([apiGet("getStoryPublishingConfig", params), apiGet("getStoryJob", params)]);
+    if (!storyComposerIsCurrent(draft) || draft.configVersion !== version) return;
+    draft.publishing = config.publishing;
+    draft.locked = config.publishing?.state === "outcome_unknown" || Boolean(latest.job && ["pending", "claimed", "preparing", "publishing", "outcome_unknown"].includes(latest.job.status));
+    draft.panel.querySelector("#story-publishing-account").textContent = storyPublishingDescription(draft.publishing);
+    if (latest.job) {
+      setStoryAutomationStatus(latest.job.status, storyJobMessage(latest.job));
+      if (["pending", "claimed", "preparing", "publishing"].includes(latest.job.status)) pollStoryPublication(draft.restaurant, latest.job.id, 0, draft, ++draft.pollVersion);
+    }
+  } catch {
+    if (!storyComposerIsCurrent(draft) || draft.configVersion !== version) return;
+    draft.publishing = null;
+    draft.panel.querySelector("#story-publishing-account").textContent = "Conta indisponível. Prepare ou baixe a imagem e tente atualizar a conta novamente.";
+  }
+  updateStoryControls(draft);
+}
+
+async function publishPreparedStory(draft) {
+  if (!storyComposerIsCurrent(draft) || draft.busy || draft.locked || draft.rendering || !draft.media || !storyPublishingReady(draft.publishing)) return;
+  const media = draft.media;
+  const menu = { ...draft.menu };
+  draft.busy = true;
+  updateStoryControls(draft);
+  try {
+    menu.storyLink = validateStoryLink(draft.panel.querySelector('[name="storyLink"]').value);
+    await refreshStoryPublishing(draft);
+    if (!storyComposerIsCurrent(draft)) return;
+    if (!storyPublishingReady(draft.publishing) || draft.locked) throw new Error("story_account_unavailable");
+    const requestId = await storyPublicationKey(draft.restaurant.slug, menu.id, media.dataUrl, menu.storyLink);
+    if (!storyComposerIsCurrent(draft) || draft.media !== media) return;
+    const job = await queueStoryPublication(draft.restaurant, menu, requestId, media, draft);
+    if (!storyComposerIsCurrent(draft)) return;
+    draft.locked = ["pending", "claimed", "preparing", "publishing", "outcome_unknown"].includes(job.status);
+    saveStoryPreview(draft.restaurant, menu, media.source);
+    trackEvent(draft.restaurant, "story_queued", "admin", menu.id);
+    toast(job.duplicate ? "Esta publicação já foi registrada." : "Story enviado ao publicador QrStack.");
+  } catch (error) {
+    if (storyComposerIsCurrent(draft)) setStoryAutomationStatus("failed_attention", `${storyQueueErrorMessage(error)} A imagem foi mantida. Atualize a conta para consultar a publicação.`);
+  } finally {
+    draft.busy = false;
+    updateStoryControls(draft);
+  }
+}
+
+function attachStoryAccountHandlers() {
+  document.querySelectorAll("[data-story-account-form]").forEach(async (form) => {
+    const restaurant = getRestaurant(form.dataset.storyAccountForm);
+    const summary = form.closest("[data-story-account-card]").querySelector("[data-story-account-summary]");
+    const button = form.querySelector('button[type="submit"]');
+    try {
+      const response = await apiGet("getStoryPublishingConfig", { slug: restaurant.slug, token: restaurant.adminToken, fresh: Date.now() });
+      if (!form.isConnected) return;
+      const publishing = response.publishing || {};
+      for (const field of ["publisher_id", "instagram_username", "instagram_user_id"]) form.elements[field].value = publishing[field] || "";
+      form.elements.enabled.checked = publishing.enabled === true;
+      summary.textContent = storyPublishingDescription(publishing);
+    } catch { if (form.isConnected) summary.textContent = "Não foi possível consultar o vínculo. Informe os dados do publicador para configurar."; }
+    if (!form.isConnected) return;
+    button.disabled = false;
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (form.dataset.submitting === "true") return;
+      form.dataset.submitting = "true";
+      button.disabled = true;
+      try {
+        const response = await apiPost({ action: "bindInstagramAccount", owner_key: OWNER_ACCESS_TOKEN, slug: restaurant.slug,
+          publisher_id: form.elements.publisher_id.value.trim(), instagram_username: form.elements.instagram_username.value.trim().replace(/^@/, ""),
+          instagram_user_id: form.elements.instagram_user_id.value.trim(), enabled: form.elements.enabled.checked });
+        if (form.isConnected) summary.textContent = storyPublishingDescription(response.publishing);
+      } catch (error) {
+        if (form.isConnected) summary.textContent = `Vínculo não alterado. ${storyQueueErrorMessage(error)}`;
+      } finally { delete form.dataset.submitting; if (form.isConnected) button.disabled = false; }
+    });
+  });
+}
+
 async function renderClientPortal(slug, version, { skipCatalogSync = false } = {}) {
   const localRestaurant = getRestaurant(slug);
   const [remote] = await Promise.all([
@@ -1429,33 +1687,7 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
           ${renderCatalogManager(restaurant)}
         </section>
 
-        ${STORY_AUTOMATION_ENABLED ? `<section class="section client-step" id="story-panel">
-          <div class="section__head">
-            <p class="eyebrow">Story</p>
-            <h2>Arte pronta</h2>
-          </div>
-          <div class="story-workbench">
-            <div class="card">
-              <div class="story-automation-status" id="story-automation-status" aria-live="polite">
-                <span class="status-pill">Automação pronta</span>
-                <p>Ao enviar o formulário, a arte entra na fila segura do telefone QrStack.</p>
-              </div>
-              <h3>Link do Story</h3>
-              <div class="field">
-                <label for="storyLink">Hyperlink</label>
-                <input id="storyLink" name="storyLink" type="url" value="${escapeAttr(storyLink)}" placeholder="Cole o link do cardápio" />
-              </div>
-              <div class="actions">
-                <button type="button" id="download-story">Baixar Story</button>
-                <button type="button" class="secondary" id="share-story">Compartilhar manualmente</button>
-                <button type="button" class="ghost" data-copy-input="storyLink">Copiar link do Story</button>
-              </div>
-            </div>
-            <div class="story-frame">
-              <canvas id="story-canvas" width="1080" height="1920"></canvas>
-            </div>
-          </div>
-        </section>` : ""}
+        ${STORY_AUTOMATION_ENABLED ? renderStoryComposer(restaurant, storyLink) : ""}
     </div>
   `;
   app.innerHTML = renderWorkspace({ client: true, active: workspaceClientView, title: "Cardápio do dia", restaurant, content, actions: `<a class="button secondary" href="${publicMenuHash(restaurant, "cliente")}">${uiIcon("external-link")}Ver cardápio</a>` });
@@ -1468,7 +1700,7 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
     routeParams.delete("dish");
     history.replaceState(null, "", location.hash.split("?")[0] + "?" + routeParams);
   }
-  if (STORY_AUTOMATION_ENABLED) drawStory(restaurant, menu, getMenuItems(menu.id));
+  if (STORY_AUTOMATION_ENABLED) initializeStoryComposer(restaurant, menu);
 }
 
 function renderClientTopbar(restaurant) {
@@ -1659,7 +1891,7 @@ function attachClientHandlers(restaurant, menu) {
       delete form.dataset.submitting;
       if (submitButton) {
         submitButton.disabled = false;
-        submitButton.textContent = STORY_AUTOMATION_ENABLED ? "Enviar e publicar Story" : "Enviar e publicar cardápio";
+        submitButton.textContent = "Enviar e publicar cardápio";
       }
       toast("Cada prato pode ser escolhido apenas uma vez.");
       return;
@@ -1681,61 +1913,20 @@ function attachClientHandlers(restaurant, menu) {
         toast("Esta resposta já foi salva e não será duplicada.");
       }
 
-      if (!STORY_AUTOMATION_ENABLED) {
-        toast("Cardápio publicado com sucesso.");
-        return;
+      toast("Cardápio publicado com sucesso. O Story pode ser preparado na aba Stories.");
+      if (storyComposerIsCurrent(storyComposer) && storyComposer.restaurant.slug === restaurant.slug && !storyComposer.busy) {
+        storyComposer.menu = getLatestMenu(restaurant.id);
+        prepareStoryImage(storyComposer);
       }
-
-      const updatedMenu = getLatestMenu(restaurant.id);
-      await drawStory(restaurant, updatedMenu, getMenuItems(updatedMenu.id));
-      saveStoryPreview(restaurant, updatedMenu);
-      const job = await queueStoryPublication(restaurant, updatedMenu, submission.signature);
-      trackEvent(restaurant, "story_queued", "admin", updatedMenu.id);
-      document.getElementById("story-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
-      toast(
-        job?.retriedFrom
-          ? "Nova tentativa criada; a falha anterior foi preservada no histórico."
-          : job?.duplicate
-            ? "Publicação já estava na fila."
-            : "Story enviado ao telefone QrStack."
-      );
     } catch (error) {
-      if (!STORY_AUTOMATION_ENABLED) {
-        console.warn("QrStack menu publication unavailable:", error);
-        toast("Não foi possível confirmar a publicação. Suas escolhas foram mantidas; tente enviar novamente.");
-        return;
-      }
-      console.warn("QrStack automated Story queue unavailable:", error);
-      setStoryAutomationStatus(
-        "failed_attention",
-        `A resposta do formulário foi preservada, mas a fila não foi criada (${storyQueueErrorMessage(error)}). Tente enviar novamente.`
-      );
-      toast("Não foi possível colocar o Story na fila automática.");
+      console.warn("QrStack menu publication unavailable:", error);
+      toast("Não foi possível confirmar a publicação. Suas escolhas foram mantidas; tente enviar novamente.");
     } finally {
       delete form.dataset.submitting;
       if (!submitButton || !document.body.contains(submitButton)) return;
       submitButton.disabled = false;
-      submitButton.textContent = STORY_AUTOMATION_ENABLED ? "Enviar e publicar Story" : "Enviar e publicar cardápio";
+      submitButton.textContent = "Enviar e publicar cardápio";
     }
-  });
-
-  document.querySelector('[name="storyLink"]')?.addEventListener("input", (event) => {
-    const latestMenu = getLatestMenu(restaurant.id);
-    latestMenu.storyLink = event.currentTarget.value.trim();
-    saveState();
-    drawStory(restaurant, latestMenu, getMenuItems(latestMenu.id));
-  });
-
-  document.getElementById("download-story")?.addEventListener("click", () => {
-    downloadStory(restaurant);
-    const latestMenu = getLatestMenu(restaurant.id);
-    trackEvent(restaurant, "story_downloaded", "admin", latestMenu.id);
-  });
-
-  document.getElementById("share-story")?.addEventListener("click", async () => {
-    const latestMenu = getLatestMenu(restaurant.id);
-    await shareStory(restaurant, latestMenu);
-    trackEvent(restaurant, "story_shared", "admin", latestMenu.id);
   });
 
   attachCatalogManagerHandlers(restaurant);
@@ -1864,6 +2055,15 @@ function storyQueueErrorMessage(error) {
     story_canvas_not_ready: "a arte ainda não terminou de carregar",
     invalid_story_media_size: "a arte ultrapassou o limite de tamanho",
     invalid_story_media: "a arte gerada ficou inválida",
+    invalid_story_link: "Informe um endereço HTTPS válido, sem usuário ou senha, para o sticker.",
+    story_upload_type: "Escolha uma imagem JPG, PNG ou WebP.",
+    story_upload_size: "Escolha uma imagem de até 15 MB.",
+    story_upload_dimensions: "A imagem excede 40 megapixels ou possui dimensões inválidas.",
+    story_upload_decode: "Não foi possível abrir a imagem. Escolha outro arquivo JPG, PNG ou WebP.",
+    story_account_unavailable: "A conta ainda não está habilitada ou tem uma publicação aguardando conclusão.",
+    instagram_publisher_not_found: "O publicador precisa ser registrado antes de vincular a conta.",
+    story_publishing_disabled: "A publicação está desabilitada para esta conta.",
+    story_outcome_unknown: "Confira o resultado anterior no Instagram e resolva no publicador antes de continuar.",
     invalid_restaurant_token: "o acesso do restaurante expirou",
     api_timeout: "a conexão demorou além do limite",
   };
@@ -1930,46 +2130,49 @@ function simpleHash(value) {
   return (hash >>> 0).toString(36);
 }
 
-function saveStoryPreview(restaurant, menu) {
+function saveStoryPreview(restaurant, menu, source = "auto") {
+  const templateName = source === "upload" ? "Imagem enviada" : "Identidade do restaurante";
   state.storyAssets.push({
     id: crypto.randomUUID(),
     restaurantId: restaurant.id,
     menuDayId: menu.id,
     imageUrl: "local-canvas-preview",
-    templateName: "daily-menu-v1",
+    templateName,
     createdAt: new Date().toISOString(),
   });
   apiPost({
     action: "saveStoryAsset",
     slug: restaurant.slug,
-    token: restaurant.adminToken || ACTIVE_CLIENT_TOKEN,
+    token: restaurant.adminToken,
     menu_day_id: menu.id,
     image_url: "local-canvas-preview",
-    template_name: "daily-menu-v1",
+    template_name: templateName,
   }).catch((error) => console.warn("QrStack story API unavailable:", error.message));
   trackEvent(restaurant, "story_generated", "admin", menu.id);
   saveState();
 }
 
-async function queueStoryPublication(restaurant, menu, submissionSignature) {
-  const imageBase64 = String(lastStoryDataUrl || "").split(",")[1] || "";
+async function queueStoryPublication(restaurant, menu, requestId, media, draft) {
+  const imageBase64 = String(media?.dataUrl || "").split(",")[1] || "";
   if (!imageBase64) throw new Error("story_canvas_not_ready");
-  setStoryAutomationStatus("pending", "Enviando a arte para o telefone QrStack...");
+  setStoryAutomationStatus("pending", "Enviando a arte para o publicador QrStack...");
   const response = await apiPost({
     action: "createStoryJob",
     slug: restaurant.slug,
-    token: restaurant.adminToken || ACTIVE_CLIENT_TOKEN,
+    token: restaurant.adminToken,
     menu_day_id: menu.id,
     story_link: menu.storyLink || restaurantStoryLink(restaurant),
-    content_type: "image/png",
+    content_type: media.contentType,
     image_base64: imageBase64,
-    client_request_id: `${restaurant.slug}:${menu.date}:${submissionSignature}`,
-    retry_failed: true,
+    client_request_id: requestId,
+    image_source: media.source,
   });
   const job = response.job;
   if (!job?.id) throw new Error("story_job_missing");
-  setStoryAutomationStatus(job.status, storyJobMessage(job));
-  pollStoryPublication(restaurant, job.id);
+  if (storyComposerIsCurrent(draft)) {
+    setStoryAutomationStatus(job.status, storyJobMessage(job));
+    if (["pending", "claimed", "preparing", "publishing"].includes(job.status)) pollStoryPublication(restaurant, job.id, 0, draft, ++draft.pollVersion);
+  }
   return {
     ...job,
     duplicate: response.duplicate === true,
@@ -1978,29 +2181,33 @@ async function queueStoryPublication(restaurant, menu, submissionSignature) {
   };
 }
 
-function pollStoryPublication(restaurant, jobId, attempt = 0) {
+function pollStoryPublication(restaurant, jobId, attempt = 0, draft = storyComposer, pollVersion = draft?.pollVersion) {
   window.setTimeout(async () => {
-    if (!document.getElementById("story-automation-status")) return;
+    if (!storyComposerIsCurrent(draft) || draft.pollVersion !== pollVersion) return;
     try {
       const data = await apiGet("getStoryJob", {
         slug: restaurant.slug,
-        token: restaurant.adminToken || ACTIVE_CLIENT_TOKEN,
+        token: restaurant.adminToken,
         job: jobId,
       });
       const job = data.job;
       if (!job) throw new Error("story_job_not_found");
+      if (!storyComposerIsCurrent(draft) || draft.pollVersion !== pollVersion) return;
       setStoryAutomationStatus(job.status, storyJobMessage(job));
+      draft.locked = !["completed", "failed_attention", "cancelled"].includes(job.status);
+      updateStoryControls(draft);
       if (job.status === "completed") {
-        trackEvent(restaurant, "story_published", "agent", job.menu_day_id);
-        toast("Story publicado pelo telefone QrStack.");
+        trackEvent(restaurant, "story_published", "publisher", job.menu_day_id);
+        toast("Story publicado e confirmado no Instagram.");
         return;
       }
-      if (job.status === "failed_attention") return;
-      pollStoryPublication(restaurant, jobId, 0);
+      if (["failed_attention", "outcome_unknown", "cancelled"].includes(job.status)) return;
+      pollStoryPublication(restaurant, jobId, 0, draft, pollVersion);
     } catch (error) {
+      if (!storyComposerIsCurrent(draft) || draft.pollVersion !== pollVersion) return;
       const nextAttempt = attempt + 1;
-      setStoryAutomationStatus("syncing", "Telefone trabalhando. Reconectando ao acompanhamento...");
-      if (nextAttempt < 20) pollStoryPublication(restaurant, jobId, nextAttempt);
+      setStoryAutomationStatus("syncing", nextAttempt < 20 ? "Reconectando ao acompanhamento da publicação..." : "Acompanhamento indisponível. Use Atualizar conta para consultar o resultado antes de enviar novamente.");
+      if (nextAttempt < 20) pollStoryPublication(restaurant, jobId, nextAttempt, draft, pollVersion);
     }
   }, attempt ? Math.min(15000, 2500 + attempt * 800) : 2500);
 }
@@ -2010,19 +2217,19 @@ function setStoryAutomationStatus(status, message) {
   if (!target) return;
   const labels = {
     pending: "Na fila",
-    claimed: "Telefone conectado",
+    claimed: "Publicador conectado",
     preparing: "Preparando",
     publishing: "Publicando",
-    paused_interruption: "Pausado com segurança",
-    retry: "Retomando",
     completed: "Publicado",
     failed_attention: "Conferência necessária",
+    outcome_unknown: "Resultado incerto",
+    cancelled: "Cancelado",
     syncing: "Sincronizando",
   };
   target.dataset.status = status || "pending";
   target.innerHTML = `
-    <span class="status-pill">${labels[status] || "Automação"}</span>
-    <p>${message || "Aguardando atualização do telefone QrStack."}</p>
+    <span class="status-pill">${escapeHtml(labels[status] || "Publicação")}</span>
+    <p>${escapeHtml(message || "Aguardando atualização do publicador QrStack.")}</p>
   `;
 }
 
@@ -2033,16 +2240,16 @@ function storyJobMessage(job) {
     ? ` Tentativa registrada em ${updatedAt.toLocaleDateString("pt-BR")} às ${updatedAt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}.`
     : "";
   const messages = {
-    pending: "Arte recebida. Aguardando o telefone QrStack assumir a publicação.",
-    claimed: "O telefone recebeu a publicação e vai preparar a arte.",
-    preparing: "Arte sendo salva com segurança na galeria do telefone.",
+    pending: "Arte recebida. Aguardando o publicador QrStack.",
+    claimed: "O publicador recebeu a solicitação e vai verificar a conta vinculada.",
+    preparing: "Preparando a imagem para publicação.",
     publishing: `Instagram em operação${checkpoint ? `: ${checkpoint}` : ""}.`,
-    paused_interruption: "Uma ligação ou outra tela interrompeu o fluxo. A retomada será automática, sem duplicar a postagem.",
-    retry: "O telefone está retomando do último ponto seguro.",
-    completed: "Story publicado e confirmado visualmente no Instagram.",
-    failed_attention: `${job?.last_error || "O Instagram mudou de tela e precisa de conferência manual."}${historySuffix}`,
+    completed: "Publicação confirmada pelo Instagram. Confira a aparência e o link no aplicativo.",
+    failed_attention: `${job?.last_error || "A publicação foi interrompida e precisa de conferência no publicador."}${historySuffix}`,
+    outcome_unknown: "O resultado da publicação ainda não foi confirmado. Confira o Instagram e resolva no publicador antes de enviar novamente.",
+    cancelled: "Esta publicação foi cancelada.",
   };
-  return messages[job?.status] || "Acompanhando a publicação no telefone QrStack.";
+  return messages[job?.status] || "Acompanhando a publicação no publicador QrStack.";
 }
 
 async function saveMenuForm(restaurant, menuId, formData) {
@@ -2657,14 +2864,13 @@ function renderOriginalPublicMenu(restaurant, source) {
   `;
 }
 
-function drawStory(restaurant, menu, menuItems) {
-  const canvas = document.getElementById("story-canvas");
+function drawStory(restaurant, menu, menuItems, canvas = document.getElementById("story-canvas")) {
   if (!canvas) return;
   if (restaurant.slug === "amaro") return drawAmaroStory(canvas, restaurant);
   const ctx = canvas.getContext("2d");
   const w = canvas.width;
   const h = canvas.height;
-  const highlights = menuItems.filter((menuItem) => menuItem.isHighlight).slice(0, 6);
+  const highlights = menuItems.filter((menuItem) => menuItem.isHighlight).slice(0, 5);
   const storyLink = menu.storyLink || restaurantStoryLink(restaurant);
   const storyLinkLabel = formatStoryLink(storyLink);
   return Promise.all([loadCanvasImage(restaurant.logoUrl), loadCanvasImage(restaurant.symbolUrl)]).then(([logo, mark]) => {
@@ -2705,6 +2911,11 @@ function drawStory(restaurant, menu, menuItems) {
       drawImageContain(ctx, logo, 250, 172, w - 500, 220);
     } else if (mark) {
       drawImageContain(ctx, mark, w / 2 - 110, 180, 220, 220);
+    } else {
+      ctx.textAlign = "center";
+      ctx.fillStyle = primary;
+      ctx.font = "800 58px Sora";
+      wrapCanvasText(ctx, restaurant.name, w / 2, 265, w - 280, 72, 2);
     }
     ctx.textAlign = "center";
     ctx.fillStyle = secondary;
@@ -2748,7 +2959,6 @@ function drawStory(restaurant, menu, menuItems) {
     ctx.fillStyle = ink;
     ctx.font = "700 28px Manrope";
     wrapCanvasText(ctx, storyLinkLabel, w / 2, 1772, w - 220, 34, 2);
-    cacheStoryCanvas(canvas, restaurant.slug);
   });
 }
 
@@ -2828,7 +3038,6 @@ function drawAmaroStory(canvas, restaurant) {
     if (qrstackMark) drawImageContain(ctx, qrstackMark, 408, 1758, 64, 64);
     if (qrstackWordmark) drawImageContain(ctx, qrstackWordmark, 484, 1768, 190, 44);
     ctx.globalAlpha = 1;
-    cacheStoryCanvas(canvas, restaurant.slug);
   });
 }
 
@@ -2876,14 +3085,6 @@ function createAmaroLogoMask(image, ink) {
   return canvas;
 }
 
-function cacheStoryCanvas(canvas, slug) {
-  lastStoryDataUrl = canvas.toDataURL("image/png");
-  lastStorySlug = slug;
-  canvas.toBlob((blob) => {
-    if (blob && lastStorySlug === slug) lastStoryBlob = blob;
-  }, "image/png");
-}
-
 function formatStoryLink(value) {
   try {
     const url = new URL(value);
@@ -2897,9 +3098,19 @@ function loadCanvasImage(src) {
   return new Promise((resolve) => {
     if (!src) return resolve(null);
     const image = new Image();
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      image.onload = null;
+      image.onerror = null;
+      resolve(value);
+    };
+    const timeout = setTimeout(() => finish(null), 12000);
     image.crossOrigin = "anonymous";
-    image.onload = () => resolve(image);
-    image.onerror = () => resolve(null);
+    image.onload = () => finish(image);
+    image.onerror = () => finish(null);
     image.src = src;
   });
 }
@@ -2934,13 +3145,6 @@ function hexToRgb(hex) {
   };
 }
 
-function downloadStory(restaurant) {
-  const link = document.createElement("a");
-  link.href = lastStoryDataUrl || document.getElementById("story-canvas").toDataURL("image/png");
-  link.download = `story-${restaurant.slug}-${todayIso()}.png`;
-  link.click();
-}
-
 function priceSummary(menu, menuItems = []) {
   if (menu?.price) return menu.price;
   const prices = menuItems
@@ -2951,45 +3155,6 @@ function priceSummary(menu, menuItems = []) {
   const brl = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
   if (prices[0] === prices[prices.length - 1]) return brl.format(prices[0]);
   return `${brl.format(prices[0])} a ${brl.format(prices[prices.length - 1])}`;
-}
-
-async function shareStory(restaurant, menu = null) {
-  const storyLink = menu?.storyLink || document.querySelector('[name="storyLink"]')?.value || restaurantStoryLink(restaurant);
-  const canvas = document.getElementById("story-canvas");
-  const copyRequest = copyToClipboard(storyLink);
-  const blob = lastStorySlug === restaurant.slug && lastStoryBlob
-    ? lastStoryBlob
-    : await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-  const file = new File([blob], `story-${restaurant.slug}.png`, { type: "image/png" });
-  if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    const shareRequest = navigator.share({
-      files: [file],
-      title: `Story ${restaurant.name}`,
-      text: `Story do cardápio do dia. O link ${storyLink} já está copiado para o sticker.`,
-    });
-    try {
-      await Promise.all([copyRequest, shareRequest]);
-      toast("Link copiado. Escolha Instagram Stories.");
-    } catch {
-      await copyRequest.catch(() => undefined);
-      downloadStory(restaurant);
-      openInstagramStories();
-      return;
-    }
-    window.setTimeout(openInstagramStories, 120);
-    return;
-  }
-  await copyRequest.catch(() => undefined);
-  downloadStory(restaurant);
-  toast("Link copiado. Cole no sticker de link do Instagram.");
-  openInstagramStories();
-}
-
-function openInstagramStories() {
-  window.location.href = "instagram://story-camera";
-  window.setTimeout(() => {
-    window.location.href = "https://www.instagram.com/";
-  }, 1100);
 }
 
 function metric(label, value) {

@@ -1,5 +1,14 @@
 # QrStack Agent Android
 
+> DESATIVADO: substituido pelo publicador Python em `qrstack-instagram`.
+> As rotas antigas retornam `410 android_story_agent_retired`; a fila antiga
+> permanece somente como historico e nao e transferida ao novo publicador.
+> Em telefones com APK antigo instalado, use **Parar agente** e desative sua
+> acessibilidade: um trabalho ja armazenado no aparelho nao pode ser cancelado
+> remotamente apenas bloqueando a API. Nao reinstale nem pareie este agente.
+>
+> As instrucoes abaixo documentam a implementacao legada, nao o fluxo atual.
+
 Agente privado para publicar o Story gerado pela plataforma QrStack no Instagram do restaurante. O computador compila e distribui o APK; o telefone executa a automacao sem precisar permanecer conectado por USB.
 
 ## Fluxo
