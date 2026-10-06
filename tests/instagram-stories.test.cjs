@@ -21,6 +21,7 @@ function fixture(t) {
     CREATE TABLE restaurants(id TEXT PRIMARY KEY, slug TEXT UNIQUE, admin_token TEXT, story_link TEXT);
     INSERT INTO restaurants VALUES ('r-internal','internal','internal-test-token','https://example.test/menu');
     INSERT INTO restaurants VALUES ('r-other','other','other-test-token','https://example.test/other');`);
+  sqlite.exec("ALTER TABLE restaurants ADD COLUMN name TEXT DEFAULT 'Internal restaurant'");
   sqlite.exec(fs.readFileSync(path.join(root, 'cloudflare/migrations/0007_story_automation.sql'), 'utf8'));
   sqlite.exec("INSERT INTO story_agents(device_id,label,token_hash) VALUES ('legacy-phone','Retired','unused')");
   sqlite.exec(`INSERT INTO story_publish_jobs(id,restaurant_id,restaurant_slug,story_link,media_key,media_token,queued_at)
@@ -28,6 +29,8 @@ function fixture(t) {
   const migration = fs.readFileSync(path.join(root, 'cloudflare/migrations/0010_instagram_python_publisher.sql'), 'utf8');
   sqlite.exec(migration);
   sqlite.exec(migration); // Retry-safe migration, preserving old records.
+  sqlite.exec(fs.readFileSync(path.join(root, 'cloudflare/migrations/0011_restaurant_plans.sql'), 'utf8'));
+  sqlite.exec("INSERT INTO restaurant_plans SELECT id, 'performance', '2026-10-06' FROM restaurants");
   const kv = new Map();
   const env = {
     OWNER_ACCESS_TOKEN: ownerKey,
@@ -384,4 +387,77 @@ test('real Worker dispatch retires Android and bounds bodies with or without Con
   const realConfig = await worker.fetch(new Request('https://worker.example.test/?action=getStoryPublishingConfig&slug=internal&token=internal-test-token'), f.env, context);
   assert.equal(realConfig.status, 200);
   assert.equal((await realConfig.json()).publishing.state, 'unconfigured');
+});
+
+async function planCall(f, action, data = {}, method = 'POST') {
+  const worker = (await workerPromise).default;
+  const url = new URL('https://worker.example.test/');
+  url.searchParams.set('action', action);
+  if (method === 'GET') Object.entries(data).forEach(([key, value]) => url.searchParams.set(key, value));
+  const request = new Request(url, { method, ...(method === 'POST' ? { body: JSON.stringify(data), headers: { 'content-type': 'application/json' } } : {}) });
+  const response = await worker.fetch(request, f.env, { waitUntil() {} });
+  return { status: response.status, data: await response.json(), headers: response.headers };
+}
+
+test('only the authenticated owner can list or change plans; unknown plans and clients fail closed', async t => {
+  const f = fixture(t);
+  assert.equal((await planCall(f, 'listRestaurantPlans', {}, 'GET')).status, 401);
+  assert.equal((await planCall(f, 'setRestaurantPlan', { slug: 'internal', plan: 'performance', token: 'internal-test-token' })).status, 401);
+  assert.equal((await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: '__proto__' })).status, 400);
+  assert.equal((await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'missing', plan: 'cardapio' })).status, 404);
+  assert.equal((await planCall(f, 'verifyOwnerAccess', { owner_key: ownerKey })).status, 200);
+  assert.equal((await planCall(f, 'verifyOwnerAccess', { owner_key: 'qrstack-berna-2026' })).status, 401);
+  assert.equal((await planCall(f, 'listRestaurantPlans', { key: ownerKey }, 'GET')).data.restaurants.length, 2);
+  assert.equal((await planCall(f, 'getRestaurantPlan', { slug: 'other', token: 'internal-test-token' }, 'GET')).status, 401);
+});
+
+test('plan defaults and upgrades unlock exactly the requested capabilities and retain an audit trail', async t => {
+  const f = fixture(t);
+  f.sqlite.exec('DELETE FROM restaurant_plans');
+  const basic = (await planCall(f, 'getRestaurantPlan', { slug: 'internal', token: 'internal-test-token' }, 'GET')).data.entitlement;
+  assert.equal(basic.plan, 'cardapio');
+  assert.deepEqual(basic.features, { menu: true, story: false, autopublish: false, analytics: false });
+  const promotional = (await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'divulgacao' })).data.entitlement;
+  assert.deepEqual(promotional.features, { menu: true, story: true, autopublish: false, analytics: false });
+  const performance = (await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'performance' })).data.entitlement;
+  assert.deepEqual(performance.features, { menu: true, story: true, autopublish: true, analytics: true });
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM restaurant_plan_events').get().n, 2);
+});
+
+test('downgrade cancels pending Stories and rejects direct publication requests despite an enabled binding', async t => {
+  const f = fixture(t); await f.setupAccount(); await f.enqueue();
+  await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'divulgacao' });
+  assert.equal(f.sqlite.prepare('SELECT status FROM instagram_story_jobs').get().status, 'cancelled');
+  assert.equal((await f.enqueue({ client_request_id: 'new-request' })).status, 409);
+  assert.equal((await f.claim()).data.job, null);
+  const config = await f.call('getStoryPublishingConfig', { slug: 'internal', token: 'internal-test-token' });
+  assert.equal(config.data.publishing.state, 'plan_required');
+  await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'performance' });
+  assert.equal((await f.claim()).data.job, null);
+});
+
+test('downgrade after claim blocks the publication permit and after publishing blocks subsequent requests but permits ACK', async t => {
+  const f = fixture(t); await f.setupAccount(); await f.enqueue();
+  const job = (await f.claim()).data.job;
+  await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'cardapio' });
+  assert.equal((await f.update(job, 'publishing')).status, 409);
+  await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'performance' });
+  assert.equal((await f.update(job, 'publishing')).status, 200);
+  await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'cardapio' });
+  const result = await f.call('getInstagramPublisherJob', { publisher_id: job.publisher_id, job_id: job.id }, { token: publisherToken, claimToken: job.claim_token });
+  assert.equal(result.data.can_publish, false);
+  assert.equal((await f.update(job, 'completed', { media_id: '12345' })).status, 200);
+});
+
+test('analytics checks entitlement before serving even cached data and never returns public cache headers', async t => {
+  const f = fixture(t);
+  f.env.INSIGHTS_CACHE.get = async key => key.startsWith('insights:v') ? { ok: true, generated_at: new Date().toISOString(), insights: { total_accesses: 42 } } : null;
+  assert.equal((await planCall(f, 'getInsights', { slug: 'internal', token: 'wrong' }, 'GET')).status, 401);
+  const response = await planCall(f, 'getInsights', { slug: 'internal', token: 'internal-test-token' }, 'GET');
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.data.insights.total_accesses, 42);
+  await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'divulgacao' });
+  assert.equal((await planCall(f, 'getInsights', { slug: 'internal', token: 'internal-test-token' }, 'GET')).status, 403);
+  assert.equal((await planCall(f, 'getInsights', { slug: 'internal', key: ownerKey }, 'GET')).status, 200);
 });

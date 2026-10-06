@@ -1,4 +1,5 @@
 import { handleInstagramStories, MAX_STORY_REQUEST_BYTES } from "./instagram-stories.js";
+import { handlePlans, authorizeInsights } from "./plans.js";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -75,6 +76,8 @@ export default {
         ? payload.action || url.searchParams.get("action") || "trackEvent"
         : url.searchParams.get("action") || "health";
 
+      const planResponse = await handlePlans(request, env, payload, action);
+      if (planResponse) return planResponse;
       const instagramResponse = await handleInstagramStories(request, env, payload, action);
       if (instagramResponse) return instagramResponse;
 
@@ -114,7 +117,7 @@ export default {
       }
 
       if (action === "getInsights") {
-        assertOwner(url.searchParams, request, env);
+        await authorizeInsights(env, request, url.searchParams);
         const slug = url.searchParams.get("slug") || "amaro";
         const forceRefresh = url.searchParams.get("refresh") === "1";
         const filters = {
@@ -148,7 +151,7 @@ export default {
                 status: "quota_stale",
                 generated_at: savedSnapshot.generated_at || savedSnapshot.insights?.collected_at || "",
               },
-            }, 200, READ_CACHE_HEADERS);
+            }, 200, JSON_HEADERS);
           }
         }
         const snapshot = await readInsightsSnapshot(env, snapshotKey);
@@ -169,14 +172,14 @@ export default {
               status: ageMs <= INSIGHTS_SNAPSHOT_MAX_AGE_MS ? "fresh" : "stale_while_refresh",
               generated_at: snapshot.generated_at || snapshot.insights?.collected_at || "",
             },
-          }, 200, READ_CACHE_HEADERS);
+          }, 200, JSON_HEADERS);
         }
         const freshSnapshot = await refreshInsightsSnapshot(env, filters, snapshotKey);
         return jsonp(url, {
           ...freshSnapshot,
           analytics_storage: analyticsStorage,
           cache: { status: "miss_refreshed", generated_at: freshSnapshot.generated_at },
-        }, 200, READ_CACHE_HEADERS);
+        }, 200, JSON_HEADERS);
       }
 
       if (action === "getRestaurant") {
@@ -538,7 +541,7 @@ async function readPayload(request) {
 }
 
 function assertOwner(params, request, env, bodyKey = "") {
-  const expected = env.OWNER_ACCESS_TOKEN || "qrstack-berna-2026";
+  const expected = env.OWNER_ACCESS_TOKEN;
   const received = bodyKey || params.get("key") || params.get("owner_key") || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
   if (!received || received !== expected) {
     const error = new Error("unauthorized");
@@ -599,7 +602,8 @@ async function refreshInsightsFromSheets(env, filters) {
   if (slug !== "amaro") throw new Error("sheets_insights_fallback_not_configured");
   const endpoint = new URL(env.SHEETS_FALLBACK_URL || DEFAULT_SHEETS_FALLBACK_URL);
   endpoint.searchParams.set("action", "getInsights");
-  endpoint.searchParams.set("key", env.OWNER_ACCESS_TOKEN || "qrstack-berna-2026");
+  if (!env.SHEETS_OWNER_ACCESS_TOKEN) throw new Error("sheets_owner_credential_not_configured");
+  endpoint.searchParams.set("key", env.SHEETS_OWNER_ACCESS_TOKEN);
   if (filters.startDate) endpoint.searchParams.set("startDate", filters.startDate);
   if (filters.endDate) endpoint.searchParams.set("endDate", filters.endDate);
 

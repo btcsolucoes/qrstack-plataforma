@@ -8,7 +8,9 @@ const QRSTACK_D1_API_URL = "https://qrstack-api.qrstack.workers.dev";
 const QRSTACK_API_URL = QRSTACK_D1_API_URL;
 const ACTIVE_CLIENT_SLUG = "amaro";
 const ACTIVE_CLIENT_TOKEN = "qrstack-amaro-2026";
-const OWNER_ACCESS_TOKEN = "qrstack-berna-2026";
+let OWNER_ACCESS_TOKEN = "";
+let ownerVerified = false;
+try { OWNER_ACCESS_TOKEN = sessionStorage.getItem("qrstack:owner-credential") || ""; } catch {}
 const STORY_AUTOMATION_ENABLED = true;
 const OWNER_SESSION_KEY = "qrstack:owner-access";
 const CLIENT_SESSION_PREFIX = "qrstack:client-access:";
@@ -185,11 +187,13 @@ function readInsightsCache() {
 }
 
 function getCachedInsightsHtml(restaurant, filters = {}) {
+  if (isClientWorkspace()) return null;
   const cache = readInsightsCache();
   return cache[insightsCacheId(restaurant, filters)] || null;
 }
 
 function saveCachedInsightsHtml(restaurant, filters = {}, html = "") {
+  if (isClientWorkspace()) return;
   if (!html) return;
   try {
     const cache = readInsightsCache();
@@ -564,8 +568,10 @@ function isCurrentRoute(version) {
   return version === routeVersion;
 }
 
-function renderOwnerRoute(tab, params) {
-  if (!hasOwnerAccess(params)) return renderOwnerGate();
+async function renderOwnerRoute(tab, params) {
+  const version = routeVersion;
+  if (!await hasOwnerAccess(params)) { if (isCurrentRoute(version)) renderOwnerGate(); return; }
+  if (!isCurrentRoute(version)) return;
   return renderHq(tab);
 }
 
@@ -580,12 +586,23 @@ async function renderClientRoute(slug, params, version) {
   return renderClientPortal(slug, version);
 }
 
-function hasOwnerAccess(params) {
-  if (params.get("key") === OWNER_ACCESS_TOKEN) {
+async function hasOwnerAccess(params) {
+  const key = params.get("key") || OWNER_ACCESS_TOKEN;
+  if (!key) return false;
+  if (ownerVerified && key === OWNER_ACCESS_TOKEN) return true;
+  try {
+    await apiPost({ action: "verifyOwnerAccess", owner_key: key });
+    OWNER_ACCESS_TOKEN = key;
+    ownerVerified = true;
+    try { sessionStorage.setItem("qrstack:owner-credential", key); } catch {}
     rememberAccess(OWNER_SESSION_KEY);
+    if (params.get("key") && typeof history !== "undefined") {
+      const cleanParams = new URLSearchParams(location.hash.split("?")[1] || "");
+      cleanParams.delete("key");
+      history.replaceState(null, "", location.hash.split("?")[0] + (cleanParams.size ? "?" + cleanParams : ""));
+    }
     return true;
-  }
-  return hasRememberedAccess(OWNER_SESSION_KEY);
+  } catch { return false; }
 }
 
 function hasClientAccess(restaurant, params) {
@@ -619,7 +636,7 @@ function clientSessionKey(restaurant) {
 }
 
 function ownerLink(tab = "overview") {
-  return `#/hq/${tab}?key=${encodeURIComponent(OWNER_ACCESS_TOKEN)}`;
+  return `#/hq/${tab}`;
 }
 
 function clientPortalLink(restaurant) {
@@ -1135,6 +1152,7 @@ function renderHq(tab = "overview") {
   if (tab === "respostas") hydrateMenuResponses();
   if (tab === "banco") hydrateWorkspaceCatalog();
   if (tab === "stories") attachStoryAccountHandlers();
+  if (tab === "clientes") hydrateClientPlans();
 }
 
 function renderAdminHero(title, subtitle, logoUrl) {
@@ -1177,7 +1195,57 @@ function renderHqOverview() {
 }
 
 function renderHqClients(restaurants) {
-  return `<section class="workspace-restaurants"><div class="section-title-row"><h2>Restaurantes cadastrados</h2><span>${restaurants.length} ${restaurants.length === 1 ? "restaurante" : "restaurantes"}</span></div>${restaurants.map((restaurant) => `${renderRestaurantRow(restaurant)}<div class="restaurant-context-links"><a class="text-link" href="${ownerLink("insights")}">${uiIcon("chart-no-axes-combined")}Insights</a><button type="button" class="text-link" data-copy="${escapeAttr(restaurantAccessUrl(restaurant))}">${uiIcon("copy")}Copiar acesso do restaurante</button><a class="text-link" href="${ownerLink("cardapios")}">${uiIcon("link")}Links de divulgação</a></div>`).join("")}</section>`;
+  return `<section class="workspace-restaurants"><div class="section-title-row"><h2>Restaurantes cadastrados</h2><span>${restaurants.length} ${restaurants.length === 1 ? "restaurante" : "restaurantes"}</span></div><div id="client-plans">Carregando planos...</div></section>`;
+}
+
+const CLIENT_PLANS = {
+  cardapio: { name: "RSTACK CARDÁPIO", description: "Cardápio digital com atualização diária, QR Code e link compartilhável." },
+  divulgacao: { name: "QRSTACK DIVULGAÇÃO", description: "Tudo do Cardápio + Story com a identidade do restaurante para baixar e link para copiar no Instagram." },
+  performance: { name: "QRSTACK PERFORMANCE", description: "Tudo do Divulgação + postagem automática de Story e dashboard de acessos do cardápio." },
+};
+function isClientWorkspace() { return /^#\/(cliente|admin)\//.test(location.hash || ""); }
+function currentWorkspaceRestaurant() { return isClientWorkspace() ? workspacePortalRestaurant : getRestaurant(ACTIVE_CLIENT_SLUG); }
+function clientFeature(restaurant, feature) { return restaurant?.planAccess?.features?.[feature] === true; }
+function renderPlanLock(feature, plan) {
+  return `<div class="plan-lock"><span class="status-pill">Disponível no ${escapeHtml(CLIENT_PLANS[plan].name)}</span><h3>${escapeHtml(feature)}</h3><p>${escapeHtml(CLIENT_PLANS[plan].description)}</p><p>Fale com a QrStack para alterar seu plano.</p></div>`;
+}
+async function syncClientPlan(restaurant) {
+  restaurant.planAccess = null;
+  try {
+    const data = await apiGet("getRestaurantPlan", { slug: restaurant.slug, token: restaurant.adminToken });
+    restaurant.planAccess = data.entitlement;
+  } catch { /* Fail closed for paid features; the menu remains available. */ }
+  return restaurant.planAccess;
+}
+async function hydrateClientPlans() {
+  const target = document.getElementById("client-plans");
+  if (!target) return;
+  try {
+    const data = await apiGet("listRestaurantPlans", { key: OWNER_ACCESS_TOKEN });
+    if (!target.isConnected) return;
+    const count = target.parentElement.querySelector(".section-title-row span");
+    if (count) count.textContent = `${data.restaurants.length} ${data.restaurants.length === 1 ? "restaurante" : "restaurantes"}`;
+    target.innerHTML = data.restaurants.map(row => {
+      const restaurant = fromSheetRestaurant(row);
+      upsertById(state.restaurants, restaurant);
+      const plan = Object.hasOwn(CLIENT_PLANS, row.plan) ? row.plan : "cardapio";
+      return `<article class="client-plan-card">${renderRestaurantRow(restaurant)}<form data-client-plan="${escapeAttr(row.slug)}"><label for="plan-${escapeAttr(row.slug)}">Plano do cliente</label><div class="actions"><select id="plan-${escapeAttr(row.slug)}" name="plan">${Object.entries(CLIENT_PLANS).map(([key, value]) => `<option value="${key}" ${key === plan ? "selected" : ""}>${value.name}</option>`).join("")}</select><button type="submit">Salvar plano</button></div><p data-plan-description>${CLIENT_PLANS[plan].description}</p><p data-plan-status role="status">Plano atual: ${CLIENT_PLANS[plan].name}</p></form></article>`;
+    }).join("");
+    target.querySelectorAll("[data-client-plan]").forEach(form => {
+      form.elements.plan.addEventListener("change", () => { form.querySelector("[data-plan-description]").textContent = CLIENT_PLANS[form.elements.plan.value].description; });
+      form.addEventListener("submit", async event => {
+        event.preventDefault();
+        const button = form.querySelector("button");
+        const status = form.querySelector("[data-plan-status]");
+        button.disabled = true;
+        try {
+          const response = await apiPost({ action: "setRestaurantPlan", owner_key: OWNER_ACCESS_TOKEN, slug: form.dataset.clientPlan, plan: form.elements.plan.value });
+          status.textContent = `Plano salvo: ${response.entitlement.name}. Os acessos do cliente foram atualizados.`;
+        } catch { status.textContent = "Não foi possível confirmar a alteração. Reabra a lista para conferir o plano salvo."; }
+        finally { button.disabled = false; }
+      });
+    });
+  } catch { if (target.isConnected) target.textContent = "Não foi possível consultar os planos. Reabra a gestão para tentar novamente."; }
 }
 
 function renderHqResponses() {
@@ -1395,8 +1463,9 @@ function renderHqInsights() {
 }
 
 function renderStoryComposer(restaurant, storyLink) {
+  if (!clientFeature(restaurant, "story")) return `<section class="section client-step" id="story-panel">${renderPlanLock("Stories com a identidade do restaurante", "divulgacao")}</section>`;
   return `<section class="section client-step" id="story-panel">
-    <div class="section__head"><p class="eyebrow">Instagram Stories</p><h2>Prepare sua publicação</h2><p class="muted">Escolha a imagem, confira a prévia e publique na conta do restaurante.</p></div>
+    <div class="section__head"><p class="eyebrow">Instagram Stories</p><h2>Prepare sua publicação</h2><p class="muted">${clientFeature(restaurant, "autopublish") ? "Escolha a imagem, confira a prévia e publique na conta do restaurante." : "Prepare a arte, baixe a imagem e copie o link para compartilhar no Instagram."}</p></div>
     <div class="story-workbench">
       <div class="story-controls">
         <div class="story-account-summary" id="story-publishing-account" role="status">Consultando a conta vinculada...</div>
@@ -1405,9 +1474,9 @@ function renderStoryComposer(restaurant, storyLink) {
           <label><input type="radio" name="storyImageSource" value="upload" /><span><strong>Enviar imagem</strong><small>Escolha uma arte ou foto do seu dispositivo.</small></span></label>
         </fieldset>
         <div class="field" id="story-upload-field" hidden><label for="story-image-file">Imagem</label><input id="story-image-file" type="file" name="storyImageFile" accept="image/jpeg,image/png,image/webp" /><small class="muted">JPG, PNG ou WebP, até 15 MB. A imagem inteira será ajustada a 1080 × 1920, com fundo da marca quando necessário.</small></div>
-        <div class="field"><label for="storyLink">Link do sticker</label><input id="storyLink" name="storyLink" type="url" value="${escapeAttr(storyLink)}" placeholder="https://seu-cardapio.com" required /><small class="muted">O publicador adiciona o sticker clicável com este endereço HTTPS.</small></div>
+        <div class="field"><label for="storyLink">Link do sticker</label><input id="storyLink" name="storyLink" type="url" value="${escapeAttr(storyLink)}" placeholder="https://seu-cardapio.com" required /><small class="muted">${clientFeature(restaurant, "autopublish") ? "O publicador adiciona o sticker clicável com este endereço HTTPS." : "Copie este endereço e cole no sticker de link ao criar seu Story no Instagram."}</small></div>
         <p id="story-image-status" class="story-image-status" role="status">Preparando a imagem...</p>
-        <div class="actions"><button type="button" id="publish-story" disabled>Publicar Story</button><button type="button" class="secondary" id="download-story" disabled>Baixar imagem</button><button type="button" class="ghost" id="refresh-story-publishing">Atualizar conta</button></div>
+        <div class="actions"><button type="button" id="publish-story" ${clientFeature(restaurant, "autopublish") ? "" : "hidden"} disabled>Publicar Story</button><button type="button" class="secondary" id="download-story" disabled>Baixar imagem</button><button type="button" class="secondary" data-copy-input="storyLink">Copiar link para Instagram</button><button type="button" class="ghost" id="refresh-story-publishing" ${clientFeature(restaurant, "autopublish") ? "" : "hidden"}>Atualizar conta</button></div>
         <p id="story-publish-hint" class="muted">Aguarde a imagem e a verificação da conta.</p>
         <div class="story-automation-status" id="story-automation-status" aria-live="polite"><span class="status-pill">Prévia</span><p>Seu Story será enviado quando você clicar em Publicar Story.</p></div>
       </div>
@@ -1422,6 +1491,7 @@ function storyPublishingReady(publishing) {
 }
 
 function storyPublishingDescription(publishing) {
+  if (publishing?.state === "plan_required") return "Postagem automática disponível no QRSTACK PERFORMANCE.";
   const account = publishing?.instagram_username ? `@${publishing.instagram_username}` : "Nenhuma conta vinculada";
   const states = { unconfigured: "Configure a conta na central QrStack.", disabled: "Publicação desabilitada.", ready: "Pronta para publicar.", outcome_unknown: "Há uma publicação com resultado incerto. Confira o Instagram e resolva no publicador antes de continuar.", publisher_inactive: "Publicador indisponível." };
   return `${account} — ${states[publishing?.state] || "Não foi possível verificar a conta. Atualize para tentar novamente."}`;
@@ -1459,7 +1529,7 @@ function updateStoryControls(draft) {
   if (!storyComposerIsCurrent(draft)) return;
   let linkValid = true;
   try { validateStoryLink(draft.panel.querySelector('[name="storyLink"]').value); } catch { linkValid = false; }
-  const ready = storyPublishingReady(draft.publishing);
+  const ready = clientFeature(draft.restaurant, "autopublish") && storyPublishingReady(draft.publishing);
   const canPublish = ready && draft.media && linkValid && !draft.busy && !draft.locked && !draft.rendering;
   draft.panel.querySelector("#publish-story").disabled = !canPublish;
   draft.panel.querySelector("#download-story").disabled = !draft.media || draft.rendering;
@@ -1467,6 +1537,7 @@ function updateStoryControls(draft) {
   draft.panel.querySelectorAll('[name="storyImageSource"], #story-image-file, [name="storyLink"]').forEach((input) => { input.disabled = draft.busy; });
   draft.panel.querySelector("#story-publish-hint").textContent = draft.busy ? "Enviando esta publicação..."
     : draft.locked ? "Aguarde a conclusão ou resolva a publicação anterior antes de enviar outra."
+    : !clientFeature(draft.restaurant, "autopublish") ? "Seu plano inclui baixar a imagem e copiar o link. A postagem automática está disponível no QRSTACK PERFORMANCE."
     : !ready ? "Você pode preparar e baixar a imagem. A publicação aguarda uma conta habilitada na central QrStack."
     : !linkValid ? "Informe um link HTTPS válido para o sticker."
     : !draft.media || draft.rendering ? "Prepare uma imagem antes de publicar."
@@ -1475,7 +1546,7 @@ function updateStoryControls(draft) {
 
 function initializeStoryComposer(restaurant, menu) {
   const panel = document.getElementById("story-panel");
-  if (!panel) return;
+  if (!panel || !clientFeature(restaurant, "story")) return;
   const draft = { panel, restaurant, menu, mode: "auto", file: null, media: null, publishing: null, renderVersion: 0, pollVersion: 0, busy: false, locked: false, rendering: false };
   storyComposer = draft;
   panel.querySelectorAll('[name="storyImageSource"]').forEach((input) => input.addEventListener("change", () => {
@@ -1555,6 +1626,14 @@ async function prepareStoryImage(draft) {
 }
 
 async function refreshStoryPublishing(draft) {
+  if (!clientFeature(draft.restaurant, "autopublish")) {
+    if (storyComposerIsCurrent(draft)) {
+      draft.panel.querySelector("#story-publishing-account").textContent = "Story para compartilhar manualmente no Instagram.";
+      setStoryAutomationStatus("preview", "Baixe a imagem, copie o link e adicione-o como sticker no Instagram.");
+      updateStoryControls(draft);
+    }
+    return;
+  }
   if (!storyComposerIsCurrent(draft)) return;
   const version = (draft.configVersion || 0) + 1;
   draft.configVersion = version;
@@ -1582,6 +1661,7 @@ async function refreshStoryPublishing(draft) {
 }
 
 async function publishPreparedStory(draft) {
+  if (!clientFeature(draft.restaurant, "autopublish")) return;
   if (!storyComposerIsCurrent(draft) || draft.busy || draft.locked || draft.rendering || !draft.media || !storyPublishingReady(draft.publishing)) return;
   const media = draft.media;
   const menu = { ...draft.menu };
@@ -1650,12 +1730,16 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
   const currentHash = window.location.hash.replace(/^#\/?/, "");
   if (!currentHash.startsWith(`cliente/${slug}`) && !currentHash.startsWith(`admin/${slug}`)) return;
   const restaurant = remote.restaurant || (await syncRestaurantFromApi(slug));
+  await syncClientPlan(restaurant);
+  if (!isCurrentRoute(version)) return;
+  workspacePortalRestaurant = restaurant;
   const menu = remote.menu || createBlankMenu(restaurant.id);
   const menuItems = remote.items.length ? remote.items : getMenuItems(menu.id);
   const storyLink = menu.storyLink || restaurantStoryLink(restaurant);
   setSystemTheme();
   const content = `
     <div class="client-form-page">
+        <p class="client-plan-summary">${escapeHtml(restaurant.planAccess?.name || "Plano indisponível — recursos adicionais aguardam verificação")}</p>
         <section class="section client-step" id="formulario">
           <div class="section__head">
             <p class="eyebrow">Formulário</p>
@@ -1688,6 +1772,7 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
         </section>
 
         ${STORY_AUTOMATION_ENABLED ? renderStoryComposer(restaurant, storyLink) : ""}
+        <section class="section client-step" id="client-insights">${clientFeature(restaurant, "analytics") ? renderHqInsights() : renderPlanLock("Dashboard de acessos do cardápio", "performance")}</section>
     </div>
   `;
   app.innerHTML = renderWorkspace({ client: true, active: workspaceClientView, title: "Cardápio do dia", restaurant, content, actions: `<a class="button secondary" href="${publicMenuHash(restaurant, "cliente")}">${uiIcon("external-link")}Ver cardápio</a>` });
@@ -2216,6 +2301,7 @@ function setStoryAutomationStatus(status, message) {
   const target = document.getElementById("story-automation-status");
   if (!target) return;
   const labels = {
+    preview: "Prévia",
     pending: "Na fila",
     claimed: "Publicador conectado",
     preparing: "Preparando",
@@ -2423,6 +2509,12 @@ function renderFullCatalog(restaurant) {
 async function hydrateInsights(restaurant, options = {}) {
   const target = document.getElementById("insights-live");
   if (!target || !restaurant) return;
+  const clientView = isClientWorkspace();
+  if (clientView) {
+    await syncClientPlan(restaurant);
+    if (!target.isConnected || !isClientWorkspace()) return;
+    if (!clientFeature(restaurant, "analytics")) { target.innerHTML = renderPlanLock("Dashboard de acessos do cardápio", "performance"); return; }
+  }
   const requestId = String(Number(target.dataset.requestId || 0) + 1);
   target.dataset.requestId = requestId;
   const forceRefresh = options.forceRefresh === true;
@@ -2441,10 +2533,10 @@ async function hydrateInsights(restaurant, options = {}) {
     applyButton.textContent = "Atualizando...";
   }
   try {
-    const endpoint = restaurant.analyticsEndpoint || restaurant.liveMenuEndpoint || QRSTACK_API_URL;
+    const endpoint = clientView ? QRSTACK_API_URL : restaurant.analyticsEndpoint || restaurant.liveMenuEndpoint || QRSTACK_API_URL;
     const data = await endpointGet(endpoint, "getInsights", {
       slug: restaurant.slug,
-      key: OWNER_ACCESS_TOKEN,
+      ...(clientView ? { token: restaurant.adminToken } : { key: OWNER_ACCESS_TOKEN }),
       startDate: filters.startDate,
       endDate: filters.endDate,
       refresh: forceRefresh ? "1" : "",
@@ -2614,6 +2706,10 @@ async function hydrateInsights(restaurant, options = {}) {
     }
   } catch (error) {
     if (!target.isConnected || target.dataset.requestId !== requestId) return;
+    if (clientView) {
+      target.innerHTML = '<div class="plan-lock"><h3>Analytics indisponível</h3><p>Confira seu plano ou tente novamente mais tarde.</p></div>';
+      return;
+    }
     console.warn("QrStack insights unavailable:", error);
     const cached = getCachedInsightsHtml(restaurant, filters);
     scheduleInsightsRetry(restaurant);
@@ -3731,7 +3827,7 @@ function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight, maxLines = 3) {
 }
 
 window.addEventListener("hashchange", router);
-document.addEventListener("submit", (event) => {
+document.addEventListener("submit", async (event) => {
   const insightsFilter = event.target.closest("[data-insights-filter]");
   if (insightsFilter) {
     event.preventDefault();
@@ -3744,7 +3840,7 @@ document.addEventListener("submit", (event) => {
       button.classList.remove("is-active");
       button.setAttribute("aria-pressed", "false");
     });
-    hydrateInsights(getRestaurant(ACTIVE_CLIENT_SLUG), { refreshAfterLoad: true });
+    hydrateInsights(currentWorkspaceRestaurant(), { refreshAfterLoad: true });
     return;
   }
 
@@ -3753,8 +3849,7 @@ document.addEventListener("submit", (event) => {
     event.preventDefault();
     const rawAccess = new FormData(ownerAccessForm).get("ownerAccessKey");
     const key = extractAccessParam(rawAccess, "key");
-    if (key === OWNER_ACCESS_TOKEN) {
-      rememberAccess(OWNER_SESSION_KEY);
+    if (await hasOwnerAccess(new URLSearchParams({ key }))) {
       window.location.hash = ownerLink("overview");
       return;
     }
@@ -3806,7 +3901,7 @@ document.addEventListener("click", async (event) => {
   if (insightsPreset) {
     event.preventDefault();
     setInsightsPreset(insightsPreset.dataset.insightsPreset);
-    hydrateInsights(getRestaurant(ACTIVE_CLIENT_SLUG));
+    hydrateInsights(currentWorkspaceRestaurant());
     return;
   }
   const copyButton = event.target.closest("[data-copy], [data-copy-input]");

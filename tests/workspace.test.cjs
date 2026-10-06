@@ -34,6 +34,29 @@ test('central has persistent navigation and an explicit Stories workspace', () =
   assert.match(html, /href="[^\"]*stories/);
 });
 
+test('basic and unverified plans lock Stories; Divulgação offers download and copied link without publishing', () => {
+  const run = runtime();
+  const locked = run('renderStoryComposer(getRestaurant("amaro"),"https://example.com")');
+  assert.match(locked, /Disponível no QRSTACK DIVULGAÇÃO/);
+  assert.doesNotMatch(locked, /<canvas/);
+  const manual = run('renderStoryComposer({...getRestaurant("amaro"),planAccess:{features:{story:true,autopublish:false}}},"https://example.com")');
+  assert.match(manual, /id="publish-story" hidden disabled/);
+  assert.match(manual, /Copiar link para Instagram/);
+  assert.match(manual, /Baixar imagem/);
+});
+
+test('public frontend contains no embedded owner key and verifies owner access with the backend', async () => {
+  const run = runtime();
+  assert.equal(run('OWNER_ACCESS_TOKEN'), '');
+  run('var credentials; apiPost=async data=>{credentials=data; throw new Error("unauthorized")};');
+  assert.equal(await run('hasOwnerAccess(new URLSearchParams({key:"wrong"}))'), false);
+  assert.equal(run('ownerVerified'), false);
+  run('apiPost=async data=>{credentials=data;return {ok:true}}');
+  assert.equal(await run('hasOwnerAccess(new URLSearchParams({key:"owner-test"}))'), true);
+  assert.equal(run('credentials.action'), 'verifyOwnerAccess');
+  assert.equal(run('ownerLink("clientes")'), '#/hq/clientes');
+});
+
 test('restaurant form starts blank and contains the executive catalog', () => {
   const html = runtime()('renderAmaroOriginalForm(getRestaurant("amaro"))');
   assert.equal((html.match(/<select /g) || []).length, 7);
@@ -94,11 +117,11 @@ test('public menu remains an iframe of the original restaurant menu', () => {
 });
 
 test('Story composer offers branded generation or upload and starts with publishing blocked', () => {
-  const html = runtime()('renderStoryComposer(getRestaurant("amaro"), "https://example.com/menu")');
+  const html = runtime()('renderStoryComposer({...getRestaurant("amaro"),planAccess:{features:{story:true,autopublish:true}}}, "https://example.com/menu")');
   assert.match(html, /name="storyImageSource" value="auto" checked/);
   assert.match(html, /name="storyImageSource" value="upload"/);
   assert.match(html, /accept="image\/jpeg,image\/png,image\/webp"/);
-  assert.match(html, /id="publish-story" disabled/);
+  assert.match(html, /id="publish-story"\s+disabled/);
   assert.match(html, /width="1080" height="1920"/);
   assert.doesNotMatch(html, /telefone|Android|APK|type="password"/i);
 });
@@ -209,7 +232,7 @@ test('an unavailable publishing configuration allows downloading but blocks publ
   const nodes = new Map([['[name="storyLink"]', { value: 'https://example.com' }]]);
   const panel = { isConnected: true, querySelector: key => { if (!nodes.has(key)) nodes.set(key, {}); return nodes.get(key); }, querySelectorAll: () => [] };
   const run = runtime({ testPanel: panel, document: { addEventListener() {}, getElementById: () => panel } });
-  run('apiGet=async()=>{throw new Error("offline")}; storyComposer={panel:testPanel,restaurant:{slug:"test",adminToken:"test"},media:{dataUrl:"data:image/jpeg;base64,a"},pollVersion:0,rendering:false,busy:false,locked:false}');
+  run('apiGet=async()=>{throw new Error("offline")}; storyComposer={panel:testPanel,restaurant:{slug:"test",adminToken:"test",planAccess:{features:{story:true,autopublish:true}}},media:{dataUrl:"data:image/jpeg;base64,a"},pollVersion:0,rendering:false,busy:false,locked:false}');
   await run('refreshStoryPublishing(storyComposer)');
   assert.equal(nodes.get('#publish-story').disabled, true);
   assert.equal(nodes.get('#download-story').disabled, false);

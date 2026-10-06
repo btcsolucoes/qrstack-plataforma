@@ -1,5 +1,6 @@
 let workspaceInsightView = "overview";
 let workspaceClientView = "formulario";
+let workspacePortalRestaurant = null;
 
 function uiIcon(name, className = "") {
   return `<img class="ui-icon ${className}" src="assets/icons/${name}.svg" alt="" aria-hidden="true" width="20" height="20" />`;
@@ -15,6 +16,7 @@ function renderWorkspace({ active = "overview", title, subtitle = "", content, r
     ["formulario", "Cardápio do dia", "utensils", ""],
     ["catalog-manager", "Meus pratos", "layers", ""],
     ...(STORY_AUTOMATION_ENABLED ? [["story-panel", "Stories", "layers", ""]] : []),
+    ["client-insights", "Analytics", "chart-no-axes-combined", ""],
     ["public", "Cardápio público", "external-link", publicMenuHash(restaurant, "cliente")],
   ] : [
     ["overview", "Visão geral", "house", ownerLink("overview")],
@@ -31,7 +33,7 @@ function renderWorkspace({ active = "overview", title, subtitle = "", content, r
     const shortLabel = mobile ? ({ overview: "Início", banco: "Pratos", formulario: "Hoje", "catalog-manager": "Pratos", public: "Cardápio" }[id] || label) : label;
     return `<${tag} ${attrs} class="workspace-nav-item ${id === active ? "active" : ""}" ${id === active ? 'aria-current="page"' : ""}>${uiIcon(icon)}<span>${shortLabel}</span>${!mobile && id === "respostas" ? '<i class="nav-marker"></i>' : ""}</${tag}>`;
   };
-  const mobileLinks = client ? links : links.filter(([id]) => ["overview", "insights", "banco", "respostas"].includes(id));
+  const mobileLinks = client ? links.filter(([id]) => id !== "public") : links.filter(([id]) => ["overview", "insights", "banco", "respostas"].includes(id));
   const date = new Intl.DateTimeFormat("pt-BR", { day: "numeric", month: "long" }).format(new Date());
   return `
     <div class="workspace ${client ? "workspace--client" : ""}">
@@ -169,11 +171,15 @@ function setWorkspaceClientView(view) {
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
-  const title = { formulario: "Cardápio do dia", "catalog-manager": "Meus pratos", "story-panel": "Story" }[view];
+  const title = { formulario: "Cardápio do dia", "catalog-manager": "Meus pratos", "story-panel": "Story", "client-insights": "Analytics" }[view];
   document.querySelector(".workspace-page-heading h1").textContent = title;
   document.querySelector(".breadcrumb strong").textContent = title;
   closeWorkspaceNav();
   window.scrollTo({ top: 0, behavior: "instant" });
+  if (view === "client-insights" && clientFeature(workspacePortalRestaurant, "analytics")) {
+    setWorkspaceInsightsView();
+    hydrateInsights(workspacePortalRestaurant);
+  }
 }
 
 function closeWorkspaceNav() {

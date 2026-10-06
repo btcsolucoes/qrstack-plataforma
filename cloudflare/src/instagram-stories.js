@@ -1,4 +1,5 @@
 // Private API publisher protocol. Instagram sessions and passwords stay on the runner.
+import { entitlement } from './plans.js';
 const MAX_MEDIA_BYTES = 6 * 1024 * 1024;
 export const MAX_STORY_REQUEST_BYTES = Math.ceil(MAX_MEDIA_BYTES / 3) * 4 + 32 * 1024;
 const MEDIA_TTL_SECONDS = 48 * 60 * 60;
@@ -51,8 +52,9 @@ async function bindingFor(env, restaurantId) {
 }
 async function configuration(env, restaurantId) {
   const binding = await bindingFor(env, restaurantId);
+  const access = await entitlement(env.DB, restaurantId);
   const unknown = binding && await env.DB.prepare("SELECT id FROM instagram_story_jobs WHERE restaurant_id = ? AND status = 'outcome_unknown' LIMIT 1").bind(restaurantId).first();
-  const state = !binding ? "unconfigured" : unknown ? "outcome_unknown" : !binding.publisher_active ? "publisher_inactive"
+  const state = unknown ? "outcome_unknown" : !access.features.autopublish ? "plan_required" : !binding ? "unconfigured" : !binding.publisher_active ? "publisher_inactive"
     : !binding.enabled || env.INSTAGRAM_PUBLISHING_ENABLED === "false" ? "disabled" : "ready";
   return { provider: "private_api", enabled: state === "ready", state,
     publisher_id: binding?.publisher_id || null, instagram_username: binding?.instagram_username || null, instagram_user_id: binding?.instagram_user_id || null };
@@ -180,10 +182,11 @@ async function enqueue(env, payload) {
       WHERE EXISTS(SELECT 1 FROM instagram_account_bindings b JOIN instagram_publishers p ON p.publisher_id = b.publisher_id
         WHERE b.restaurant_id = ? AND b.publisher_id = ? AND b.instagram_username = ? AND b.instagram_user_id = ? AND b.enabled = 1 AND p.is_active = 1)
       AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs WHERE restaurant_id = ? AND status = 'outcome_unknown')
+      AND EXISTS(SELECT 1 FROM restaurant_plans WHERE restaurant_id = ? AND plan = 'performance')
       ON CONFLICT(restaurant_id, client_request_id) DO NOTHING`)
       .bind(jobId, tenant.id, tenant.slug, config.publisher_id, config.instagram_username, config.instagram_user_id, menuDayId || null,
         link.href, mediaKey, mediaHash, type, bytes.length, imageSource, clientId, requestHash, timestamp, timestamp, timestamp,
-        tenant.id, config.publisher_id, config.instagram_username, config.instagram_user_id, tenant.id),
+        tenant.id, config.publisher_id, config.instagram_username, config.instagram_user_id, tenant.id, tenant.id),
       env.DB.prepare(`INSERT INTO instagram_story_job_events(id, job_id, publisher_id, status, checkpoint, created_at)
         SELECT ?, ?, ?, 'pending', 'queued', ? WHERE changes() > 0`)
         .bind(`ig_event_${crypto.randomUUID()}`, jobId, config.publisher_id, timestamp)];
@@ -210,6 +213,7 @@ async function claim(env, request, params) {
       WHERE id = (SELECT j.id FROM instagram_story_jobs j JOIN instagram_account_bindings b ON b.restaurant_id = j.restaurant_id
         WHERE j.publisher_id = ? AND j.status = 'pending' AND b.enabled = 1 AND b.publisher_id = j.publisher_id
           AND b.instagram_user_id = j.instagram_user_id AND b.instagram_username = j.instagram_username
+          AND EXISTS(SELECT 1 FROM restaurant_plans WHERE restaurant_id = j.restaurant_id AND plan = 'performance')
           AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs uncertain WHERE uncertain.restaurant_id = j.restaurant_id AND uncertain.status = 'outcome_unknown')
         ORDER BY j.queued_at, j.id LIMIT 1)
       AND status = 'pending'
@@ -256,6 +260,7 @@ async function update(env, request, params, payload) {
     ${guarded ? `AND EXISTS(SELECT 1 FROM instagram_account_bindings b JOIN instagram_publishers p ON p.publisher_id = b.publisher_id
       WHERE b.restaurant_id = instagram_story_jobs.restaurant_id AND b.publisher_id = instagram_story_jobs.publisher_id
       AND b.instagram_username = instagram_story_jobs.instagram_username AND b.instagram_user_id = instagram_story_jobs.instagram_user_id AND b.enabled = 1 AND p.is_active = 1)
+      AND EXISTS(SELECT 1 FROM restaurant_plans WHERE restaurant_id = instagram_story_jobs.restaurant_id AND plan = 'performance')
       AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs uncertain WHERE uncertain.restaurant_id = instagram_story_jobs.restaurant_id AND uncertain.status = 'outcome_unknown')` : ""}`)
     .bind(status, checkpoint, errorCode, mediaId, status, timestamp, status, timestamp, timestamp, job.id, job.publisher_id, job.claim_token, ...transitions[status]),
     env.DB.prepare(`INSERT INTO instagram_story_job_events(id, job_id, publisher_id, status, checkpoint, error_code, created_at)
