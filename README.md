@@ -4,7 +4,7 @@ Plataforma QrStack para gerenciar clientes, formulários, cardápios dinâmicos,
 
 ## Rotas do MVP
 
-- `#/hq/overview?key=qrstack-berna-2026` - central interna QrStack.
+- `#/hq/overview` - central interna QrStack, com chave privada validada no servidor.
 - `#/hq/clientes` - clientes cadastrados.
 - `#/hq/respostas` - respostas dos formulários.
 - `#/hq/stories` - Stories gerados.
@@ -14,7 +14,7 @@ Plataforma QrStack para gerenciar clientes, formulários, cardápios dinâmicos,
 
 ## Escopo atual
 
-Na gestão **Restaurantes**, cada cliente possui um seletor de plano persistido no D1:
+Na gestão **Restaurantes**, cada cliente possui um seletor de plano persistido no KV e espelhado no D1:
 
 | Recurso | RSTACK CARDÁPIO | QRSTACK DIVULGAÇÃO | QRSTACK PERFORMANCE |
 |---|---|---|---|
@@ -27,6 +27,10 @@ Cadastros sem plano começam em Cardápio. A gestão QrStack mantém acesso aos
 analytics de todos; o portal do cliente segue o plano atribuído. A chave da
 gestão é validada no Worker e não fica embutida no JavaScript público.
 Migração de planos: `cloudflare/migrations/0011_restaurant_plans.sql`.
+O KV mantém a gestão dos planos disponível quando a cota diária do D1 se esgota;
+o espelhamento é retomado nas próximas consultas. Alterações podem levar cerca
+de 60 segundos para propagar entre regiões. A fila de publicação continua
+dependendo do D1, mesmo quando a escolha do plano está disponível.
 Ao reduzir o plano, jobs pendentes de publicação são cancelados; trabalhos em
 andamento são barrados antes da próxima etapa, sem repetir publicações.
 

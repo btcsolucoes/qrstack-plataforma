@@ -52,7 +52,8 @@ function fixture(t) {
       },
     },
     INSIGHTS_CACHE: {
-      async put(key, value, options) { kv.set(key, { value: new Uint8Array(value).slice().buffer, metadata: options?.metadata }); },
+      async put(key, value, options) { kv.set(key, { value: typeof value === 'string' ? value : new Uint8Array(value).slice().buffer, metadata: options?.metadata }); },
+      async get(key, type) { const value = kv.get(key)?.value; return value && type === 'json' ? JSON.parse(value) : value || null; },
       async getWithMetadata(key) { return kv.get(key) || { value: null, metadata: null }; },
       async delete(key) { kv.delete(key); },
     },
@@ -460,4 +461,22 @@ test('analytics checks entitlement before serving even cached data and never ret
   await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'divulgacao' });
   assert.equal((await planCall(f, 'getInsights', { slug: 'internal', token: 'internal-test-token' }, 'GET')).status, 403);
   assert.equal((await planCall(f, 'getInsights', { slug: 'internal', key: ownerKey }, 'GET')).status, 200);
+});
+
+test('plans remain editable through KV during D1 quota exhaustion and sync the latest selection after recovery', async t => {
+  const f = fixture(t);
+  await planCall(f, 'listRestaurantPlans', { key: ownerKey }, 'GET');
+  const originalPrepare = f.env.DB.prepare;
+  f.env.DB.prepare = () => { throw new Error("D1_ERROR: Your account has exceeded D1's free tier daily row read limit"); };
+  const changed = await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'divulgacao' });
+  assert.equal(changed.status, 200);
+  assert.equal(changed.data.entitlement.plan, 'divulgacao');
+  const listing = await planCall(f, 'listRestaurantPlans', { key: ownerKey }, 'GET');
+  assert.equal(listing.status, 200);
+  assert.equal(listing.data.restaurants.find(row => row.slug === 'internal').plan, 'divulgacao');
+  assert.equal((await planCall(f, 'getInsights', { slug: 'internal', token: 'internal-test-token' }, 'GET')).status, 403);
+  await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'cardapio' });
+  f.env.DB.prepare = originalPrepare;
+  await planCall(f, 'getRestaurantPlan', { slug: 'internal', token: 'internal-test-token' }, 'GET');
+  assert.equal(f.sqlite.prepare("SELECT plan FROM restaurant_plans WHERE restaurant_id='r-internal'").get().plan, 'cardapio');
 });

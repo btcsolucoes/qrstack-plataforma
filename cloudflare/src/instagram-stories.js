@@ -52,7 +52,7 @@ async function bindingFor(env, restaurantId) {
 }
 async function configuration(env, restaurantId) {
   const binding = await bindingFor(env, restaurantId);
-  const access = await entitlement(env.DB, restaurantId);
+  const access = await entitlement(env, restaurantId);
   const unknown = binding && await env.DB.prepare("SELECT id FROM instagram_story_jobs WHERE restaurant_id = ? AND status = 'outcome_unknown' LIMIT 1").bind(restaurantId).first();
   const state = unknown ? "outcome_unknown" : !access.features.autopublish ? "plan_required" : !binding ? "unconfigured" : !binding.publisher_active ? "publisher_inactive"
     : !binding.enabled || env.INSTAGRAM_PUBLISHING_ENABLED === "false" ? "disabled" : "ready";
