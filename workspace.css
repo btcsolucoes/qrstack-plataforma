@@ -528,3 +528,10 @@ body:not(.public-mode) .insight-bar { display: block; width: 100%; min-height: 0
   body:not(.public-mode) *, body:not(.public-mode) *::before, body:not(.public-mode) *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
 .client-plan-card{margin:20px 0;padding:22px;border:1px solid var(--border,#dce4df);border-radius:16px;background:#fff}.client-plan-card form{border-top:1px solid #e4eae6;margin-top:16px;padding-top:18px}.client-plan-card label{display:block;font-weight:650;margin-bottom:8px}.client-plan-card select{padding:12px;border:1px solid #cbd9d1;border-radius:8px;min-width:220px;max-width:100%;background:#fff;color:#172c23}.client-plan-card p{font-size:14px;line-height:1.6}.plan-lock{padding:28px;background:#f1f5f2;border:1px solid #dce4df;border-radius:14px}.plan-lock h3{margin:16px 0 10px}.plan-lock p{line-height:1.6;max-width:650px}.client-plan-summary{font-size:12px;font-weight:700;letter-spacing:.07em;color:#557162;margin:0 0 22px}
+/* Owner credential settings reuse the workspace form language. */
+.owner-password-card { max-width: 640px; padding: 28px; background: var(--surface, #fff); border: 1px solid #e4e8e5; border-radius: 18px; }
+.owner-password-form { display: grid; gap: 12px; margin: 24px 0; }
+.owner-password-form label { font-weight: 600; }
+.owner-password-form input { width: 100%; min-height: 44px; box-sizing: border-box; }
+.owner-password-form button { justify-self: start; }
+.owner-password-form p { margin: 0 0 8px; }

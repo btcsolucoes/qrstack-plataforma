@@ -26,6 +26,7 @@ function renderWorkspace({ active = "overview", title, subtitle = "", content, r
     ["respostas", "Respostas", "inbox", ownerLink("respostas")],
     ["cardapios", "Cardápios e links", "link", ownerLink("cardapios")],
     ...(STORY_AUTOMATION_ENABLED ? [["stories", "Stories", "layers", ownerLink("stories")]] : []),
+    ["senha", "Minha senha", "layers", ownerLink("senha")],
   ];
   const navItem = ([id, label, icon, href], mobile = false) => {
     const attrs = href ? `href="${href}"` : `type="button" data-client-view="${id}"`;
