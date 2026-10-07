@@ -26,6 +26,19 @@ Na gestão **Restaurantes**, cada cliente possui um seletor de plano persistido 
 Cadastros sem plano começam em Cardápio. A gestão QrStack mantém acesso aos
 analytics de todos; o portal do cliente segue o plano atribuído. A chave da
 gestão é validada no Worker e não fica embutida no JavaScript público.
+Em **Minha senha**, o gestor informa a senha atual e define outra com 12 a 128
+caracteres. A alteração vale imediatamente para as próximas requisições da gestão;
+os acessos dos restaurantes e a credencial do Apps Script não são alterados.
+A senha fica armazenada como hash PBKDF2 com salt exclusivo no Durable Object
+`OwnerCredentials`, independente do D1. O secret `OWNER_ACCESS_TOKEN` só é aceito
+antes da primeira troca e não funciona como senha alternativa depois dela.
+O deploy usa `cloudflare/src/entry.js` e exige o binding `OWNER_AUTH` e a migração
+`owner-credentials-v1` do exemplo de configuração. Se a autenticação estiver
+indisponível, a gestão bloqueia o acesso; não retorna à senha inicial.
+Links e atalhos com a senha anterior param de funcionar depois da troca: abra
+`#/hq/senha` ou `#/hq/overview` sem chave e entre com a senha nova. As ferramentas
+locais que guardaram a antiga chave da gestão precisam ser atualizadas para
+futuras operações administrativas; o token do publicador Windows não muda.
 Migração de planos: `cloudflare/migrations/0011_restaurant_plans.sql`.
 O KV mantém a gestão dos planos disponível quando a cota diária do D1 se esgota;
 o espelhamento é retomado nas próximas consultas. Alterações podem levar cerca

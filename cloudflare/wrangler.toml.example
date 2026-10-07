@@ -1,5 +1,5 @@
 name = "qrstack-api"
-main = "cloudflare/src/worker.js"
+main = "cloudflare/src/entry.js"
 compatibility_date = "2026-08-04"
 workers_dev = true
 
@@ -33,3 +33,11 @@ max_batch_timeout = 30
 max_retries = 5
 retry_delay = 900
 dead_letter_queue = "qrstack-analytics-retry-dlq"
+
+[[durable_objects.bindings]]
+name = "OWNER_AUTH"
+class_name = "OwnerCredentials"
+
+[[migrations]]
+tag = "owner-credentials-v1"
+new_sqlite_classes = ["OwnerCredentials"]

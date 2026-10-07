@@ -1,3 +1,4 @@
+import { verifyOwner } from './owner-auth.js';
 export const PLANS = Object.freeze({
   cardapio: { name: 'RSTACK CARDÁPIO', features: { menu: true, story: false, autopublish: false, analytics: false } },
   divulgacao: { name: 'QRSTACK DIVULGAÇÃO', features: { menu: true, story: true, autopublish: false, analytics: false } },
@@ -13,7 +14,7 @@ async function same(a, b) {
 }
 function bearer(request) { return request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || ''; }
 export async function isOwner(env, request, supplied = '') {
-  return same(supplied || bearer(request), env.OWNER_ACCESS_TOKEN);
+  return verifyOwner(env, request, supplied || bearer(request));
 }
 function capacity(error) { return /row read limit|rows read|daily.*limit|quota|exceeded.*D1/i.test(String(error?.message || '')); }
 async function cached(env, key) { return env.INSIGHTS_CACHE?.get ? env.INSIGHTS_CACHE.get(key, 'json') : null; }

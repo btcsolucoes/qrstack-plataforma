@@ -1,5 +1,5 @@
 // Private API publisher protocol. Instagram sessions and passwords stay on the runner.
-import { entitlement } from './plans.js';
+import { entitlement, isOwner } from './plans.js';
 const MAX_MEDIA_BYTES = 6 * 1024 * 1024;
 export const MAX_STORY_REQUEST_BYTES = Math.ceil(MAX_MEDIA_BYTES / 3) * 4 + 32 * 1024;
 const MEDIA_TTL_SECONDS = 48 * 60 * 60;
@@ -31,7 +31,7 @@ async function equalSecret(left, right) {
 }
 async function owner(env, request, payload) {
   const supplied = payload.owner_key || bearer(request);
-  if (!env.OWNER_ACCESS_TOKEN || !supplied || !(await equalSecret(supplied, env.OWNER_ACCESS_TOKEN))) fail("unauthorized", 401);
+  if (!await isOwner(env, request, supplied)) fail("unauthorized", 401);
 }
 async function restaurant(env, slugValue, token) {
   const slug = id(slugValue, 100).toLowerCase();

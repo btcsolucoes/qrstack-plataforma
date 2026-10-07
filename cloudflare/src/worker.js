@@ -1,5 +1,6 @@
 import { handleInstagramStories, MAX_STORY_REQUEST_BYTES } from "./instagram-stories.js";
 import { handlePlans, authorizeInsights } from "./plans.js";
+import { verifyOwner, handleOwnerPassword } from "./owner-auth.js";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -14,7 +15,7 @@ const READ_CACHE_HEADERS = {
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
-  "access-control-allow-headers": "content-type, authorization, x-claim-token",
+  "access-control-allow-headers": "content-type, authorization, x-claim-token, x-owner-key",
 };
 
 const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec";
@@ -76,6 +77,8 @@ export default {
         ? payload.action || url.searchParams.get("action") || "trackEvent"
         : url.searchParams.get("action") || "health";
 
+      const passwordResponse = await handleOwnerPassword(request, env, payload, action);
+      if (passwordResponse) return passwordResponse;
       const planResponse = await handlePlans(request, env, payload, action);
       if (planResponse) return planResponse;
       const instagramResponse = await handleInstagramStories(request, env, payload, action);
@@ -193,17 +196,17 @@ export default {
       }
 
       if (action === "getRollupStatus") {
-        assertOwner(url.searchParams, request, env);
+        await assertOwner(url.searchParams, request, env);
         return jsonp(url, { ok: true, ...(await getAnalyticsRollupStatus(env, url.searchParams.get("slug") || "amaro")) });
       }
 
       if (action === "getAnalyticsHealth") {
-        assertOwner(url.searchParams, request, env);
+        await assertOwner(url.searchParams, request, env);
         return jsonp(url, { ok: true, ...(await getAnalyticsStorageHealth(env)) });
       }
 
       if (action === "refreshFallbackInsights") {
-        assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
+        await assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
         const filters = {
           slug: url.searchParams.get("slug") || payload.slug || "amaro",
           startDate: normalizeDate(url.searchParams.get("startDate") || payload.startDate),
@@ -214,7 +217,7 @@ export default {
 
       if (action === "runRollupBackfill") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
+        await assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
         await ensureAnalyticsRollupSchema(env);
         return json({ ok: true, ...(await runAnalyticsRollupBackfill(env, payload.slug || "amaro")) });
       }
@@ -237,7 +240,7 @@ export default {
       }
 
       if (action === "getMenuResponses") {
-        assertOwner(url.searchParams, request, env);
+        await assertOwner(url.searchParams, request, env);
         const slug = normalizeSlug(url.searchParams.get("slug") || "amaro");
         if (slug === "amaro") await syncGoogleFormHistory(env);
         return jsonp(url, { ok: true, responses: await getVisibleMenuResponses(env, slug) }, 200, READ_CACHE_HEADERS);
@@ -245,14 +248,14 @@ export default {
 
       if (action === "cacheMenuRecords") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
+        await assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
         const records = Array.isArray(payload.records) ? payload.records.filter(Boolean).slice(0, 500) : [];
         for (const record of records) await cacheMenuRecord(env, normalizeCachedMenuRecord(record, "d1"));
         return json({ ok: true, cached: records.length });
       }
 
       if (action === "backfillMenuCache") {
-        assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
+        await assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
         return jsonp(url, { ok: true, ...(await backfillD1MenuCache(env, url.searchParams.get("slug") || payload.slug || "amaro")) });
       }
 
@@ -540,10 +543,9 @@ async function readPayload(request) {
   }
 }
 
-function assertOwner(params, request, env, bodyKey = "") {
-  const expected = env.OWNER_ACCESS_TOKEN;
+async function assertOwner(params, request, env, bodyKey = "") {
   const received = bodyKey || params.get("key") || params.get("owner_key") || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (!received || received !== expected) {
+  if (!await verifyOwner(env, request, received)) {
     const error = new Error("unauthorized");
     error.status = 401;
     throw error;

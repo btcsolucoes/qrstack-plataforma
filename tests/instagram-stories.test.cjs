@@ -8,6 +8,7 @@ const { DatabaseSync } = require('node:sqlite');
 const root = path.resolve(__dirname, '..');
 const modulePromise = import(pathToFileURL(path.join(root, 'cloudflare/src/instagram-stories.js')).href);
 const workerPromise = import(pathToFileURL(path.join(root, 'cloudflare/src/worker.js')).href);
+const ownerStorePromise = import(pathToFileURL(path.join(root, 'cloudflare/src/owner-credential-store.js')).href);
 const ownerKey = 'test-owner-key-not-a-real-secret';
 const publisherToken = 'test-publisher-credential-'.repeat(3);
 const secondToken = 'test-second-publisher-token-'.repeat(3);
@@ -17,6 +18,11 @@ const imageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP
 function fixture(t) {
   const sqlite = new DatabaseSync(':memory:');
   t.after(() => sqlite.close());
+  const authSqlite = new DatabaseSync(':memory:');
+  t.after(() => authSqlite.close());
+  const authStore = ownerStorePromise.then(({ OwnerCredentialStore }) => new OwnerCredentialStore({
+    exec(sql, ...values) { const rows = authSqlite.prepare(sql).all(...values); return { toArray: () => rows }; },
+  }, ownerKey));
   sqlite.exec(`PRAGMA foreign_keys = ON;
     CREATE TABLE restaurants(id TEXT PRIMARY KEY, slug TEXT UNIQUE, admin_token TEXT, story_link TEXT);
     INSERT INTO restaurants VALUES ('r-internal','internal','internal-test-token','https://example.test/menu');
@@ -34,6 +40,10 @@ function fixture(t) {
   const kv = new Map();
   const env = {
     OWNER_ACCESS_TOKEN: ownerKey,
+    OWNER_AUTH: { getByName() { return {
+      async verify(...args) { return (await authStore).verify(...args); },
+      async change(...args) { return (await authStore).change(...args); },
+    }; } },
     DB: {
       prepare(sql) {
         let values = [];
@@ -399,6 +409,67 @@ async function planCall(f, action, data = {}, method = 'POST') {
   const response = await worker.fetch(request, f.env, { waitUntil() {} });
   return { status: response.status, data: await response.json(), headers: response.headers };
 }
+
+test('owner password rotation invalidates every owner authorization path and preserves restaurant access', async t => {
+  const f = fixture(t);
+  const next = 'a-new-test-password-with-spaces 42';
+  assert.equal((await planCall(f, 'changeOwnerPassword', { current_password: 'wrong', new_password: next })).status, 401);
+  assert.equal((await planCall(f, 'changeOwnerPassword', { current_password: ownerKey, new_password: 'short' })).status, 400);
+  assert.equal((await planCall(f, 'changeOwnerPassword', { current_password: ownerKey, new_password: ownerKey })).status, 400);
+  assert.equal((await planCall(f, 'changeOwnerPassword', { current_password: ownerKey, new_password: next }, 'GET')).status, 405);
+  const changed = await planCall(f, 'changeOwnerPassword', { current_password: ownerKey, new_password: next });
+  assert.equal(changed.status, 200);
+  assert.equal(changed.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(changed.data, { ok: true });
+  assert.equal((await planCall(f, 'verifyOwnerAccess', { owner_key: ownerKey })).status, 401);
+  assert.equal((await planCall(f, 'verifyOwnerAccess', { owner_key: next })).status, 200);
+  assert.equal((await planCall(f, 'listRestaurantPlans', { key: ownerKey }, 'GET')).status, 401);
+  assert.equal((await planCall(f, 'getAnalyticsHealth', { key: ownerKey }, 'GET')).status, 401);
+  assert.equal((await planCall(f, 'getAnalyticsHealth', { key: next }, 'GET')).status, 200);
+  assert.equal((await f.call('registerInstagramPublisher', { owner_key: ownerKey, publisher_id: 'blocked', publisher_token: publisherToken })).status, 401);
+  assert.equal((await f.call('registerInstagramPublisher', { owner_key: next, publisher_id: 'allowed', publisher_token: publisherToken })).status, 200);
+  assert.equal((await planCall(f, 'getRestaurantPlan', { slug: 'internal', token: 'internal-test-token' }, 'GET')).status, 200);
+  assert.equal(f.sqlite.prepare("SELECT admin_token FROM restaurants WHERE slug='internal'").get().admin_token, 'internal-test-token');
+});
+
+test('password changes work without D1; unavailable auth storage never falls back to bootstrap access', async t => {
+  const f = fixture(t);
+  f.env.DB.prepare = () => { throw new Error('D1 daily row read limit exceeded'); };
+  assert.equal((await planCall(f, 'changeOwnerPassword', { current_password: ownerKey, new_password: 'offline-d1-new-password' })).status, 200);
+  assert.equal((await planCall(f, 'verifyOwnerAccess', { owner_key: 'offline-d1-new-password' })).status, 200);
+  delete f.env.OWNER_AUTH;
+  assert.equal((await planCall(f, 'verifyOwnerAccess', { owner_key: ownerKey })).status, 503);
+});
+
+test('concurrent password changes admit one winner and reject replay of the old credential', async t => {
+  const f = fixture(t);
+  const candidates = ['first-concurrent-password', 'second-concurrent-password'];
+  const results = await Promise.all(candidates.map(new_password => planCall(f, 'changeOwnerPassword', { current_password: ownerKey, new_password })));
+  assert.equal(results.filter(result => result.status === 200).length, 1);
+  const winner = results.findIndex(result => result.status === 200);
+  assert.equal((await planCall(f, 'verifyOwnerAccess', { owner_key: candidates[winner] })).status, 200);
+  assert.equal((await planCall(f, 'verifyOwnerAccess', { owner_key: candidates[1 - winner] })).status, 401);
+});
+
+test('repeated incorrect owner passwords are rate limited', async t => {
+  const f = fixture(t);
+  for (let i = 0; i < 10; i++) assert.equal((await planCall(f, 'verifyOwnerAccess', { owner_key: 'wrong-password' })).status, 401);
+  assert.equal((await planCall(f, 'verifyOwnerAccess', { owner_key: 'wrong-password' })).status, 429);
+});
+
+test('owner password storage survives recreation without keeping plaintext or reactivating bootstrap', async t => {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  const sql = { exec(query, ...values) { const rows = db.prepare(query).all(...values); return { toArray: () => rows }; } };
+  const { OwnerCredentialStore } = await ownerStorePromise;
+  const first = new OwnerCredentialStore(sql, ownerKey);
+  const password = 'Senha de gestão com acentos 789!';
+  assert.equal((await first.change(ownerKey, password, 'test-client')).ok, true);
+  const stored = JSON.stringify(db.prepare('SELECT * FROM owner_credential').all());
+  assert.ok(!stored.includes(password) && !stored.includes(ownerKey));
+  const reloaded = new OwnerCredentialStore(sql, 'a-different-bootstrap-secret');
+  assert.equal((await reloaded.verify(password, 'test-client')).ok, true);
+  assert.equal((await reloaded.verify('a-different-bootstrap-secret', 'test-client')).ok, false);
+});
 
 test('only the authenticated owner can list or change plans; unknown plans and clients fail closed', async t => {
   const f = fixture(t);

@@ -232,10 +232,12 @@ async function apiGet(action, params = {}) {
   if (!QRSTACK_API_URL) throw new Error("missing_api_url");
   const url = new URL(QRSTACK_API_URL);
   url.searchParams.set("action", action);
+  const ownerKey = params.key || params.owner_key;
   Object.entries(params).forEach(([key, value]) => {
+    if (key === "key" || key === "owner_key") return;
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   });
-  const response = await fetchWithRetry(url.toString(), { cache: "no-store" }, { timeoutMs: 15000, attempts: 2 });
+  const response = await fetchWithRetry(url.toString(), { cache: "no-store", ...(ownerKey ? { headers: { "X-Owner-Key": encodeURIComponent(ownerKey) } } : {}) }, { timeoutMs: 15000, attempts: 2 });
   const text = await response.text();
   if (!text.trim().startsWith("{")) throw new Error("api_not_public_or_not_json");
   const data = JSON.parse(text);
@@ -245,6 +247,10 @@ async function apiGet(action, params = {}) {
 
 async function endpointGet(endpoint, action, params = {}) {
   if (!endpoint) throw new Error("missing_endpoint");
+  if (params.key || params.owner_key) {
+    if (new URL(endpoint).origin !== new URL(QRSTACK_API_URL).origin) throw new Error("owner_endpoint_not_allowed");
+    return apiGet(action, params);
+  }
   const url = new URL(endpoint);
   url.searchParams.set("action", action);
   Object.entries(params).forEach(([key, value]) => {
@@ -589,7 +595,6 @@ async function renderClientRoute(slug, params, version) {
 async function hasOwnerAccess(params) {
   const key = params.get("key") || OWNER_ACCESS_TOKEN;
   if (!key) return false;
-  if (ownerVerified && key === OWNER_ACCESS_TOKEN) return true;
   try {
     await apiPost({ action: "verifyOwnerAccess", owner_key: key });
     OWNER_ACCESS_TOKEN = key;
@@ -1090,7 +1095,7 @@ function renderOwnerGate() {
         <p>Insira sua chave para abrir o ambiente de gestão.</p>
         <form class="access-form" data-owner-access>
           <label for="owner-access-key">Chave ou link de acesso</label>
-          <input id="owner-access-key" name="ownerAccessKey" autocomplete="off" placeholder="Cole sua chave ou o link da Central" />
+          <input id="owner-access-key" name="ownerAccessKey" type="password" autocomplete="current-password" placeholder="Digite sua senha ou cole o link da Central" required />
           <div class="actions">
             <button type="submit">Entrar na Central</button>
             <a class="button secondary" href="#/home">Voltar ao início</a>
@@ -1125,7 +1130,7 @@ function renderClientGate(restaurant) {
 
 function renderHq(tab = "overview") {
   setSystemTheme();
-  const titles = { overview: "Visão geral", clientes: "Restaurantes", respostas: "Respostas", banco: "Pratos e marca", cardapios: "Cardápios e links", insights: "Insights", stories: "Stories" };
+  const titles = { overview: "Visão geral", clientes: "Restaurantes", respostas: "Respostas", banco: "Pratos e marca", cardapios: "Cardápios e links", insights: "Insights", stories: "Stories", senha: "Minha senha" };
   if (!titles[tab] || (tab === "stories" && !STORY_AUTOMATION_ENABLED)) tab = "overview";
   const restaurant = state.restaurants[0];
   const content = {
@@ -1136,6 +1141,7 @@ function renderHq(tab = "overview") {
     cardapios: renderHqPublicMenus,
     insights: renderHqInsights,
     stories: renderHqStories,
+    senha: renderOwnerPassword,
   }[tab]();
   app.innerHTML = renderWorkspace({
     active: tab, title: titles[tab], restaurant, content,
@@ -1153,6 +1159,70 @@ function renderHq(tab = "overview") {
   if (tab === "banco") hydrateWorkspaceCatalog();
   if (tab === "stories") attachStoryAccountHandlers();
   if (tab === "clientes") hydrateClientPlans();
+  if (tab === "senha") attachOwnerPasswordHandler();
+}
+
+function renderOwnerPassword() {
+  return `<section class="owner-password-card"><h2>Alterar senha da gestão</h2>
+    <p>Escolha uma senha exclusiva para seu acesso à Central QrStack.</p>
+    <form data-owner-password class="owner-password-form">
+      <label for="current-password">Senha atual</label>
+      <input id="current-password" name="currentPassword" type="password" autocomplete="current-password" maxlength="128" required />
+      <label for="new-password">Nova senha</label>
+      <input id="new-password" name="newPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128" aria-describedby="password-guidance" required />
+      <p id="password-guidance" class="muted">Use de 12 a 128 caracteres, sem espaços no início ou no fim. Você pode usar uma frase fácil de lembrar.</p>
+      <label for="confirm-password">Confirmar nova senha</label>
+      <input id="confirm-password" name="confirmPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128" required />
+      <button type="submit">Salvar nova senha</button>
+      <p data-password-status role="status" aria-live="polite"></p>
+    </form>
+    <p>A senha anterior e os links que a contêm deixarão de funcionar. Nos outros dispositivos, entre novamente com a nova senha.</p>
+    <p>O acesso dos restaurantes permanece igual.</p>
+  </section>`;
+}
+
+async function updateOwnerPassword(currentPassword, newPassword) {
+  // Never automatically replay a credential mutation after an ambiguous network failure.
+  const response = await fetchWithRetry(QRSTACK_API_URL, {
+    method: "POST", headers: { "Content-Type": "text/plain;charset=UTF-8" },
+    body: JSON.stringify({ action: "changeOwnerPassword", current_password: currentPassword, new_password: newPassword }),
+  }, { timeoutMs: 20000, attempts: 1 });
+  const result = await response.json();
+  if (!response.ok || !result.ok) throw new Error(result.error || "owner_auth_unavailable");
+  OWNER_ACCESS_TOKEN = newPassword;
+  ownerVerified = true;
+  try { sessionStorage.setItem("qrstack:owner-credential", newPassword); } catch {}
+  return result;
+}
+
+function attachOwnerPasswordHandler() {
+  const form = document.querySelector("[data-owner-password]");
+  if (!form) return;
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const current = form.elements.currentPassword.value;
+    const next = form.elements.newPassword.value;
+    const status = form.querySelector("[data-password-status]");
+    if (next !== form.elements.confirmPassword.value) { status.textContent = "A confirmação precisa ser igual à nova senha."; return; }
+    if (next !== next.trim()) { status.textContent = "Remova os espaços no início e no fim da nova senha."; return; }
+    const button = form.querySelector("button");
+    button.disabled = true;
+    status.textContent = "Salvando sua nova senha...";
+    try {
+      await updateOwnerPassword(current, next);
+      form.reset();
+      status.textContent = "Senha alterada. Você continua conectado aqui. Use a nova senha nos próximos acessos.";
+    } catch (error) {
+      const messages = {
+        unauthorized: "A senha atual está incorreta. Confira e tente novamente.",
+        invalid_new_password: "Use de 12 a 128 caracteres, sem espaços no início ou no fim.",
+        password_unchanged: "Escolha uma senha diferente da atual.",
+        credential_changed: "A senha foi alterada em outro acesso. Entre novamente com a senha mais recente.",
+        too_many_attempts: "Muitas tentativas. Aguarde cinco minutos antes de tentar novamente.",
+      };
+      status.textContent = messages[error.message] || "Não foi possível confirmar a troca. Tente entrar com a nova senha antes de repetir a alteração.";
+    } finally { button.disabled = false; }
+  });
 }
 
 function renderAdminHero(title, subtitle, logoUrl) {
@@ -3848,7 +3918,7 @@ document.addEventListener("submit", async (event) => {
   if (ownerAccessForm) {
     event.preventDefault();
     const rawAccess = new FormData(ownerAccessForm).get("ownerAccessKey");
-    const key = extractAccessParam(rawAccess, "key");
+    const key = /^https?:\/\//i.test(String(rawAccess)) ? extractAccessParam(rawAccess, "key") : String(rawAccess || "");
     if (await hasOwnerAccess(new URLSearchParams({ key }))) {
       window.location.hash = ownerLink("overview");
       return;

@@ -34,6 +34,29 @@ test('central has persistent navigation and an explicit Stories workspace', () =
   assert.match(html, /href="[^\"]*stories/);
 });
 
+test('owner password screen is private and keeps passwords masked', () => {
+  const run = runtime();
+  const owner = run('renderWorkspace({title:"Minha senha",active:"senha",content:renderOwnerPassword()})');
+  assert.match(owner, /href="#\/hq\/senha"/);
+  assert.equal((owner.match(/type="password"/g) || []).length, 3);
+  assert.match(owner, /autocomplete="current-password"/);
+  assert.match(owner, /minlength="12"/);
+  const client = run('renderWorkspace({client:true,title:"Restaurante",content:""})');
+  assert.doesNotMatch(client, /href="#\/hq\/senha"/);
+});
+
+test('password mutation is sent once and updates the current session only after confirmed success', async () => {
+  const run = runtime();
+  run('var sent, retryOptions; fetchWithRetry=async(url,options,retry)=>{sent=JSON.parse(options.body);retryOptions=retry;return {ok:true,json:async()=>({ok:true})}}');
+  await run('updateOwnerPassword("old-password", "new-long-password")');
+  assert.equal(run('retryOptions.attempts'), 1);
+  assert.equal(run('sent.action'), 'changeOwnerPassword');
+  assert.equal(run('sessionStorage.getItem("qrstack:owner-credential")'), 'new-long-password');
+  run('fetchWithRetry=async()=>({ok:false,json:async()=>({ok:false,error:"unauthorized"})})');
+  await assert.rejects(run('updateOwnerPassword("wrong-password", "unconfirmed-password")'), /unauthorized/);
+  assert.equal(run('OWNER_ACCESS_TOKEN'), 'new-long-password');
+});
+
 test('basic and unverified plans lock Stories; Divulgação offers download and copied link without publishing', () => {
   const run = runtime();
   const locked = run('renderStoryComposer(getRestaurant("amaro"),"https://example.com")');
