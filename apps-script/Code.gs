@@ -1,5 +1,6 @@
 const SPREADSHEET_ID = '1v4dr2zVOuvcPJJ02Ah6V-AXsK0d8I6DVGIpMcSe8NmU';
-const OWNER_ACCESS_TOKEN = 'qrstack-berna-2026';
+// Configure QRSTACK_WORKER_SERVICE_TOKEN in Script Properties and the matching
+// SHEETS_OWNER_ACCESS_TOKEN Worker secret. Never place service credentials here.
 
 const SHEETS = {
   restaurants: 'restaurants',
@@ -23,7 +24,7 @@ function doGet(e) {
     }
 
     if (action === 'getRestaurant') {
-      return json({ ok: true, restaurant: getRestaurantBySlug(params.slug) });
+      return json({ ok: true, restaurant: publicRestaurant(getRestaurantBySlug(params.slug)) });
     }
 
     if (action === 'getMenu') {
@@ -31,25 +32,26 @@ function doGet(e) {
       const menu = getMenuForDate(restaurant.id, params.date || todayIso());
       return json({
         ok: true,
-        restaurant,
-        menu,
-        items: menu ? getItemsByMenuDay(menu.id) : [],
+        restaurant: publicRestaurant(restaurant),
+        menu: publicMenu(menu),
+        items: menu ? getItemsByMenuDay(menu.id).map(publicMenuItem) : [],
       });
     }
 
     if (action === 'getCatalog') {
       const restaurant = getRestaurantBySlug(params.slug);
-      return json({ ok: true, restaurant, catalog: getCatalogByRestaurant(restaurant.id) });
+      return json({ ok: true, restaurant: publicRestaurant(restaurant), catalog: getCatalogByRestaurant(restaurant.id).map(publicCatalogItem) });
     }
 
     if (action === 'getRestaurantDatabase') {
       const restaurant = getRestaurantBySlug(params.slug);
-      return json({ ok: true, ...getRestaurantDatabase(restaurant) });
+      const database = getRestaurantDatabase(restaurant);
+      return json({ ok: true, restaurant: publicRestaurant(restaurant), catalog: database.catalog.map(publicCatalogItem), assets: database.assets.map(publicAsset) });
     }
 
     if (action === 'getFormSchema') {
       const restaurant = getRestaurantBySlug(params.slug);
-      return json({ ok: true, restaurant, fields: getFormSchemaByRestaurant(restaurant.id) });
+      return json({ ok: true, restaurant: publicRestaurant(restaurant), fields: getFormSchemaByRestaurant(restaurant.id).map(field => pickFields(field, ['id', 'restaurant_id', 'field_key', 'field_type', 'label', 'placeholder', 'help_text', 'is_required', 'sort_order', 'options'])) });
     }
 
     if (action === 'getInsights') {
@@ -57,7 +59,7 @@ function doGet(e) {
       const restaurant = getRestaurantBySlug(params.slug);
       return json({
         ok: true,
-        restaurant,
+        restaurant: publicRestaurant(restaurant),
         insights: getInsights(restaurant.id, {
           startDate: params.startDate || params.start_date || params.start,
           endDate: params.endDate || params.end_date || params.end,
@@ -67,12 +69,12 @@ function doGet(e) {
 
     if (action === 'listRestaurants') {
       assertOwner(params.owner_key || params.key);
-      return json({ ok: true, restaurants: readObjects(SHEETS.restaurants) });
+      return json({ ok: true, restaurants: readObjects(SHEETS.restaurants).map(publicRestaurant) });
     }
 
     return json({ ok: false, error: 'unknown_action', action }, 400);
   } catch (error) {
-    return json({ ok: false, error: String(error && error.message ? error.message : error) }, 500);
+    return json({ ok: false, error: 'request_denied' });
   }
 }
 
@@ -81,24 +83,19 @@ function doPost(e) {
     const payload = parsePayload(e);
     const action = payload.action;
 
-    if (action === 'saveMenuDay') {
-      const result = saveMenuDay(payload);
-      return json({ ok: true, ...result });
+    if (action === 'saveMenuDay' || action === 'saveStoryAsset') {
+      return json({ ok: false, error: 'legacy_management_retired' });
     }
 
     if (action === 'trackEvent') {
+      assertOwner(payload.owner_key);
       const event = trackEvent(payload);
-      return json({ ok: true, event });
-    }
-
-    if (action === 'saveStoryAsset') {
-      const story = saveStoryAsset(payload);
-      return json({ ok: true, story });
+      return json({ ok: true, event: { id: event.id } });
     }
 
     return json({ ok: false, error: 'unknown_action', action }, 400);
   } catch (error) {
-    return json({ ok: false, error: String(error && error.message ? error.message : error) }, 500);
+    return json({ ok: false, error: 'request_denied' });
   }
 }
 
@@ -151,7 +148,7 @@ function trackEvent(payload) {
   const source = normalizeSource(payload.source || payload.origem || payload.utm_source || 'direct');
   const device = detectDevice(payload.user_agent || payload.userAgent || '');
   const event = {
-    id: uuid('event'),
+    id: payload.id || uuid('event'),
     restaurant_id: restaurant.id,
     menu_day_id: payload.menu_day_id || '',
     event_type: payload.event_type || 'page_view',
@@ -491,16 +488,37 @@ function assertToken(restaurant, token) {
 }
 
 function assertOwner(token) {
-  if (!token || token !== OWNER_ACCESS_TOKEN) {
+  const expected = PropertiesService.getScriptProperties().getProperty('QRSTACK_WORKER_SERVICE_TOKEN');
+  if (!expected || expected.length < 32 || !token || !equalServiceSecret(token, expected)) {
     throw new Error('invalid_owner_token');
   }
 }
 
-function json(payload, callback) {
-  const body = callback ? `${callback}(${JSON.stringify(payload)});` : JSON.stringify(payload);
+function equalServiceSecret(received, expected) {
+  const digest = value => Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(value), Utilities.Charset.UTF_8);
+  const left = digest(received), right = digest(expected);
+  let difference = 0;
+  for (let i = 0; i < left.length; i++) difference |= left[i] ^ right[i];
+  return difference === 0;
+}
+
+function pickFields(value, fields) {
+  if (!value) return value;
+  return fields.reduce((out, key) => {
+    if (Object.prototype.hasOwnProperty.call(value, key)) out[key] = value[key];
+    return out;
+  }, {});
+}
+function publicRestaurant(value) { return pickFields(value, ['id', 'slug', 'name', 'logo_url', 'symbol_url', 'primary_color', 'secondary_color', 'accent_color', 'whatsapp_number', 'instagram_url', 'maps_url', 'address', 'github_pages_url', 'assets_base_url', 'manifest_url', 'catalog_url', 'sections_url', 'story_link']); }
+function publicCatalogItem(value) { return pickFields(value, ['id', 'restaurant_id', 'section_id', 'section_title', 'name', 'category', 'description', 'price', 'image_url', 'sort_order', 'is_active']); }
+function publicAsset(value) { return pickFields(value, ['id', 'restaurant_id', 'catalog_item_id', 'asset_type', 'label', 'url']); }
+function publicMenu(value) { return pickFields(value, ['id', 'restaurant_id', 'date', 'title', 'price', 'service_hours', 'story_link', 'is_published', 'published_at']); }
+function publicMenuItem(value) { return pickFields(value, ['id', 'menu_day_id', 'name', 'category', 'description', 'price', 'image_url', 'is_highlight', 'sort_order']); }
+
+function json(payload) {
   return ContentService
-    .createTextOutput(body)
-    .setMimeType(callback ? ContentService.MimeType.JAVASCRIPT : ContentService.MimeType.JSON);
+    .createTextOutput(JSON.stringify(payload))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 function uuid(prefix) {

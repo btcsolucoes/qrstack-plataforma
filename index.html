@@ -3,6 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' https: data: blob:; connect-src 'self' https://qrstack-api.qrstack.workers.dev https://script.google.com https://script.googleusercontent.com https://btcsolucoes.github.io; frame-src https://btcsolucoes.github.io; object-src 'none'; base-uri 'none'; form-action 'none'" />
     <meta name="theme-color" content="#171c1c" />
     <title>QrStack Plataforma</title>
     <meta
@@ -17,25 +19,13 @@
     />
     <link rel="manifest" href="manifest.webmanifest" />
     <link id="public-styles" rel="stylesheet" href="styles.css?v=qrstack-catalog-20260820" disabled />
-    <link rel="stylesheet" href="workspace.css?v=20261007-password" />
+    <link rel="stylesheet" href="workspace.css?v=20261007-security" />
   </head>
   <body>
     <div id="app" class="app-shell"></div>
     <script src="data/amaro-catalog.js?v=amaro-active-20260807"></script>
-    <script src="workspace.js?v=20261007-password"></script>
-    <script src="script.js?v=20261007-password"></script>
-    <script>
-      if ("serviceWorker" in navigator) {
-        window.addEventListener("load", () => {
-          navigator.serviceWorker
-            .getRegistrations()
-            .then((registrations) => registrations.forEach((registration) => registration.unregister()))
-            .catch(() => {});
-          if ("caches" in window) {
-            caches.keys().then((keys) => keys.forEach((key) => caches.delete(key))).catch(() => {});
-          }
-        });
-      }
-    </script>
+    <script src="workspace.js?v=20261007-security"></script>
+    <script src="script.js?v=20261007-security"></script>
+
   </body>
 </html>

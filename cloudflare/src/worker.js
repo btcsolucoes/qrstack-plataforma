@@ -1,3 +1,8 @@
+import { handleInstagramStories, MAX_STORY_REQUEST_BYTES } from "./instagram-stories.js";
+import { handlePlans, authorizeInsights } from "./plans.js";
+import { verifyOwner, handleOwnerPassword, enforceRateLimit } from "./owner-auth.js";
+import { authorizeTenant, getTenant, equalTenantToken, publicRestaurant, publicRestaurantResult, publicCatalogResult, publicMenuResult } from "./tenant-auth.js";
+
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
@@ -11,17 +16,40 @@ const READ_CACHE_HEADERS = {
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
-  "access-control-allow-headers": "content-type, authorization",
+  "access-control-allow-headers": "content-type, authorization, x-claim-token, x-owner-key, x-owner-session, x-client-token",
+  "access-control-expose-headers": "Retry-After",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
 };
 
 const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec";
-const ANALYTICS_CACHE_VERSION = "v5-persistent-snapshot";
+const ANALYTICS_CACHE_VERSION = "v8-conversion-coverage";
+const MENU_CACHE_VERSION = "v1-unified-responses";
+const CATALOG_CACHE_VERSION = "v1-resilient-catalog";
+const AMARO_PUBLISHED_BASE_URL = "https://btcsolucoes.github.io/carda-pio/qrstack/";
+const AMARO_PUBLISHED_CATALOG_URL = `${AMARO_PUBLISHED_BASE_URL}amaro-catalog.json`;
+const AMARO_PUBLISHED_ASSETS_URL = `${AMARO_PUBLISHED_BASE_URL}amaro-assets.json`;
+const AMARO_FORM_SHEET_ID = "1wj-cHrLg-MHAzwD2CdWR-ZocaVMLQApdNif1hTIXpJI";
+const AMARO_FORM_SHEET_NAME = "Respostas ao formulário 1";
+const D1_READ_BLOCK_KEY = "insights:d1-read-blocked";
+const D1_WRITE_BLOCK_KEY = "analytics:d1-write-blocked";
+const ANALYTICS_STORAGE_HEALTH_KEY = "analytics:storage-health";
+const ANALYTICS_TOTAL_STATS_CACHE_VERSION = "v1";
+const ANALYTICS_WRITE_INDEX_VERSION = "v1";
+const ANALYTICS_WRITE_INDEX_KEY = `analytics:write-indexes:${ANALYTICS_WRITE_INDEX_VERSION}`;
 const BUSINESS_TIME_ZONE = "America/Recife";
 const INSIGHTS_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 1000;
-const STORY_MEDIA_TTL_SECONDS = 48 * 60 * 60;
-const STORY_MEDIA_MAX_BYTES = 6 * 1024 * 1024;
-const STORY_ACTIVE_STATUSES = ["claimed", "preparing", "publishing", "paused_interruption"];
-const STORY_AGENT_MIN_VERSION = "0.1.22";
+const ANALYTICS_ROLLUP_SCHEMA_VERSION = "v1";
+const ANALYTICS_ROLLUP_SCHEMA_KEY = `analytics:rollup-schema:${ANALYTICS_ROLLUP_SCHEMA_VERSION}`;
+const ANALYTICS_ROLLUP_START_DATE = "2026-07-03";
+const ANALYTICS_ROLLUP_PAGE_SIZE = 2000;
+const ANALYTICS_ROLLUP_SQL_CHUNK_BYTES = 70 * 1024;
+const CATALOG_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const CATALOG_IMAGE_TYPES = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+};
 
 const EVENT_COLUMNS = [
   "id", "restaurant_id", "restaurant_slug", "menu_day_id", "event_type", "source",
@@ -37,114 +65,474 @@ export default {
 
     try {
       const url = new URL(request.url);
+      const routedAction = url.searchParams.get("action") || "";
+      if (routedAction === "getCatalogImage") {
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          return json({ ok: false, error: "method_not_allowed" }, 405);
+        }
+        return await serveCatalogImage(env, request, url);
+      }
+      if (routedAction === "uploadCatalogImage") {
+        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+        await enforceRateLimit(env, request, 'tenant_write');
+        return await uploadCatalogImage(env, request);
+      }
       const payload = request.method === "POST" ? await readPayload(request) : {};
       const action = request.method === "POST"
         ? payload.action || url.searchParams.get("action") || "trackEvent"
         : url.searchParams.get("action") || "health";
 
+      if (['saveCatalogItem', 'saveMenuDay', 'createStoryJob'].includes(action)) await enforceRateLimit(env, request, 'tenant_write');
+      if (['getRestaurant', 'getCatalog', 'getMenu', 'getInsights', 'getRestaurantPlan', 'getStoryPublishingConfig', 'getStoryJob', 'verifyClientAccess'].includes(action)) await enforceRateLimit(env, request, 'tenant_read');
+      if (action === 'trackEvent') await enforceRateLimit(env, request, 'public_write');
+      const passwordResponse = await handleOwnerPassword(request, env, payload, action, ctx);
+      if (passwordResponse) return passwordResponse;
+      if (action === 'verifyClientAccess') {
+        if (request.method !== 'POST') return json({ ok: false, error: 'method_not_allowed' }, 405);
+        await authorizeTenant(env, request, payload.slug, payload.token);
+        return json({ ok: true });
+      }
+      if (action === 'getRestaurantAccess') {
+        if (request.method !== 'GET') return json({ ok: false, error: 'method_not_allowed' }, 405);
+        await assertOwner(url.searchParams, request, env);
+        const tenant = await getTenant(env, url.searchParams.get('slug'));
+        if (!tenant) throw httpError('restaurant_not_found', 404);
+        return json({ ok: true, token: tenant.admin_token });
+      }
+      const planResponse = await handlePlans(request, env, payload, action);
+      if (planResponse) return planResponse;
+      const instagramResponse = await handleInstagramStories(request, env, payload, action);
+      if (instagramResponse) return instagramResponse;
+
       if (action === "health") {
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v7-story-retry-history",
-          fallback_storage: "google_sheets",
-          story_automation: true,
         });
       }
 
       if (action === "trackEvent") {
-        const eventPayload = request.method === "POST" ? payload : Object.fromEntries(url.searchParams);
-        const event = await trackEvent(env.DB, eventPayload, request);
-        return json({ ok: true, event }, 201);
+        const receivedPayload = request.method === "POST" ? payload : Object.fromEntries(url.searchParams);
+        const eventPayload = { ...receivedPayload, id: receivedPayload.id || crypto.randomUUID() };
+        const writeBlock = await readCacheJson(env, D1_WRITE_BLOCK_KEY);
+        if (writeBlock) {
+          return storeFallbackEvent(env, eventPayload, request, writeBlock.reason || "d1_write_blocked");
+        }
+        try {
+          const tracked = await trackEvent(env.DB, eventPayload, request);
+          if (tracked.rollupEvents?.length) {
+            ctx.waitUntil(updateAnalyticsRollups(env, tracked.rollupEvents));
+          }
+          return json({ ok: true, event: tracked.event, storage: "d1" }, 201);
+        } catch (error) {
+          if (!isD1CapacityError(error)) throw error;
+          await markD1WriteBlocked(env, error);
+          return storeFallbackEvent(env, eventPayload, request, "d1_capacity");
+        }
       }
 
       if (action === "getInsights") {
-        assertOwner(url.searchParams, request, env);
-        const cacheRequest = insightsCacheRequest(request);
-        const cachedResponse = cacheRequest ? await caches.default.match(cacheRequest) : null;
-        if (cachedResponse) return cachedResponse;
+        await authorizeInsights(env, request, url.searchParams);
         const slug = url.searchParams.get("slug") || "amaro";
-        const insights = await getInsights(env.DB, {
+        const forceRefresh = url.searchParams.get("refresh") === "1";
+        const filters = {
           slug,
           startDate: normalizeDate(url.searchParams.get("startDate") || url.searchParams.get("start_date")),
           endDate: normalizeDate(url.searchParams.get("endDate") || url.searchParams.get("end_date")),
-        });
-        const response = jsonp(url, {
-          ok: true,
-          restaurant: { slug, name: insights.restaurant_name || slug },
-          insights,
-        }, 200, READ_CACHE_HEADERS);
-        if (cacheRequest && request.method === "GET" && !url.searchParams.get("callback")) {
-          ctx.waitUntil(caches.default.put(cacheRequest, response.clone()));
+        };
+        const snapshotKey = insightsSnapshotKey(filters);
+        const analyticsStorage = await getAnalyticsStorageHealth(env);
+        if (forceRefresh) {
+          try {
+            const refreshedSnapshot = await refreshInsightsSnapshot(env, filters, snapshotKey);
+            return jsonp(url, {
+              ...refreshedSnapshot,
+              analytics_storage: analyticsStorage,
+              cache: { status: "forced_refreshed", generated_at: refreshedSnapshot.generated_at },
+            }, 200, JSON_HEADERS);
+          } catch (error) {
+            const savedSnapshot = (isD1CapacityError(error) || isRollupNotReadyError(error))
+              ? await readInsightsSnapshot(env, snapshotKey)
+              : null;
+            if (!savedSnapshot) throw error;
+            console.warn("QrStack insights refresh reached D1 quota; serving saved snapshot", {
+              key: snapshotKey,
+              error: error?.message || String(error),
+            });
+            return jsonp(url, {
+              ...savedSnapshot,
+              analytics_storage: analyticsStorage,
+              cache: {
+                status: "quota_stale",
+                generated_at: savedSnapshot.generated_at || savedSnapshot.insights?.collected_at || "",
+              },
+            }, 200, JSON_HEADERS);
+          }
         }
-        return response;
+        const snapshot = await readInsightsSnapshot(env, snapshotKey);
+        if (snapshot) {
+          const ageMs = Date.now() - Date.parse(snapshot.generated_at || snapshot.insights?.collected_at || 0);
+          if (!Number.isFinite(ageMs) || ageMs > INSIGHTS_SNAPSHOT_MAX_AGE_MS) {
+            ctx.waitUntil(refreshInsightsSnapshot(env, filters, snapshotKey).catch((error) => {
+              console.warn("QrStack background insights refresh failed", {
+                key: snapshotKey,
+                error: error?.message || String(error),
+              });
+            }));
+          }
+          return jsonp(url, {
+            ...snapshot,
+            analytics_storage: analyticsStorage,
+            cache: {
+              status: ageMs <= INSIGHTS_SNAPSHOT_MAX_AGE_MS ? "fresh" : "stale_while_refresh",
+              generated_at: snapshot.generated_at || snapshot.insights?.collected_at || "",
+            },
+          }, 200, JSON_HEADERS);
+        }
+        const freshSnapshot = await refreshInsightsSnapshot(env, filters, snapshotKey);
+        return jsonp(url, {
+          ...freshSnapshot,
+          analytics_storage: analyticsStorage,
+          cache: { status: "miss_refreshed", generated_at: freshSnapshot.generated_at },
+        }, 200, JSON_HEADERS);
       }
 
       if (action === "getRestaurant") {
         const slug = url.searchParams.get("slug") || "amaro";
-        return jsonp(url, { ok: true, restaurant: await getRestaurant(env.DB, slug) });
+        return jsonp(url, { ok: true, ...publicRestaurantResult(await getRestaurantResilient(env, slug)) }, 200, READ_CACHE_HEADERS);
       }
 
       if (action === "getCatalog") {
         const slug = url.searchParams.get("slug") || "amaro";
-        return jsonp(url, { ok: true, ...(await getCatalog(env.DB, slug)) }, 200, READ_CACHE_HEADERS);
+        return jsonp(url, { ok: true, ...publicCatalogResult(await getCatalogResilient(env, slug)) }, 200, READ_CACHE_HEADERS);
+      }
+
+      if (action === "getRollupStatus") {
+        await assertOwner(url.searchParams, request, env);
+        return jsonp(url, { ok: true, ...(await getAnalyticsRollupStatus(env, url.searchParams.get("slug") || "amaro")) });
+      }
+
+      if (action === "getAnalyticsHealth") {
+        await assertOwner(url.searchParams, request, env);
+        return jsonp(url, { ok: true, ...(await getAnalyticsStorageHealth(env)) });
+      }
+
+      if (action === "refreshFallbackInsights") {
+        await assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
+        const filters = {
+          slug: url.searchParams.get("slug") || payload.slug || "amaro",
+          startDate: normalizeDate(url.searchParams.get("startDate") || payload.startDate),
+          endDate: normalizeDate(url.searchParams.get("endDate") || payload.endDate),
+        };
+        return jsonp(url, await refreshInsightsFromSheets(env, filters), 200, JSON_HEADERS);
+      }
+
+      if (action === "runRollupBackfill") {
+        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+        await assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
+        await ensureAnalyticsRollupSchema(env);
+        return json({ ok: true, ...(await runAnalyticsRollupBackfill(env, payload.slug || "amaro")) });
       }
 
       if (action === "saveCatalogItem") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        return json({ ok: true, item: await saveCatalogItem(env.DB, payload) });
+        const result = await saveCatalogItemResilient(env, payload, request);
+        return json({ ok: true, ...result }, result.storage === "d1" ? 200 : 202);
       }
 
       if (action === "getMenu") {
         const slug = url.searchParams.get("slug") || "amaro";
         const date = normalizeDate(url.searchParams.get("date"));
-        return jsonp(url, { ok: true, ...(await getMenu(env.DB, slug, date)) }, 200, READ_CACHE_HEADERS);
+        return jsonp(url, { ok: true, ...publicMenuResult(await getMenu(env, slug, date)) }, 200, READ_CACHE_HEADERS);
       }
 
       if (action === "saveMenuDay") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        return json({ ok: true, ...(await saveMenuDay(env.DB, payload)) });
+        const saved = await saveMenuDay(env, payload, request);
+        return json({ ok: true, ...saved, restaurant: publicRestaurant(saved.restaurant) });
       }
 
-      if (action === "registerStoryAgent") {
+      if (action === "getMenuResponses") {
+        await assertOwner(url.searchParams, request, env);
+        const slug = normalizeSlug(url.searchParams.get("slug") || "amaro");
+        if (slug === "amaro") await syncGoogleFormHistory(env);
+        return jsonp(url, { ok: true, responses: (await getVisibleMenuResponses(env, slug)).map(row => ({ ...row, restaurant: publicRestaurant(row.restaurant) })) }, 200, JSON_HEADERS);
+      }
+
+      if (action === "cacheMenuRecords") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        assertOwner(url.searchParams, request, env, payload.owner_key || payload.ownerKey);
-        return json({ ok: true, agent: await registerStoryAgent(env.DB, payload) }, 201);
+        await assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
+        const records = Array.isArray(payload.records) ? payload.records.filter(Boolean).slice(0, 500) : [];
+        for (const record of records) await cacheMenuRecord(env, normalizeCachedMenuRecord(record, "d1"));
+        return json({ ok: true, cached: records.length });
       }
 
-      if (action === "createStoryJob") {
-        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        return json({ ok: true, ...(await createStoryJob(env, payload, request)) }, 201);
-      }
-
-      if (action === "getNextStoryJob") {
-        const result = await claimNextStoryJob(env.DB, request, url);
-        return jsonp(url, { ok: true, ...result }, 200, JSON_HEADERS);
-      }
-
-      if (action === "updateStoryJob") {
-        if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        return json({ ok: true, job: await updateStoryJob(env.DB, payload, request) });
-      }
-
-      if (action === "getStoryJob") {
-        const job = await getStoryJobForRestaurant(env.DB, url.searchParams);
-        return jsonp(url, { ok: true, job }, 200, JSON_HEADERS);
-      }
-
-      if (action === "getStoryMedia") {
-        return getStoryMedia(env, url);
+      if (action === "backfillMenuCache") {
+        await assertOwner(url.searchParams, request, env, payload.key || payload.owner_key || "");
+        return jsonp(url, { ok: true, ...(await backfillD1MenuCache(env, url.searchParams.get("slug") || payload.slug || "amaro")) });
       }
 
       return jsonp(url, { ok: false, error: "unknown_action", action }, 404);
     } catch (error) {
-      return json({ ok: false, error: error.message || String(error) }, error.status || 500);
+      return json({ ok: false, error: error.status ? error.message : 'service_unavailable' }, error.status || 500,
+        { ...JSON_HEADERS, ...(error.status === 429 ? { 'retry-after': String(error.retryAfter || 60) } : {}) });
     }
+  },
+
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(runScheduledMaintenance(controller, env));
+  },
+
+  async queue(batch, env) {
+    const activeBlock = await readCacheJson(env, D1_WRITE_BLOCK_KEY);
+    if (activeBlock) {
+      batch.retryAll({ delaySeconds: queueDelayUntilD1Reset() });
+      return;
+    }
+
+    let recovered = 0;
+    for (const message of batch.messages) {
+      const messageKind = message.body?.kind || "analytics_event";
+      try {
+        if (messageKind === "catalog_item") {
+          const item = await saveCatalogItem(env.DB, message.body.payload || {});
+          await cacheCatalogItemMutation(env, message.body.payload?.slug || "amaro", item);
+          message.ack();
+          recovered += 1;
+          continue;
+        }
+        if (messageKind === "menu_day") {
+          const saved = await saveMenuDayD1(env.DB, message.body.payload || {});
+          await cacheMenuRecord(env, normalizeCachedMenuRecord({
+            ...saved,
+            response_source: "platform",
+            received_at: new Date().toISOString(),
+          }, "platform"));
+          message.ack();
+          recovered += 1;
+          continue;
+        }
+
+        const eventPayload = message.body?.event || message.body || {};
+        const replayRequest = new Request("https://qrstack-replay.internal/", {
+          headers: { "user-agent": eventPayload.user_agent || eventPayload.userAgent || "" },
+        });
+        const tracked = await trackEvent(env.DB, eventPayload, replayRequest);
+        if (tracked.rollupEvents?.length) await updateAnalyticsRollups(env, tracked.rollupEvents);
+        message.ack();
+        recovered += 1;
+      } catch (error) {
+        if (isD1CapacityError(error)) {
+          await markD1WriteBlocked(env, error);
+          message.retry({ delaySeconds: queueDelayUntilD1Reset() });
+        } else {
+          const delaySeconds = Math.min(3600, 60 * (2 ** Math.min(Number(message.attempts || 1), 5)));
+          message.retry({ delaySeconds });
+        }
+      }
+    }
+    if (recovered) await recordAnalyticsStorageHealth(env, {
+      mode: "d1",
+      status: "recovered",
+      recovered_events: recovered,
+      recovered_at: new Date().toISOString(),
+    });
   },
 };
 
+function isD1CapacityError(error) {
+  if (error?.code === "D1_CAPACITY_BLOCKED_CACHED") return true;
+  const message = String(error?.message || error || "");
+  return /SQLITE_FULL|database (?:or disk )?is full|maximum database size|max(?:imum)? db size|storage (?:capacity|limit)|quota (?:exceeded|reached)|exceeded[^\n]*(?:quota|daily row)|(?:daily|free tier)[^\n]*row (?:read|write) limit|write quota/i.test(message);
+}
+
+function isRollupNotReadyError(error) {
+  return error?.code === "ANALYTICS_ROLLUP_NOT_READY";
+}
+
+function isD1DailyQueryLimitError(error) {
+  const message = String(error?.message || error || "");
+  return /free tier daily row (?:read|write) limit|daily row (?:read|write) limit/i.test(message);
+}
+
+function secondsUntilD1Reset() {
+  const now = new Date();
+  const nextReset = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 1);
+  return Math.max(60, Math.ceil((nextReset - now.getTime()) / 1000));
+}
+
+function queueDelayUntilD1Reset() {
+  return Math.min(23 * 60 * 60, secondsUntilD1Reset());
+}
+
+async function readCacheJson(env, key) {
+  if (!env.INSIGHTS_CACHE) return null;
+  try {
+    return await env.INSIGHTS_CACHE.get(key, "json");
+  } catch (error) {
+    console.warn("QrStack operational cache read failed", { key, error: error?.message || String(error) });
+    return null;
+  }
+}
+
+async function recordAnalyticsStorageHealth(env, update) {
+  if (!env.INSIGHTS_CACHE) return;
+  const previous = await readCacheJson(env, ANALYTICS_STORAGE_HEALTH_KEY) || {};
+  await env.INSIGHTS_CACHE.put(ANALYTICS_STORAGE_HEALTH_KEY, JSON.stringify({
+    ...previous,
+    ...update,
+    updated_at: new Date().toISOString(),
+  }));
+}
+
+async function getAnalyticsStorageHealth(env) {
+  const [readBlock, writeBlock, saved, writeIndexes] = await Promise.all([
+    readCacheJson(env, D1_READ_BLOCK_KEY),
+    readCacheJson(env, D1_WRITE_BLOCK_KEY),
+    readCacheJson(env, ANALYTICS_STORAGE_HEALTH_KEY),
+    env.INSIGHTS_CACHE ? env.INSIGHTS_CACHE.get(ANALYTICS_WRITE_INDEX_KEY) : null,
+  ]);
+  return {
+    primary: "cloudflare_d1",
+    fallback: "google_sheets",
+    replay: env.ANALYTICS_RETRY_QUEUE ? "cloudflare_queue" : "manual",
+    automatic_replay_events: ["page_view", "instagram_webview_prompt"],
+    ingestion_status: writeBlock ? "fallback_active" : "d1_active",
+    dashboard_status: readBlock ? "cached_snapshot" : "d1_rollups",
+    read_block: readBlock,
+    write_block: writeBlock,
+    last_transition: saved || null,
+    write_amplification_reduced: Boolean(writeIndexes),
+    raw_events_are_never_deleted: true,
+  };
+}
+
+async function markD1WriteBlocked(env, error) {
+  if (!env.INSIGHTS_CACHE) return;
+  const marker = {
+    reason: "d1_write_unavailable",
+    error: String(error?.message || error || "").slice(0, 500),
+    blocked_at: new Date().toISOString(),
+    resumes_after: new Date(Date.now() + secondsUntilD1Reset() * 1000).toISOString(),
+  };
+  const expirationTtl = secondsUntilD1Reset();
+  await Promise.allSettled([
+    env.INSIGHTS_CACHE.put(D1_WRITE_BLOCK_KEY, JSON.stringify(marker), { expirationTtl }),
+    recordAnalyticsStorageHealth(env, {
+      mode: "google_sheets",
+      status: "fallback_active",
+      fallback_reason: marker.reason,
+      fallback_started_at: marker.blocked_at,
+    }),
+  ]);
+}
+
+async function enqueueFallbackReplay(env, eventPayload) {
+  if (!env.ANALYTICS_RETRY_QUEUE) return false;
+  const eventType = normalizeEventType(eventPayload.event_type || eventPayload.tipo || "page_view");
+  if (!["page_view", "instagram_webview_prompt"].includes(eventType)) return false;
+  try {
+    await env.ANALYTICS_RETRY_QUEUE.send(
+      { event: eventPayload, queued_at: new Date().toISOString() },
+      { delaySeconds: queueDelayUntilD1Reset() },
+    );
+    return true;
+  } catch (error) {
+    console.warn("QrStack could not queue the Sheets fallback for automatic D1 replay", {
+      event_id: eventPayload.id,
+      error: error?.message || String(error),
+    });
+    return false;
+  }
+}
+
+async function enqueueDeferredMutation(env, kind, payload) {
+  if (!env.ANALYTICS_RETRY_QUEUE) return false;
+  try {
+    await env.ANALYTICS_RETRY_QUEUE.send(
+      { kind, payload, queued_at: new Date().toISOString() },
+      { delaySeconds: queueDelayUntilD1Reset() },
+    );
+    return true;
+  } catch (error) {
+    console.warn("QrStack could not queue deferred mutation", {
+      kind,
+      error: error?.message || String(error),
+    });
+    return false;
+  }
+}
+
+async function storeFallbackEvent(env, eventPayload, request, reason) {
+  const [sheetResult, queueResult] = await Promise.allSettled([
+    storeEventInSheets(env, eventPayload, request),
+    enqueueFallbackReplay(env, eventPayload),
+  ]);
+  const fallback = sheetResult.status === "fulfilled" ? sheetResult.value : null;
+  const replayQueued = queueResult.status === "fulfilled" && queueResult.value === true;
+  if (!fallback && !replayQueued) {
+    throw new Error(`Analytics fallback unavailable: ${sheetResult.reason?.message || "Sheets failed"}`);
+  }
+  console.warn("QrStack event stored outside D1", {
+    client_event_id: eventPayload.id,
+    sheet_event_id: fallback?.event?.id || "",
+    replay_queued: replayQueued,
+  });
+  return json({
+    ok: true,
+    event: fallback?.event || eventPayload,
+    client_event_id: eventPayload.id,
+    storage: fallback ? "google_sheets" : "cloudflare_queue",
+    sheets_saved: Boolean(fallback),
+    fallback_reason: reason,
+    replay_queued: replayQueued,
+  }, 202);
+}
+
+async function storeEventInSheets(env, payload, request) {
+  const endpoint = env.SHEETS_FALLBACK_URL || DEFAULT_SHEETS_FALLBACK_URL;
+  if (!endpoint) throw new Error("D1 capacity reached and SHEETS_FALLBACK_URL is not configured");
+
+  const userAgent = payload.user_agent || payload.userAgent || request.headers.get("user-agent") || "";
+  const originalDetail = payload.source_detail || payload.sourceDetail || payload.referrer || "";
+  const eventMarker = `qrstack_event_id=${payload.id}`;
+  const sourceDetail = originalDetail.includes(eventMarker)
+    ? originalDetail
+    : [originalDetail, eventMarker].filter(Boolean).join(" | ");
+  const body = {
+    ...payload,
+    action: "trackEvent",
+    owner_key: env.SHEETS_OWNER_ACCESS_TOKEN || '',
+    id: payload.id,
+    cliente: payload.cliente || payload.slug || payload.restaurant_slug || "amaro",
+    slug: payload.slug || payload.cliente || payload.restaurant_slug || "amaro",
+    source_detail: sourceDetail,
+    user_agent: userAgent,
+    timestamp: payload.timestamp || payload.created_at || new Date().toISOString(),
+  };
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "content-type": "text/plain;charset=UTF-8" },
+    body: JSON.stringify(body),
+    redirect: "follow",
+  });
+  const text = await response.text();
+  let result;
+  try {
+    result = JSON.parse(text);
+  } catch {
+    throw new Error(`Google Sheets fallback returned invalid JSON (${response.status})`);
+  }
+  if (!response.ok || result?.ok !== true) {
+    throw new Error(`Google Sheets fallback failed (${response.status}): ${result?.error || "unknown error"}`);
+  }
+  return result;
+}
+
 async function readPayload(request) {
-  const text = await request.text();
+  const bytes = await readLimitedBytes(request, MAX_STORY_REQUEST_BYTES);
+  const text = new TextDecoder().decode(bytes);
   if (!text) return {};
   try {
     return JSON.parse(text);
@@ -153,30 +541,657 @@ async function readPayload(request) {
   }
 }
 
-function assertOwner(params, request, env, bodyKey = "") {
-  const expected = env.OWNER_ACCESS_TOKEN || "qrstack-berna-2026";
+async function readLimitedBytes(request, maximum) {
+  if (Number(request.headers.get("content-length") || 0) > maximum) throw httpError("request_too_large", 413);
+  const reader = request.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks = [];
+  let size = 0;
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    size += chunk.value.byteLength;
+    if (size > maximum) {
+      await reader.cancel();
+      throw httpError("request_too_large", 413);
+    }
+    chunks.push(chunk.value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes;
+}
+
+async function assertOwner(params, request, env, bodyKey = "") {
   const received = bodyKey || params.get("key") || params.get("owner_key") || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (!received || received !== expected) {
+  if (!await verifyOwner(env, request, received)) {
     const error = new Error("unauthorized");
     error.status = 401;
     throw error;
   }
 }
 
-function insightsCacheRequest(request) {
-  if (request.method !== "GET") return null;
-  const url = new URL(request.url);
-  if (url.searchParams.get("callback")) return null;
-  const action = url.searchParams.get("action") || "health";
-  if (action !== "getInsights") return null;
-  const cacheUrl = new URL(url.origin + url.pathname);
-  cacheUrl.searchParams.set("action", "getInsights");
-  cacheUrl.searchParams.set("slug", normalizeSlug(url.searchParams.get("slug") || "amaro"));
-  const startDate = normalizeDate(url.searchParams.get("startDate") || url.searchParams.get("start_date"));
-  const endDate = normalizeDate(url.searchParams.get("endDate") || url.searchParams.get("end_date"));
-  if (startDate) cacheUrl.searchParams.set("startDate", startDate);
-  if (endDate) cacheUrl.searchParams.set("endDate", endDate);
-  return new Request(cacheUrl.toString(), { method: "GET" });
+function insightsSnapshotKey(filters) {
+  return [
+    "insights",
+    ANALYTICS_CACHE_VERSION,
+    normalizeSlug(filters.slug || "amaro"),
+    normalizeDate(filters.startDate) || "all",
+    normalizeDate(filters.endDate) || "all",
+  ].join(":");
+}
+
+async function readInsightsSnapshot(env, key) {
+  if (!env.INSIGHTS_CACHE) return null;
+  try {
+    return await env.INSIGHTS_CACHE.get(key, "json");
+  } catch (error) {
+    console.warn("QrStack insights snapshot read failed", { key, error: error?.message || String(error) });
+    return null;
+  }
+}
+
+async function refreshInsightsSnapshot(env, filters, key = insightsSnapshotKey(filters)) {
+  if (env.INSIGHTS_CACHE && await env.INSIGHTS_CACHE.get(D1_READ_BLOCK_KEY)) {
+    const error = new Error("D1 capacity is temporarily blocked (cached)");
+    error.code = "D1_CAPACITY_BLOCKED_CACHED";
+    throw error;
+  }
+
+  let insights;
+  try {
+    insights = await getRollupInsights(env, filters);
+  } catch (error) {
+    if (isD1CapacityError(error)) await markD1ReadBlocked(env, error);
+    throw error;
+  }
+  const slug = normalizeSlug(filters.slug || "amaro");
+  const snapshot = {
+    ok: true,
+    restaurant: { slug, name: insights.restaurant_name || slug },
+    insights,
+    generated_at: insights.collected_at || new Date().toISOString(),
+  };
+  if (env.INSIGHTS_CACHE) {
+    await env.INSIGHTS_CACHE.put(key, JSON.stringify(snapshot));
+  }
+  return snapshot;
+}
+
+async function refreshInsightsFromSheets(env, filters) {
+  const slug = normalizeSlug(filters.slug || "amaro");
+  if (slug !== "amaro") throw new Error("sheets_insights_fallback_not_configured");
+  const endpoint = new URL(env.SHEETS_FALLBACK_URL || DEFAULT_SHEETS_FALLBACK_URL);
+  endpoint.searchParams.set("action", "getInsights");
+  if (!env.SHEETS_OWNER_ACCESS_TOKEN) throw new Error("sheets_owner_credential_not_configured");
+  endpoint.searchParams.set("key", env.SHEETS_OWNER_ACCESS_TOKEN);
+  if (filters.startDate) endpoint.searchParams.set("startDate", filters.startDate);
+  if (filters.endDate) endpoint.searchParams.set("endDate", filters.endDate);
+
+  const response = await fetch(endpoint.toString(), {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!response.ok) throw new Error(`sheets_insights_unavailable:${response.status}`);
+  const result = await response.json();
+  if (result?.ok !== true || !result.insights) {
+    throw new Error(`sheets_insights_invalid:${result?.error || "missing_insights"}`);
+  }
+
+  const generatedAt = result.insights.collected_at || new Date().toISOString();
+  const allTimeSnapshot = filters.startDate || filters.endDate
+    ? await readInsightsSnapshot(env, insightsSnapshotKey({ slug, startDate: "", endDate: "" }))
+    : null;
+  const canonicalTotals = allTimeSnapshot?.insights || {};
+  const historicalFields = [
+    "total_events", "total_accesses", "total_page_views", "unique_sessions_total",
+    "unique_visitors_total", "returning_visitors_total", "returning_sessions_total",
+    "tracked_days", "event_type_counts_all",
+  ];
+  const mergedInsights = { ...result.insights };
+  for (const field of historicalFields) {
+    if (Object.hasOwn(canonicalTotals, field)) mergedInsights[field] = canonicalTotals[field];
+  }
+  const snapshot = {
+    ok: true,
+    restaurant: result.restaurant || fallbackRestaurant(slug),
+    insights: {
+      ...mergedInsights,
+      provider: "google_sheets_fallback",
+      collected_at: generatedAt,
+    },
+    generated_at: generatedAt,
+    fallback_refreshed_at: new Date().toISOString(),
+  };
+  if (env.INSIGHTS_CACHE) {
+    await env.INSIGHTS_CACHE.put(insightsSnapshotKey(filters), JSON.stringify(snapshot));
+  }
+  return snapshot;
+}
+
+async function markD1ReadBlocked(env, error) {
+  if (!env.INSIGHTS_CACHE || error?.code === "D1_CAPACITY_BLOCKED_CACHED") return;
+  const now = new Date();
+  const nextReset = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 1);
+  const expirationTtl = Math.max(60, Math.ceil((nextReset - now.getTime()) / 1000));
+  const marker = {
+    reason: "d1_read_unavailable",
+    error: String(error?.message || error || "").slice(0, 500),
+    blocked_at: now.toISOString(),
+    resumes_after: new Date(nextReset).toISOString(),
+  };
+  try {
+    const updates = [
+      env.INSIGHTS_CACHE.put(D1_READ_BLOCK_KEY, JSON.stringify(marker), { expirationTtl }),
+      recordAnalyticsStorageHealth(env, {
+        dashboard_status: "cached_snapshot",
+        read_fallback_started_at: marker.blocked_at,
+      }),
+    ];
+    if (isD1DailyQueryLimitError(error)) updates.push(markD1WriteBlocked(env, error));
+    await Promise.all(updates);
+  } catch (cacheError) {
+    console.warn("QrStack could not persist D1 capacity marker", {
+      error: cacheError?.message || String(cacheError),
+    });
+  }
+}
+
+async function updateTodayInsightsSnapshot(env, event) {
+  if (!env.INSIGHTS_CACHE || event.restaurant_slug !== "amaro") return;
+  if (event.event_type !== "page_view") return;
+  const createdAt = new Date(event.created_at);
+  if (Number.isNaN(createdAt.getTime())) return;
+  const businessDate = todayIso(createdAt);
+  if (businessDate !== todayIso()) return;
+  const testText = `${event.source || ""} ${event.source_detail || ""} ${event.url || ""}`.toLowerCase();
+  if (/codex|teste|test|fresh=/.test(testText)) return;
+
+  const key = insightsSnapshotKey({ slug: event.restaurant_slug, startDate: businessDate, endDate: businessDate });
+  try {
+    const snapshot = await readInsightsSnapshot(env, key);
+    if (!snapshot?.insights) return;
+    const insights = snapshot.insights;
+    const hour = new Intl.DateTimeFormat("en-GB", {
+      timeZone: BUSINESS_TIME_ZONE,
+      hour: "2-digit",
+      hourCycle: "h23",
+    }).format(createdAt);
+    const increment = (field) => {
+      insights[field] = Number(insights[field] || 0) + 1;
+    };
+    const incrementMap = (field, mapKey) => {
+      if (!mapKey) return;
+      insights[field] = insights[field] || {};
+      insights[field][mapKey] = Number(insights[field][mapKey] || 0) + 1;
+    };
+
+    increment("period_events");
+    increment("period_accesses");
+    increment("filtered_accesses");
+    increment("accesses_today");
+    increment("accesses_7_days");
+    incrementMap("source_counts", event.source || "direct");
+    incrementMap("event_type_counts", event.event_type);
+    incrementMap("daily_accesses", businessDate);
+    incrementMap("hour_counts", hour);
+    incrementMap("device_counts", event.device_type || "Não identificado");
+    incrementMap("browser_counts", event.browser || "Não identificado");
+    incrementMap("os_counts", event.os || "Não identificado");
+    if (event.banner_shown) {
+      increment("webview_banner_shown");
+      incrementMap("webview_banner_platform_counts", event.banner_platform || "Não identificado");
+    }
+    insights.peak_hour = peakHourFromCounts(insights.hour_counts);
+    insights.recent_events = [{
+      created_at: event.created_at,
+      event_type: event.event_type,
+      source: event.source,
+      source_detail: event.source_detail,
+      dish_name: "",
+      dish_category: "",
+      observe_seconds: 0,
+      device_type: event.device_type,
+    }, ...(insights.recent_events || [])].slice(0, 15);
+    const generatedAt = new Date().toISOString();
+    insights.collected_at = generatedAt;
+    snapshot.generated_at = generatedAt;
+    await env.INSIGHTS_CACHE.put(key, JSON.stringify(snapshot));
+  } catch (error) {
+    console.warn("QrStack could not increment today's insights snapshot", {
+      event_id: event.id,
+      error: error?.message || String(error),
+    });
+  }
+}
+
+const ANALYTICS_ROLLUP_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS analytics_daily_metrics (
+    restaurant_slug TEXT NOT NULL,
+    metric_date TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    dimension TEXT NOT NULL DEFAULT '',
+    value REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (restaurant_slug, metric_date, metric, dimension)
+  ) WITHOUT ROWID`,
+  `CREATE TABLE IF NOT EXISTS analytics_session_facts (
+    restaurant_slug TEXT NOT NULL,
+    metric_date TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    PRIMARY KEY (restaurant_slug, metric_date, session_id)
+  ) WITHOUT ROWID`,
+  `CREATE TABLE IF NOT EXISTS analytics_pageview_facts (
+    restaurant_slug TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    metric_date TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    session_id TEXT,
+    visitor_id TEXT,
+    source TEXT NOT NULL DEFAULT 'direct',
+    source_detail TEXT,
+    device_type TEXT,
+    browser TEXT,
+    os TEXT,
+    banner_shown INTEGER NOT NULL DEFAULT 0,
+    banner_platform TEXT,
+    PRIMARY KEY (restaurant_slug, event_id)
+  ) WITHOUT ROWID`,
+  `CREATE INDEX IF NOT EXISTS idx_rollup_pageviews_date_visitor
+   ON analytics_pageview_facts(restaurant_slug, metric_date, visitor_id, source, created_at, session_id)`,
+  `CREATE TABLE IF NOT EXISTS analytics_rollup_dates (
+    restaurant_slug TEXT NOT NULL,
+    metric_date TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ready',
+    source_event_count INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT NOT NULL,
+    PRIMARY KEY (restaurant_slug, metric_date)
+  ) WITHOUT ROWID`,
+];
+
+async function runScheduledMaintenance(controller, env) {
+  const scheduledAt = new Date(controller.scheduledTime || Date.now());
+  const today = todayIso(scheduledAt);
+  const tasks = [syncGoogleFormDate(env, today)];
+
+  try {
+    if (await readCacheJson(env, D1_READ_BLOCK_KEY)) {
+      tasks.push(refreshInsightsFromSheets(env, { slug: "amaro", startDate: today, endDate: today }));
+      await Promise.allSettled(tasks);
+      return;
+    }
+    await ensureAnalyticsRollupSchema(env);
+    await reduceAnalyticsWriteAmplification(env);
+    const backfill = await runAnalyticsRollupBackfill(env, "amaro");
+
+    // Rebuild the current business day once per hour. Incremental writes keep it
+    // current between rebuilds; this pass repairs any interrupted background write.
+    if (scheduledAt.getUTCMinutes() < 10) {
+      await rebuildAnalyticsRollupDate(env, "amaro", today);
+    }
+
+    const periods = [{ slug: "amaro", startDate: today, endDate: today }];
+    if (scheduledAt.getUTCMinutes() < 10) {
+      periods.push(
+        { slug: "amaro", startDate: daysAgoIso(6), endDate: today },
+        { slug: "amaro", startDate: daysAgoIso(29), endDate: today },
+      );
+    }
+    if (scheduledAt.getUTCHours() === 6 && scheduledAt.getUTCMinutes() < 10) {
+      periods.push({ slug: "amaro", startDate: "", endDate: "" });
+    }
+    for (const filters of periods) {
+      if (await isAnalyticsRollupRangeReady(env.DB, filters)) {
+        tasks.push(refreshInsightsSnapshot(env, filters));
+      }
+    }
+
+    if (backfill.complete && scheduledAt.getUTCHours() === 6 && scheduledAt.getUTCMinutes() < 10) {
+      tasks.push(backfillD1MenuCache(env, "amaro"));
+    }
+  } catch (error) {
+    if (isD1CapacityError(error)) await markD1ReadBlocked(env, error);
+    console.warn("QrStack analytics rollup maintenance paused", {
+      error: error?.message || String(error),
+    });
+  }
+
+  await Promise.allSettled(tasks);
+}
+
+async function ensureAnalyticsRollupSchema(env) {
+  if (env.INSIGHTS_CACHE && await env.INSIGHTS_CACHE.get(ANALYTICS_ROLLUP_SCHEMA_KEY)) return;
+  for (const statement of ANALYTICS_ROLLUP_SCHEMA) {
+    await env.DB.prepare(statement).run();
+  }
+  if (env.INSIGHTS_CACHE) {
+    await env.INSIGHTS_CACHE.put(ANALYTICS_ROLLUP_SCHEMA_KEY, new Date().toISOString());
+  }
+}
+
+async function reduceAnalyticsWriteAmplification(env) {
+  if (env.INSIGHTS_CACHE && await env.INSIGHTS_CACHE.get(ANALYTICS_WRITE_INDEX_KEY)) return;
+  const obsoleteIndexes = [
+    "idx_events_restaurant_created",
+    "idx_events_slug_type_created",
+    "idx_events_slug_source_created",
+    "idx_events_slug_dish_created",
+    "idx_events_slug_type_dish_name_created",
+    "idx_events_slug_type_category_created",
+  ];
+  for (const indexName of obsoleteIndexes) {
+    await env.DB.prepare(`DROP INDEX IF EXISTS ${indexName}`).run();
+  }
+  if (env.INSIGHTS_CACHE) {
+    await env.INSIGHTS_CACHE.put(ANALYTICS_WRITE_INDEX_KEY, new Date().toISOString());
+  }
+}
+
+async function getAnalyticsRollupStatus(env, slugValue = "amaro") {
+  const slug = normalizeSlug(slugValue);
+  const today = todayIso();
+  const row = await env.DB.prepare(`
+    SELECT COUNT(*) AS ready_days, MIN(metric_date) AS first_date, MAX(metric_date) AS last_date,
+           COALESCE(SUM(source_event_count), 0) AS source_events
+    FROM analytics_rollup_dates
+    WHERE restaurant_slug = ? AND status = 'ready'
+      AND metric_date >= ? AND metric_date <= ?
+  `).bind(slug, ANALYTICS_ROLLUP_START_DATE, today).first();
+  const expectedDays = daysBetweenInclusive(ANALYTICS_ROLLUP_START_DATE, today);
+  return {
+    schema: ANALYTICS_ROLLUP_SCHEMA_VERSION,
+    restaurant_slug: slug,
+    ready_days: Number(row?.ready_days || 0),
+    expected_days: expectedDays,
+    first_date: row?.first_date || null,
+    last_date: row?.last_date || null,
+    source_events: Number(row?.source_events || 0),
+    complete: Number(row?.ready_days || 0) >= expectedDays,
+  };
+}
+
+async function runAnalyticsRollupBackfill(env, slugValue = "amaro") {
+  const slug = normalizeSlug(slugValue);
+  const today = todayIso();
+  const ready = await env.DB.prepare(`
+    SELECT metric_date FROM analytics_rollup_dates
+    WHERE restaurant_slug = ? AND status = 'ready'
+      AND metric_date >= ? AND metric_date <= ?
+  `).bind(slug, ANALYTICS_ROLLUP_START_DATE, today).all();
+  const readyDates = new Set((ready.results || []).map((row) => row.metric_date));
+  let nextDate = today;
+  while (nextDate >= ANALYTICS_ROLLUP_START_DATE && readyDates.has(nextDate)) {
+    nextDate = addDays(nextDate, -1);
+  }
+  if (nextDate < ANALYTICS_ROLLUP_START_DATE) {
+    return { complete: true, processed_date: null, ready_days: readyDates.size };
+  }
+  const result = await rebuildAnalyticsRollupDate(env, slug, nextDate);
+  return {
+    complete: nextDate === ANALYTICS_ROLLUP_START_DATE,
+    processed_date: nextDate,
+    ready_days: readyDates.size + 1,
+    ...result,
+  };
+}
+
+async function rebuildAnalyticsRollupDate(env, slugValue, metricDate) {
+  const slug = normalizeSlug(slugValue);
+  const databases = [env.ARCHIVE_DB, env.DB].filter(Boolean);
+  const eventMap = new Map();
+  for (const db of databases) {
+    let rows;
+    try {
+      rows = await readAnalyticsEventsForDate(db, slug, metricDate);
+    } catch (error) {
+      if (!/no such table: analytics_(?:events|events_normalized)/i.test(String(error?.message || error))) throw error;
+      continue;
+    }
+    for (const row of rows) {
+      if (!eventMap.has(row.id)) eventMap.set(row.id, row);
+    }
+  }
+  const aggregate = aggregateAnalyticsEvents([...eventMap.values()], metricDate, slug);
+  await writeAnalyticsRollupDate(env.DB, aggregate, { mode: "replace" });
+  return {
+    metric_date: metricDate,
+    source_events: aggregate.sourceEventCount,
+    metric_rows: aggregate.metrics.size,
+    session_facts: aggregate.sessions.size,
+    pageview_facts: aggregate.pageviews.length,
+  };
+}
+
+async function readAnalyticsEventsForDate(db, slug, metricDate) {
+  const start = dateStartUtc(metricDate);
+  const end = dateStartUtc(addDays(metricDate, 1));
+  const rows = [];
+  let cursorCreated = "";
+  let cursorId = "";
+
+  for (let page = 0; page < 40; page += 1) {
+    const cursorSql = cursorCreated
+      ? "AND (created_at > ? OR (created_at = ? AND id > ?))"
+      : "";
+    const params = [slug, start, end];
+    if (cursorCreated) params.push(cursorCreated, cursorCreated, cursorId);
+    params.push(ANALYTICS_ROLLUP_PAGE_SIZE);
+    const result = await db.prepare(`
+      SELECT id, event_type, source, source_detail, url, session_id, visitor_id,
+             dish_name, dish_key, dish_category, observe_seconds, device_type,
+             browser, os, banner_shown, banner_platform, created_at
+      FROM analytics_events_normalized
+      WHERE restaurant_slug = ? AND created_at >= ? AND created_at < ?
+        AND is_test_event = 0 ${cursorSql}
+      ORDER BY created_at, id
+      LIMIT ?
+    `).bind(...params).all();
+    const pageRows = result.results || [];
+    rows.push(...pageRows);
+    if (pageRows.length < ANALYTICS_ROLLUP_PAGE_SIZE) return rows;
+    const last = pageRows[pageRows.length - 1];
+    cursorCreated = last.created_at;
+    cursorId = last.id;
+  }
+
+  throw new Error(`analytics_rollup_page_limit:${metricDate}`);
+}
+
+function aggregateAnalyticsEvents(events, metricDate, slug) {
+  const realPageviewSessions = new Set(events
+    .filter((event) => event.event_type === "page_view" && !String(event.id || "").startsWith("recovered-pageview:") && event.session_id)
+    .map((event) => event.session_id));
+  const filtered = events.filter((event) => !(
+    event.event_type === "page_view"
+    && String(event.id || "").startsWith("recovered-pageview:")
+    && event.session_id
+    && realPageviewSessions.has(event.session_id)
+  ));
+  const metrics = new Map();
+  const sessions = new Map();
+  const pageviews = [];
+  const addMetric = (metric, dimension = "", value = 1) => {
+    const cleanDimension = String(dimension || "Não identificado").slice(0, 180);
+    const key = `${metric}\u0000${cleanDimension}`;
+    const current = metrics.get(key) || { metric, dimension: cleanDimension, value: 0 };
+    current.value += Number(value || 0);
+    metrics.set(key, current);
+  };
+
+  for (const event of filtered) {
+    addMetric("events", "total");
+    addMetric("event_type", event.event_type || "Não identificado");
+    if (event.session_id) {
+      const previous = sessions.get(event.session_id);
+      if (!previous || String(event.created_at) < previous) sessions.set(event.session_id, String(event.created_at || ""));
+    }
+
+    if (Number(event.banner_shown || 0)) {
+      addMetric("webview_banner", "total");
+      addMetric("webview_banner_platform", event.banner_platform || "Não identificado");
+    }
+
+    if (event.event_type === "page_view") {
+      addMetric("page_views", "total");
+      addMetric("source", event.source || "direct");
+      addMetric("hour", businessHour(event.created_at));
+      addMetric("device", event.device_type || "Não identificado");
+      addMetric("browser", event.browser || "Não identificado");
+      addMetric("os", event.os || "Não identificado");
+      pageviews.push({
+        event_id: String(event.id || ""),
+        created_at: String(event.created_at || ""),
+        session_id: String(event.session_id || ""),
+        visitor_id: String(event.visitor_id || ""),
+        source: String(event.source || "direct"),
+        source_detail: String(event.source_detail || ""),
+        device_type: String(event.device_type || ""),
+        browser: String(event.browser || ""),
+        os: String(event.os || ""),
+        banner_shown: Number(event.banner_shown || 0) ? 1 : 0,
+        banner_platform: String(event.banner_platform || ""),
+      });
+    }
+
+    const dishName = String(event.dish_name || "").trim();
+    const dishCategory = String(event.dish_category || "").trim();
+    if (event.event_type === "dish_view" && dishName) {
+      addMetric("dish_view", dishName);
+      if (dishCategory) addMetric("dish_view_category", dishCategory);
+    }
+    if (event.event_type === "dish_touch" && dishName) {
+      addMetric("dish_touch", dishName);
+      if (dishCategory) addMetric("dish_touch_category", dishCategory);
+    }
+    if (event.event_type === "dish_observe" && dishName) {
+      const seconds = Number(event.observe_seconds || 0);
+      addMetric("dish_observe_seconds", dishName, seconds);
+      if (dishCategory) addMetric("dish_observe_category_seconds", dishCategory, seconds);
+    }
+  }
+
+  return { slug, metricDate, metrics, sessions, pageviews, sourceEventCount: filtered.length };
+}
+
+async function writeAnalyticsRollupDate(db, aggregate, options = {}) {
+  const now = new Date().toISOString();
+  const replace = options.mode === "replace";
+  const metricRows = [...aggregate.metrics.values()].map((row) => `(${[
+    sqlText(aggregate.slug), sqlText(aggregate.metricDate), sqlText(row.metric),
+    sqlText(row.dimension), sqlNumber(row.value), sqlText(now),
+  ].join(",")})`);
+  const metricSuffix = replace
+    ? " ON CONFLICT(restaurant_slug, metric_date, metric, dimension) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at"
+    : " ON CONFLICT(restaurant_slug, metric_date, metric, dimension) DO UPDATE SET value=value+excluded.value, updated_at=excluded.updated_at";
+  await executeSqlValueChunks(db,
+    "INSERT INTO analytics_daily_metrics (restaurant_slug, metric_date, metric, dimension, value, updated_at) VALUES ",
+    metricRows,
+    metricSuffix,
+  );
+
+  const sessionRows = [...aggregate.sessions.entries()].map(([sessionId, firstSeen]) => `(${[
+    sqlText(aggregate.slug), sqlText(aggregate.metricDate), sqlText(sessionId), sqlText(firstSeen || now),
+  ].join(",")})`);
+  await executeSqlValueChunks(db,
+    "INSERT INTO analytics_session_facts (restaurant_slug, metric_date, session_id, first_seen_at) VALUES ",
+    sessionRows,
+    replace
+      ? " ON CONFLICT(restaurant_slug, metric_date, session_id) DO UPDATE SET first_seen_at=MIN(first_seen_at, excluded.first_seen_at)"
+      : " ON CONFLICT(restaurant_slug, metric_date, session_id) DO NOTHING",
+  );
+
+  const pageviewRows = aggregate.pageviews.map((event) => `(${[
+    sqlText(aggregate.slug), sqlText(event.event_id), sqlText(aggregate.metricDate), sqlText(event.created_at),
+    sqlText(event.session_id), sqlText(event.visitor_id), sqlText(event.source), sqlText(event.source_detail),
+    sqlText(event.device_type), sqlText(event.browser), sqlText(event.os), sqlNumber(event.banner_shown),
+    sqlText(event.banner_platform),
+  ].join(",")})`);
+  await executeSqlValueChunks(db,
+    "INSERT INTO analytics_pageview_facts (restaurant_slug, event_id, metric_date, created_at, session_id, visitor_id, source, source_detail, device_type, browser, os, banner_shown, banner_platform) VALUES ",
+    pageviewRows,
+    replace
+      ? " ON CONFLICT(restaurant_slug, event_id) DO UPDATE SET metric_date=excluded.metric_date, created_at=excluded.created_at, session_id=excluded.session_id, visitor_id=excluded.visitor_id, source=excluded.source, source_detail=excluded.source_detail, device_type=excluded.device_type, browser=excluded.browser, os=excluded.os, banner_shown=excluded.banner_shown, banner_platform=excluded.banner_platform"
+      : " ON CONFLICT(restaurant_slug, event_id) DO NOTHING",
+  );
+
+  const dateConflict = replace
+    ? "DO UPDATE SET status='ready', source_event_count=excluded.source_event_count, completed_at=excluded.completed_at"
+    : "DO NOTHING";
+  await db.prepare(`
+    INSERT INTO analytics_rollup_dates (restaurant_slug, metric_date, status, source_event_count, completed_at)
+    VALUES (?, ?, 'ready', ?, ?)
+    ON CONFLICT(restaurant_slug, metric_date) ${dateConflict}
+  `).bind(aggregate.slug, aggregate.metricDate, aggregate.sourceEventCount, now).run();
+}
+
+async function updateAnalyticsRollups(env, events) {
+  try {
+    const grouped = new Map();
+    for (const event of events) {
+      if (!event || isTestAnalyticsEvent(event)) continue;
+      const date = todayIso(new Date(event.created_at));
+      if (date < ANALYTICS_ROLLUP_START_DATE) continue;
+      if (!grouped.has(date)) grouped.set(date, []);
+      grouped.get(date).push(event);
+    }
+    for (const [metricDate, dateEvents] of grouped) {
+      const aggregate = aggregateAnalyticsEvents(dateEvents, metricDate, normalizeSlug(dateEvents[0].restaurant_slug || "amaro"));
+      await writeAnalyticsRollupDate(env.DB, aggregate, { mode: "increment" });
+    }
+  } catch (error) {
+    console.warn("QrStack incremental analytics rollup failed; raw events remain preserved", {
+      error: error?.message || String(error),
+    });
+  }
+}
+
+function isTestAnalyticsEvent(event) {
+  const value = `${event.source || ""} ${event.source_detail || ""} ${event.url || ""}`.toLowerCase();
+  return /codex|teste|test|fresh=/.test(value);
+}
+
+function businessHour(timestamp) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "Não identificado";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: BUSINESS_TIME_ZONE,
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).format(date);
+}
+
+async function executeSqlValueChunks(db, prefix, rows, suffix = "") {
+  if (!rows.length) return;
+  let chunk = [];
+  let length = prefix.length + suffix.length;
+  for (const row of rows) {
+    if (chunk.length && length + row.length + 1 > ANALYTICS_ROLLUP_SQL_CHUNK_BYTES) {
+      await db.exec(`${prefix}${chunk.join(",")}${suffix}`);
+      chunk = [];
+      length = prefix.length + suffix.length;
+    }
+    chunk.push(row);
+    length += row.length + 1;
+  }
+  if (chunk.length) await db.exec(`${prefix}${chunk.join(",")}${suffix}`);
+}
+
+function sqlText(value) {
+  return `'${String(value ?? "").replaceAll("\u0000", "").replaceAll("'", "''")}'`;
+}
+
+function sqlNumber(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? String(number) : "0";
+}
+
+function daysBetweenInclusive(startDate, endDate) {
+  const start = Date.parse(`${startDate}T00:00:00.000Z`);
+  const end = Date.parse(`${endDate}T00:00:00.000Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
+  return Math.floor((end - start) / 86400000) + 1;
 }
 
 async function getRestaurant(db, slug) {
@@ -186,30 +1201,36 @@ async function getRestaurant(db, slug) {
 async function requireRestaurant(db, slug) {
   const restaurant = await getRestaurant(db, slug);
   if (restaurant) return restaurant;
-  const id = `rest_${slug}`;
-  await db.prepare("INSERT INTO restaurants (id, slug, name) VALUES (?, ?, ?)").bind(id, slug, titleize(slug)).run();
-  return getRestaurant(db, slug);
+  // Public reads/analytics must not provision arbitrary tenants in the database.
+  throw httpError('restaurant_not_found', 404);
 }
 
 async function trackEvent(db, payload, request) {
   const slug = normalizeSlug(payload.slug || payload.cliente || payload.restaurant_slug || "amaro");
-  const restaurant = await requireRestaurant(db, slug);
+  // Amaro is the production tenant and its stable id is part of the initial schema.
+  // Avoid a read before every event so writes keep working if only the row-read
+  // allowance is temporarily exhausted.
+  const restaurant = slug === "amaro"
+    ? { id: "rest_amaro", slug: "amaro" }
+    : await requireRestaurant(db, slug);
   const userAgent = payload.user_agent || payload.userAgent || request.headers.get("user-agent") || "";
   const device = detectDevice(userAgent);
   const dishName = payload.dish_name || payload.item_name || payload.prato || "";
+  const eventType = normalizeEventType(payload.event_type || payload.tipo || "page_view");
+  const compactDishEvent = eventType.startsWith("dish_");
   const event = {
     id: payload.id || crypto.randomUUID(),
     restaurant_id: restaurant.id,
     restaurant_slug: restaurant.slug,
     menu_day_id: payload.menu_day_id || payload.menuDayId || "",
-    event_type: normalizeEventType(payload.event_type || payload.tipo || "page_view"),
+    event_type: eventType,
     source: normalizeSource(payload.source || payload.origem || payload.utm_source || "direct"),
     source_detail: payload.source_detail || payload.sourceDetail || payload.referrer || "",
-    url: payload.url || "",
-    path: payload.path || "",
-    referrer: payload.referrer || "",
-    user_agent: userAgent,
-    language: payload.language || payload.idioma || "",
+    url: compactDishEvent ? "" : payload.url || "",
+    path: compactDishEvent ? "" : payload.path || "",
+    referrer: compactDishEvent ? "" : payload.referrer || "",
+    user_agent: compactDishEvent ? "" : userAgent,
+    language: compactDishEvent ? "" : payload.language || payload.idioma || "",
     session_id: payload.session_id || payload.sessionId || "",
     visitor_id: payload.visitor_id || payload.visitorId || "",
     dish_name: dishName,
@@ -220,56 +1241,383 @@ async function trackEvent(db, payload, request) {
     device_type: payload.device_type || payload.deviceType || device.type,
     browser: payload.browser || device.browser,
     os: payload.os || device.os,
-    screen: payload.screen || "",
-    viewport: payload.viewport || "",
-    timezone_offset: payload.timezone_offset || payload.timezoneOffset || "",
+    screen: compactDishEvent ? "" : payload.screen || "",
+    viewport: compactDishEvent ? "" : payload.viewport || "",
+    timezone_offset: compactDishEvent ? "" : payload.timezone_offset || payload.timezoneOffset || "",
     banner_shown: toBooleanInteger(payload.banner_shown ?? payload.bannerShown),
     banner_platform: payload.banner_platform || payload.bannerPlatform || "",
     created_at: normalizeTimestamp(payload.timestamp || payload.created_at) || new Date().toISOString(),
   };
 
-  await db.prepare(
+  if (event.event_type.startsWith("dish_") && event.session_id) {
+    const inserted = await insertEvent(db, event);
+    const recoveredPageView = {
+      ...event,
+      id: `recovered-pageview:${event.restaurant_slug}:${event.session_id}`,
+      event_type: "page_view",
+      source_detail: event.source_detail || `recovered_from_${event.event_type}`,
+      url: payload.url || "",
+      path: payload.path || "",
+      referrer: payload.referrer || "",
+      user_agent: userAgent,
+      language: payload.language || payload.idioma || "",
+      dish_name: "",
+      dish_key: "",
+      dish_category: "",
+      duration_ms: 0,
+      observe_seconds: 0,
+      screen: payload.screen || "",
+      viewport: payload.viewport || "",
+      timezone_offset: payload.timezone_offset || payload.timezoneOffset || "",
+    };
+    try {
+      await insertRecoveredPageView(db, recoveredPageView);
+    } catch (error) {
+      if (!isD1CapacityError(error)) throw error;
+      console.warn("QrStack skipped recovered page view while D1 reads are limited", {
+        event_id: event.id,
+        session_id: event.session_id,
+      });
+    }
+    return { event, inserted, rollupEvents: inserted ? [event] : [] };
+  }
+
+  const inserted = await insertEvent(db, event);
+  return { event, inserted, rollupEvents: inserted ? [event] : [] };
+}
+
+async function insertEvent(db, event) {
+  const result = await db.prepare(
     `INSERT OR IGNORE INTO analytics_events (${EVENT_COLUMNS.join(", ")}) VALUES (${EVENT_COLUMNS.map(() => "?").join(", ")})`
   ).bind(...EVENT_COLUMNS.map((column) => event[column] ?? "")).run();
+  return Number(result.meta?.changes || 0) > 0;
+}
 
-  return event;
+async function insertRecoveredPageView(db, event) {
+  await db.prepare(`
+    INSERT OR IGNORE INTO analytics_events (${EVENT_COLUMNS.join(", ")})
+    SELECT ${EVENT_COLUMNS.map(() => "?").join(", ")}
+    WHERE NOT EXISTS (
+      SELECT 1 FROM analytics_events
+      WHERE restaurant_slug = ? AND session_id = ? AND event_type = 'page_view'
+    )
+  `).bind(
+    ...EVENT_COLUMNS.map((column) => event[column] ?? ""),
+    event.restaurant_slug,
+    event.session_id,
+  ).run();
+}
+
+async function isAnalyticsRollupRangeReady(db, filters) {
+  const slug = normalizeSlug(filters.slug || "amaro");
+  const startDate = normalizeDate(filters.startDate) || ANALYTICS_ROLLUP_START_DATE;
+  const endDate = normalizeDate(filters.endDate) || todayIso();
+  if (startDate < ANALYTICS_ROLLUP_START_DATE || endDate < startDate) return false;
+  const expectedDays = daysBetweenInclusive(startDate, endDate);
+  const row = await db.prepare(`
+    SELECT COUNT(*) AS ready_days
+    FROM analytics_rollup_dates
+    WHERE restaurant_slug = ? AND status = 'ready'
+      AND metric_date >= ? AND metric_date <= ?
+  `).bind(slug, startDate, endDate).first();
+  return Number(row?.ready_days || 0) >= expectedDays;
+}
+
+async function getRollupInsights(env, filters) {
+  await ensureAnalyticsRollupSchema(env);
+  if (!await isAnalyticsRollupRangeReady(env.DB, filters)) {
+    const error = new Error("analytics_rollup_not_ready");
+    error.code = "ANALYTICS_ROLLUP_NOT_READY";
+    throw error;
+  }
+
+  const slug = normalizeSlug(filters.slug || "amaro");
+  const today = todayIso();
+  const periodStart = normalizeDate(filters.startDate) || ANALYTICS_ROLLUP_START_DATE;
+  const periodEnd = normalizeDate(filters.endDate) || today;
+  const sevenDayStart = daysAgoIso(6);
+  const queryStart = [periodStart, sevenDayStart, today].sort()[0];
+  const queryEnd = [periodEnd, today].sort().at(-1);
+  const result = await env.DB.prepare(`
+    SELECT metric_date, metric, dimension, value
+    FROM analytics_daily_metrics
+    WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
+  `).bind(slug, queryStart, queryEnd).all();
+  const rows = result.results || [];
+  const inRange = (row, start, end) => row.metric_date >= start && row.metric_date <= end;
+  const periodRows = rows.filter((row) => inRange(row, periodStart, periodEnd));
+  const todayRows = rows.filter((row) => row.metric_date === today);
+  const sevenDayRows = rows.filter((row) => inRange(row, sevenDayStart, today));
+  const sumMetric = (values, metric, dimension = null) => values.reduce((total, row) => (
+    row.metric === metric && (dimension === null || row.dimension === dimension)
+      ? total + Number(row.value || 0)
+      : total
+  ), 0);
+  const mapMetric = (values, metric) => values.reduce((map, row) => {
+    if (row.metric === metric) map[row.dimension] = Number(map[row.dimension] || 0) + Number(row.value || 0);
+    return map;
+  }, {});
+  const dailyAccesses = periodRows.reduce((map, row) => {
+    if (row.metric === "page_views" && row.dimension === "total") {
+      map[row.metric_date] = Number(row.value || 0);
+    }
+    return map;
+  }, {});
+  const bounds = buildDateBounds({ startDate: periodStart, endDate: periodEnd });
+
+  const [restaurant, conversion, recent, historicalRow, visitorStats, sourceDetailResult] = await Promise.all([
+    getRestaurant(env.DB, slug),
+    getRollupInstagramToDirect(env.DB, slug, periodStart, periodEnd),
+    getRollupRecentEvents(env.DB, slug, periodStart, periodEnd),
+    env.DB.prepare(`
+      SELECT
+        COALESCE(SUM(CASE WHEN metric = 'events' AND dimension = 'total' THEN value ELSE 0 END), 0) AS total_events,
+        COALESCE(SUM(CASE WHEN metric = 'page_views' AND dimension = 'total' THEN value ELSE 0 END), 0) AS total_accesses,
+        COUNT(DISTINCT CASE WHEN metric = 'page_views' AND dimension = 'total' THEN metric_date END) AS tracked_days
+      FROM analytics_daily_metrics
+      WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
+        AND metric IN ('events', 'page_views') AND dimension = 'total'
+    `).bind(slug, ANALYTICS_ROLLUP_START_DATE, today).first(),
+    getRollupVisitorStats(env, slug, periodStart, periodEnd, today),
+    env.DB.prepare(`
+      SELECT COALESCE(NULLIF(source_detail, ''), 'sem_detalhe') AS dimension, COUNT(*) AS value
+      FROM analytics_pageview_facts
+      WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
+      GROUP BY COALESCE(NULLIF(source_detail, ''), 'sem_detalhe')
+      ORDER BY value DESC
+    `).bind(slug, periodStart, periodEnd).all(),
+  ]);
+
+  const dishViewCounts = mapMetric(periodRows, "dish_view");
+  const dishTouchCounts = mapMetric(periodRows, "dish_touch");
+  const dishObserveSeconds = mapMetric(periodRows, "dish_observe_seconds");
+  const dishAttentionScores = {};
+  mergeScore(dishAttentionScores, dishViewCounts, 1);
+  mergeScore(dishAttentionScores, dishTouchCounts, 3);
+  mergeScore(dishAttentionScores, dishObserveSeconds, 0.2);
+  const periodEvents = sumMetric(periodRows, "events", "total");
+  const periodAccesses = sumMetric(periodRows, "page_views", "total");
+  const insights = {
+    restaurant_name: restaurant?.name || titleize(slug),
+    provider: "cloudflare_d1_daily_rollups",
+    period_label: periodLabel(filters.startDate, filters.endDate),
+    collected_at: new Date().toISOString(),
+    period_events: periodEvents,
+    period_accesses: periodAccesses,
+    filtered_accesses: periodAccesses,
+    total_events: Number(historicalRow?.total_events || 0),
+    total_accesses: Number(historicalRow?.total_accesses || 0),
+    total_page_views: Number(historicalRow?.total_accesses || 0),
+    tracked_days: Number(historicalRow?.tracked_days || 0),
+    accesses_today: sumMetric(todayRows, "page_views", "total"),
+    accesses_7_days: sumMetric(sevenDayRows, "page_views", "total"),
+    unique_sessions_period: visitorStats.unique_sessions_period,
+    unique_sessions_total: visitorStats.unique_sessions_total,
+    unique_visitors_period: visitorStats.unique_visitors_period,
+    unique_visitors_total: visitorStats.unique_visitors_total,
+    returning_visitors_period: visitorStats.returning_visitors_period,
+    returning_visitors_total: visitorStats.returning_visitors_total,
+    returning_sessions_period: visitorStats.returning_sessions_period,
+    returning_sessions_total: visitorStats.returning_sessions_total,
+    source_counts: mapMetric(periodRows, "source"),
+    source_detail_counts: Object.fromEntries((sourceDetailResult.results || []).map((row) => [row.dimension, Number(row.value || 0)])),
+    event_type_counts: mapMetric(periodRows, "event_type"),
+    daily_accesses: dailyAccesses,
+    hour_counts: mapMetric(periodRows, "hour"),
+    peak_hour: peakHourFromCounts(mapMetric(periodRows, "hour")),
+    device_counts: mapMetric(periodRows, "device"),
+    browser_counts: mapMetric(periodRows, "browser"),
+    os_counts: mapMetric(periodRows, "os"),
+    dish_view_counts: dishViewCounts,
+    dish_touch_counts: dishTouchCounts,
+    dish_observe_seconds: dishObserveSeconds,
+    dish_attention_scores: dishAttentionScores,
+    dish_view_category_counts: mapMetric(periodRows, "dish_view_category"),
+    dish_touch_category_counts: mapMetric(periodRows, "dish_touch_category"),
+    dish_observe_category_seconds: mapMetric(periodRows, "dish_observe_category_seconds"),
+    webview_banner_shown: sumMetric(periodRows, "webview_banner", "total"),
+    webview_banner_platform_counts: mapMetric(periodRows, "webview_banner_platform"),
+    instagram_to_direct: conversion,
+    total_dish_views: sumObjectValues(dishViewCounts),
+    total_dish_touches: sumObjectValues(dishTouchCounts),
+    total_dish_observe_seconds: sumObjectValues(dishObserveSeconds),
+    recent_events: recent,
+    bounds,
+  };
+
+  if (!normalizeDate(filters.startDate) && !normalizeDate(filters.endDate)) {
+    insights.event_type_counts_all = insights.event_type_counts;
+  }
+  return insights;
+}
+
+async function queryVisitorStats(db, slug, startDate, endDate) {
+  const row = await db.prepare(`
+    WITH identities AS (
+      SELECT
+        COALESCE(NULLIF(visitor_id, ''), 'session:' || COALESCE(NULLIF(session_id, ''), event_id)) AS identity_id,
+        COUNT(DISTINCT COALESCE(NULLIF(session_id, ''), event_id)) AS sessions
+      FROM analytics_pageview_facts
+      WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
+      GROUP BY COALESCE(NULLIF(visitor_id, ''), 'session:' || COALESCE(NULLIF(session_id, ''), event_id))
+    )
+    SELECT
+      COUNT(*) AS unique_visitors,
+      COALESCE(SUM(CASE WHEN sessions > 1 THEN 1 ELSE 0 END), 0) AS returning_visitors,
+      COALESCE(SUM(CASE WHEN sessions > 1 THEN sessions - 1 ELSE 0 END), 0) AS returning_sessions,
+      COALESCE(SUM(sessions), 0) AS unique_sessions
+    FROM identities
+  `).bind(slug, startDate, endDate).first();
+  return {
+    unique_visitors: Number(row?.unique_visitors || 0),
+    returning_visitors: Number(row?.returning_visitors || 0),
+    returning_sessions: Number(row?.returning_sessions || 0),
+    unique_sessions: Number(row?.unique_sessions || 0),
+  };
+}
+
+async function getRollupVisitorStats(env, slug, periodStart, periodEnd, today) {
+  const period = await queryVisitorStats(env.DB, slug, periodStart, periodEnd);
+  const isAllTime = periodStart === ANALYTICS_ROLLUP_START_DATE && periodEnd === today;
+  let total = period;
+
+  if (!isAllTime) {
+    const hourBucket = new Date().toISOString().slice(0, 13);
+    const totalKey = [
+      "analytics-total-visitors",
+      ANALYTICS_TOTAL_STATS_CACHE_VERSION,
+      slug,
+      today,
+      hourBucket,
+    ].join(":");
+    total = await readCacheJson(env, totalKey);
+    if (!total) {
+      total = await queryVisitorStats(env.DB, slug, ANALYTICS_ROLLUP_START_DATE, today);
+      if (env.INSIGHTS_CACHE) {
+        await env.INSIGHTS_CACHE.put(totalKey, JSON.stringify(total), { expirationTtl: 2 * 60 * 60 });
+      }
+    }
+  }
+
+  return {
+    unique_visitors_period: period.unique_visitors,
+    returning_visitors_period: period.returning_visitors,
+    returning_sessions_period: period.returning_sessions,
+    unique_sessions_period: period.unique_sessions,
+    unique_visitors_total: total.unique_visitors,
+    returning_visitors_total: total.returning_visitors,
+    returning_sessions_total: total.returning_sessions,
+    unique_sessions_total: total.unique_sessions,
+  };
+}
+
+async function getRollupInstagramToDirect(db, slug, startDate, endDate) {
+  const row = await db.prepare(`
+    WITH pageviews AS (
+      SELECT visitor_id, session_id, source, created_at, banner_shown
+      FROM analytics_pageview_facts
+      WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
+        AND COALESCE(visitor_id, '') <> ''
+    ),
+    instagram_visitors AS (
+      SELECT
+        visitor_id,
+        MIN(created_at) AS first_instagram_at,
+        MIN(CASE WHEN COALESCE(banner_shown, 0) = 0 THEN created_at END) AS first_browser_instagram_at
+      FROM pageviews
+      WHERE source = 'instagram'
+      GROUP BY visitor_id
+    ),
+    trackable_instagram_visitors AS (
+      SELECT visitor_id, first_browser_instagram_at
+      FROM instagram_visitors
+      WHERE first_browser_instagram_at IS NOT NULL
+    ),
+    direct_after_instagram AS (
+      SELECT p.visitor_id, COUNT(DISTINCT p.session_id) AS direct_sessions_after_instagram
+      FROM pageviews p
+      JOIN trackable_instagram_visitors i ON i.visitor_id = p.visitor_id
+      WHERE p.source = 'direct' AND p.created_at > i.first_browser_instagram_at
+      GROUP BY p.visitor_id
+    )
+    SELECT
+      (SELECT COUNT(*) FROM instagram_visitors) AS instagram_visitors,
+      (SELECT COUNT(*) FROM trackable_instagram_visitors) AS trackable_instagram_visitors,
+      (SELECT COUNT(*) FROM direct_after_instagram) AS instagram_to_direct_visitors,
+      (SELECT COALESCE(SUM(direct_sessions_after_instagram), 0) FROM direct_after_instagram) AS direct_sessions_after_instagram
+  `).bind(slug, startDate, endDate).first();
+  const instagramClickIdentities = Number(row?.instagram_visitors || 0);
+  const instagramVisitors = Number(row?.trackable_instagram_visitors || 0);
+  const convertedVisitors = Number(row?.instagram_to_direct_visitors || 0);
+  return {
+    instagram_visitors: instagramVisitors,
+    instagram_click_identities: instagramClickIdentities,
+    webview_only_visitors: Math.max(0, instagramClickIdentities - instagramVisitors),
+    tracking_coverage_rate: instagramClickIdentities
+      ? Number(((instagramVisitors / instagramClickIdentities) * 100).toFixed(2))
+      : 0,
+    instagram_to_direct_visitors: convertedVisitors,
+    direct_sessions_after_instagram: Number(row?.direct_sessions_after_instagram || 0),
+    instagram_to_direct_rate: instagramVisitors
+      ? Number(((convertedVisitors / instagramVisitors) * 100).toFixed(2))
+      : 0,
+    instagram_to_direct_lower_bound_rate: instagramClickIdentities
+      ? Number(((convertedVisitors / instagramClickIdentities) * 100).toFixed(2))
+      : 0,
+  };
+}
+
+async function getRollupRecentEvents(db, slug, startDate, endDate) {
+  const rows = await db.prepare(`
+    SELECT created_at, 'page_view' AS event_type, source, source_detail,
+           '' AS dish_name, '' AS dish_category, 0 AS observe_seconds, device_type
+    FROM analytics_pageview_facts
+    WHERE restaurant_slug = ? AND metric_date >= ? AND metric_date <= ?
+    ORDER BY created_at DESC
+    LIMIT 15
+  `).bind(slug, startDate, endDate).all();
+  return rows.results || [];
 }
 
 async function getInsights(db, filters) {
   const restaurant = await requireRestaurant(db, normalizeSlug(filters.slug));
   const bounds = buildDateBounds(filters);
+  const startDate = normalizeDate(filters.startDate);
+  const endDate = normalizeDate(filters.endDate);
+  const hasDateFilter = Boolean(startDate || endDate);
+  const today = todayIso();
   const period = eventWhere(restaurant.slug, bounds);
-  const all = eventWhere(restaurant.slug);
   const periodPageViews = eventWhere(restaurant.slug, bounds, "event_type = 'page_view'");
-  const allPageViews = eventWhere(restaurant.slug, null, "event_type = 'page_view'");
-  const todayPageViews = eventWhere(restaurant.slug, { start: `${todayIso()}T00:00:00.000Z`, endExclusive: `${addDays(todayIso(), 1)}T00:00:00.000Z` }, "event_type = 'page_view'");
-  const sevenDaysPageViews = eventWhere(restaurant.slug, { start: `${daysAgoIso(6)}T00:00:00.000Z` }, "event_type = 'page_view'");
+  const isTodayFilter = startDate === today && endDate === today;
+  const isSevenDayFilter = startDate === daysAgoIso(6) && endDate === today;
+  const todayPageViews = isTodayFilter
+    ? periodPageViews
+    : eventWhere(restaurant.slug, { start: dateStartUtc(today), endExclusive: dateStartUtc(addDays(today, 1)) }, "event_type = 'page_view'");
+  const sevenDaysPageViews = isSevenDayFilter
+    ? periodPageViews
+    : eventWhere(restaurant.slug, { start: dateStartUtc(daysAgoIso(6)), endExclusive: dateStartUtc(addDays(today, 1)) }, "event_type = 'page_view'");
   const dishViews = eventWhere(restaurant.slug, bounds, "event_type = 'dish_view' AND COALESCE(dish_name, '') <> ''");
   const dishTouches = eventWhere(restaurant.slug, bounds, "event_type = 'dish_touch' AND COALESCE(dish_name, '') <> ''");
   const dishObserves = eventWhere(restaurant.slug, bounds, "event_type = 'dish_observe' AND COALESCE(dish_name, '') <> ''");
   const webviewBanner = eventWhere(restaurant.slug, bounds, "banner_shown = 1");
 
   const [
-    totalEvents, periodEvents, totalAccesses, periodAccesses, accessesToday, accesses7Days,
-    uniqueSessionsPeriod, uniqueSessionsTotal, sourceCounts, eventTypeCounts, eventTypeCountsAll,
+    periodEvents, periodAccesses, accessesToday, accesses7Days,
+    uniqueSessionsPeriod, sourceCounts, eventTypeCounts,
     dailyAccesses, hourCounts, deviceCounts, browserCounts, osCounts, dishViewCounts,
     dishTouchCounts, dishObserveSeconds, dishCategoryCounts, dishTouchCategoryCounts,
     dishObserveCategorySeconds, totalDishObserveSeconds, webviewBannerShown,
     webviewBannerPlatformCounts, instagramToDirect, recentEvents,
   ] = await Promise.all([
-    scalarCount(db, all),
     scalarCount(db, period),
-    scalarCount(db, allPageViews),
     scalarCount(db, periodPageViews),
     scalarCount(db, todayPageViews),
     scalarCount(db, sevenDaysPageViews),
     scalarDistinctCount(db, period, "session_id"),
-    scalarDistinctCount(db, all, "session_id"),
     groupedCounts(db, periodPageViews, "source"),
     groupedCounts(db, period, "event_type"),
-    groupedCounts(db, all, "event_type"),
-    groupedCounts(db, periodPageViews, "substr(created_at, 1, 10)"),
-    groupedCounts(db, periodPageViews, "substr(created_at, 12, 2)"),
+    groupedCounts(db, periodPageViews, "substr(datetime(created_at, '-3 hours'), 1, 10)"),
+    groupedCounts(db, periodPageViews, "substr(datetime(created_at, '-3 hours'), 12, 2)"),
     groupedCounts(db, periodPageViews, "device_type"),
     groupedCounts(db, periodPageViews, "browser"),
     groupedCounts(db, periodPageViews, "os"),
@@ -291,24 +1639,19 @@ async function getInsights(db, filters) {
   mergeScore(dishAttentionScores, dishTouchCounts, 3);
   mergeScore(dishAttentionScores, dishObserveSeconds, 0.2);
 
-  return {
+  const insights = {
     restaurant_name: restaurant.name,
     provider: "cloudflare_d1",
     period_label: periodLabel(filters.startDate, filters.endDate),
     collected_at: new Date().toISOString(),
-    total_events: totalEvents,
     period_events: periodEvents,
-    total_accesses: totalAccesses,
-    total_page_views: totalAccesses,
     period_accesses: periodAccesses,
     filtered_accesses: periodAccesses,
     accesses_today: accessesToday,
     accesses_7_days: accesses7Days,
     unique_sessions_period: uniqueSessionsPeriod,
-    unique_sessions_total: uniqueSessionsTotal,
     source_counts: sourceCounts,
     event_type_counts: eventTypeCounts,
-    event_type_counts_all: eventTypeCountsAll,
     daily_accesses: dailyAccesses,
     hour_counts: hourCounts,
     peak_hour: peakHourFromCounts(hourCounts),
@@ -330,6 +1673,15 @@ async function getInsights(db, filters) {
     total_dish_observe_seconds: totalDishObserveSeconds,
     recent_events: recentEvents,
   };
+
+  if (!hasDateFilter) {
+    insights.total_events = periodEvents;
+    insights.total_accesses = periodAccesses;
+    insights.total_page_views = periodAccesses;
+    insights.unique_sessions_total = uniqueSessionsPeriod;
+    insights.event_type_counts_all = eventTypeCounts;
+  }
+  return insights;
 }
 
 async function getCombinedInsights(env, filters) {
@@ -402,18 +1754,22 @@ function mergeInsights(parts) {
     collected_at: new Date().toISOString(),
   };
   const numericKeys = [
-    "total_events", "period_events", "total_accesses", "total_page_views",
+    "period_events",
     "period_accesses", "filtered_accesses", "accesses_today", "accesses_7_days",
-    "unique_sessions_period", "unique_sessions_total", "webview_banner_shown",
+    "unique_sessions_period", "webview_banner_shown",
     "total_dish_views", "total_dish_touches", "total_dish_observe_seconds",
   ];
   const mapKeys = [
-    "source_counts", "event_type_counts", "event_type_counts_all", "daily_accesses",
+    "source_counts", "event_type_counts", "daily_accesses",
     "hour_counts", "device_counts", "browser_counts", "os_counts", "dish_view_counts",
     "dish_touch_counts", "dish_observe_seconds", "dish_view_category_counts",
     "dish_touch_category_counts", "dish_observe_category_seconds",
     "webview_banner_platform_counts",
   ];
+  if (parts.some((part) => Object.hasOwn(part, "total_events"))) {
+    numericKeys.push("total_events", "total_accesses", "total_page_views", "unique_sessions_total");
+    mapKeys.push("event_type_counts_all");
+  }
 
   numericKeys.forEach((key) => {
     merged[key] = parts.reduce((total, part) => total + Number(part[key] || 0), 0);
@@ -457,279 +1813,6 @@ function mergeNumberMaps(maps) {
   }, {});
 }
 
-async function registerStoryAgent(db, payload) {
-  const deviceId = cleanIdentifier(payload.device_id || payload.deviceId, 100);
-  const deviceToken = String(payload.device_token || payload.deviceToken || "").trim();
-  const label = String(payload.label || "Telefone QrStack").trim().slice(0, 120);
-  const appVersion = String(payload.app_version || payload.appVersion || "").trim().slice(0, 40);
-  if (!deviceId || deviceToken.length < 32) throw httpError("invalid_agent_credentials", 400);
-  const now = new Date().toISOString();
-  const tokenHash = await sha256Hex(deviceToken);
-  await db.prepare(`
-    INSERT INTO story_agents (
-      device_id, label, token_hash, platform, app_version, is_active,
-      last_seen_at, created_at, updated_at
-    ) VALUES (?, ?, ?, 'android', ?, 1, ?, ?, ?)
-    ON CONFLICT(device_id) DO UPDATE SET
-      label = excluded.label,
-      token_hash = excluded.token_hash,
-      app_version = excluded.app_version,
-      is_active = 1,
-      last_seen_at = excluded.last_seen_at,
-      updated_at = excluded.updated_at
-  `).bind(deviceId, label, tokenHash, appVersion, now, now, now).run();
-  return { device_id: deviceId, label, platform: "android", app_version: appVersion, registered_at: now };
-}
-
-async function createStoryJob(env, payload) {
-  const slug = normalizeSlug(payload.slug || "amaro");
-  const restaurant = await requireRestaurant(env.DB, slug);
-  assertRestaurantToken(restaurant, payload.token);
-  const menuDayId = String(payload.menu_day_id || payload.menuDayId || "").trim().slice(0, 160);
-  const storyLink = String(payload.story_link || payload.storyLink || restaurant.story_link || "").trim();
-  const clientRequestId = cleanIdentifier(payload.client_request_id || payload.clientRequestId, 160);
-  const retryFailed = payload.retry_failed === true || payload.retryFailed === true;
-  const base64 = String(payload.image_base64 || payload.imageBase64 || "").replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "");
-  if (!storyLink || !base64) throw httpError("missing_story_payload", 400);
-
-  let effectiveClientRequestId = clientRequestId;
-  let retriedFrom = "";
-  if (clientRequestId) {
-    const existing = await env.DB.prepare(`
-      SELECT * FROM story_publish_jobs
-      WHERE restaurant_id = ?
-        AND (client_request_id = ? OR client_request_id LIKE ?)
-      ORDER BY created_at DESC
-      LIMIT 1
-    `).bind(restaurant.id, clientRequestId, `${clientRequestId}:retry:%`).first();
-    if (existing) {
-      if (existing.status !== "failed_attention" || !retryFailed) {
-        return { job: publicStoryJob(existing), duplicate: true, historical: existing.status === "failed_attention" };
-      }
-      retriedFrom = existing.id;
-      effectiveClientRequestId = `${clientRequestId}:retry:${crypto.randomUUID().slice(0, 8)}`;
-    }
-  }
-
-  const media = decodeBase64(base64);
-  if (!media.byteLength || media.byteLength > STORY_MEDIA_MAX_BYTES) throw httpError("invalid_story_media_size", 413);
-  const contentType = String(payload.content_type || payload.contentType || "image/png").toLowerCase();
-  if (!/^image\/(png|jpeg|webp)$/.test(contentType)) throw httpError("invalid_story_media_type", 415);
-
-  const jobId = `story_${crypto.randomUUID()}`;
-  const mediaToken = crypto.randomUUID().replaceAll("-", "") + crypto.randomUUID().replaceAll("-", "");
-  const mediaKey = `story-media/${slug}/${jobId}`;
-  const now = new Date().toISOString();
-  await env.INSIGHTS_CACHE.put(mediaKey, media, {
-    expirationTtl: STORY_MEDIA_TTL_SECONDS,
-    metadata: { contentType, restaurant: slug, jobId },
-  });
-
-  await env.DB.batch([
-    env.DB.prepare(`
-      INSERT INTO story_publish_jobs (
-        id, restaurant_id, restaurant_slug, menu_day_id, story_link,
-        media_key, media_token, status, checkpoint, client_request_id,
-        queued_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'queued', ?, ?, ?, ?)
-    `).bind(
-      jobId, restaurant.id, slug, menuDayId, storyLink,
-      mediaKey, mediaToken, effectiveClientRequestId || null, now, now, now
-    ),
-    env.DB.prepare(`
-      INSERT INTO story_job_events (id, job_id, event_type, checkpoint, detail, created_at)
-      VALUES (?, ?, 'queued', 'queued', ?, ?)
-    `).bind(
-      `story_event_${crypto.randomUUID()}`,
-      jobId,
-      retriedFrom ? `Nova tentativa solicitada após falha do job ${retriedFrom}` : "Story recebido pela plataforma",
-      now
-    ),
-  ]);
-  return {
-    job: publicStoryJob(await getStoryJobById(env.DB, jobId)),
-    duplicate: false,
-    retried_from: retriedFrom || null,
-  };
-}
-
-async function claimNextStoryJob(db, request, url) {
-  const deviceId = cleanIdentifier(url.searchParams.get("device_id") || url.searchParams.get("deviceId"), 100);
-  const agent = await assertStoryAgent(db, deviceId, bearerToken(request));
-  const reportedVersion = String(url.searchParams.get("app_version") || url.searchParams.get("appVersion") || "").trim().slice(0, 40);
-  if (reportedVersion) {
-    await db.prepare("UPDATE story_agents SET app_version = ?, last_seen_at = ?, updated_at = ? WHERE device_id = ?")
-      .bind(reportedVersion, new Date().toISOString(), new Date().toISOString(), deviceId).run();
-  }
-  const effectiveVersion = reportedVersion || String(agent.app_version || "");
-  if (compareVersions(effectiveVersion, STORY_AGENT_MIN_VERSION) < 0) {
-    return {
-      job: null,
-      poll_after_seconds: 60,
-      update_required: true,
-      current_version: effectiveVersion || null,
-      minimum_version: STORY_AGENT_MIN_VERSION,
-    };
-  }
-  const activePlaceholders = STORY_ACTIVE_STATUSES.map(() => "?").join(", ");
-  let job = await db.prepare(`
-    SELECT * FROM story_publish_jobs
-    WHERE assigned_device_id = ? AND status IN (${activePlaceholders})
-      AND NOT (status = 'paused_interruption' AND checkpoint = 'paused_by_operator')
-    ORDER BY updated_at DESC LIMIT 1
-  `).bind(deviceId, ...STORY_ACTIVE_STATUSES).first();
-
-  if (!job) {
-    const candidate = await db.prepare(`
-      SELECT * FROM story_publish_jobs
-      WHERE status IN ('pending', 'retry')
-      ORDER BY queued_at ASC LIMIT 1
-    `).first();
-    if (candidate) {
-      const now = new Date().toISOString();
-      const claim = await db.prepare(`
-        UPDATE story_publish_jobs
-        SET status = 'claimed', checkpoint = 'claimed', assigned_device_id = ?,
-            attempts = attempts + 1, claimed_at = COALESCE(claimed_at, ?), updated_at = ?
-        WHERE id = ? AND status IN ('pending', 'retry')
-      `).bind(deviceId, now, now, candidate.id).run();
-      if (Number(claim.meta?.changes || 0) > 0) {
-        await appendStoryJobEvent(db, candidate.id, deviceId, "claimed", "claimed", `Agente ${agent.label} assumiu a publicação`);
-        job = await getStoryJobById(db, candidate.id);
-      }
-    }
-  }
-
-  await db.prepare("UPDATE story_agents SET last_seen_at = ?, updated_at = ? WHERE device_id = ?")
-    .bind(new Date().toISOString(), new Date().toISOString(), deviceId).run();
-  if (!job) return { job: null, poll_after_seconds: 12 };
-  const mediaUrl = new URL(request.url);
-  mediaUrl.search = "";
-  mediaUrl.searchParams.set("action", "getStoryMedia");
-  mediaUrl.searchParams.set("job", job.id);
-  mediaUrl.searchParams.set("token", job.media_token);
-  return { job: { ...publicStoryJob(job), media_url: mediaUrl.toString() }, poll_after_seconds: 3 };
-}
-
-function compareVersions(left, right) {
-  const normalizeVersion = (value) => String(value || "")
-    .split(/[+-]/, 1)[0]
-    .split(".")
-    .map((part) => Number.parseInt(part, 10) || 0);
-  const a = normalizeVersion(left);
-  const b = normalizeVersion(right);
-  const length = Math.max(a.length, b.length, 3);
-  for (let index = 0; index < length; index += 1) {
-    const delta = (a[index] || 0) - (b[index] || 0);
-    if (delta !== 0) return delta < 0 ? -1 : 1;
-  }
-  return 0;
-}
-
-async function updateStoryJob(db, payload, request) {
-  const deviceId = cleanIdentifier(payload.device_id || payload.deviceId, 100);
-  await assertStoryAgent(db, deviceId, bearerToken(request));
-  const jobId = cleanIdentifier(payload.job_id || payload.jobId, 160);
-  const status = String(payload.status || "").trim().toLowerCase();
-  const checkpoint = cleanIdentifier(payload.checkpoint || status, 100) || "unknown";
-  const detail = String(payload.detail || payload.error || "").trim().slice(0, 1000);
-  const allowed = new Set(["claimed", "preparing", "publishing", "paused_interruption", "retry", "completed", "failed_attention"]);
-  if (!jobId || !allowed.has(status)) throw httpError("invalid_story_job_update", 400);
-  const current = await getStoryJobById(db, jobId);
-  if (!current || current.assigned_device_id !== deviceId) throw httpError("story_job_not_assigned", 409);
-  const now = new Date().toISOString();
-  const startedAt = ["preparing", "publishing"].includes(status) ? now : current.started_at;
-  const completedAt = status === "completed" ? now : current.completed_at;
-  await db.prepare(`
-    UPDATE story_publish_jobs
-    SET status = ?, checkpoint = ?, last_error = ?,
-        interruption_count = interruption_count + ?,
-        started_at = COALESCE(started_at, ?), completed_at = ?, updated_at = ?
-    WHERE id = ? AND assigned_device_id = ?
-  `).bind(
-    status, checkpoint, status === "failed_attention" ? detail : null,
-    status === "paused_interruption" ? 1 : 0,
-    startedAt || null, completedAt || null, now, jobId, deviceId
-  ).run();
-  await appendStoryJobEvent(db, jobId, deviceId, status, checkpoint, detail);
-  return publicStoryJob(await getStoryJobById(db, jobId));
-}
-
-async function getStoryJobForRestaurant(db, params) {
-  const slug = normalizeSlug(params.get("slug") || "amaro");
-  const restaurant = await requireRestaurant(db, slug);
-  assertRestaurantToken(restaurant, params.get("token"));
-  const jobId = cleanIdentifier(params.get("job") || params.get("job_id"), 160);
-  const row = jobId
-    ? await db.prepare("SELECT * FROM story_publish_jobs WHERE id = ? AND restaurant_id = ? LIMIT 1").bind(jobId, restaurant.id).first()
-    : await db.prepare("SELECT * FROM story_publish_jobs WHERE restaurant_id = ? ORDER BY created_at DESC LIMIT 1").bind(restaurant.id).first();
-  return row ? publicStoryJob(row) : null;
-}
-
-async function getStoryMedia(env, url) {
-  const jobId = cleanIdentifier(url.searchParams.get("job"), 160);
-  const token = String(url.searchParams.get("token") || "");
-  const job = jobId ? await getStoryJobById(env.DB, jobId) : null;
-  if (!job || !token || token !== job.media_token) return json({ ok: false, error: "unauthorized" }, 401);
-  const object = await env.INSIGHTS_CACHE.getWithMetadata(job.media_key, "arrayBuffer");
-  if (!object?.value) return json({ ok: false, error: "story_media_expired" }, 410);
-  return new Response(object.value, {
-    headers: {
-      "content-type": object.metadata?.contentType || "image/png",
-      "cache-control": "private, max-age=300",
-      "content-disposition": `inline; filename="${job.restaurant_slug}-${job.id}.png"`,
-    },
-  });
-}
-
-async function assertStoryAgent(db, deviceId, token) {
-  if (!deviceId || !token) throw httpError("unauthorized_agent", 401);
-  const agent = await db.prepare("SELECT * FROM story_agents WHERE device_id = ? AND is_active = 1 LIMIT 1")
-    .bind(deviceId).first();
-  if (!agent || (await sha256Hex(token)) !== agent.token_hash) throw httpError("unauthorized_agent", 401);
-  return agent;
-}
-
-async function appendStoryJobEvent(db, jobId, deviceId, eventType, checkpoint, detail = "") {
-  await db.prepare(`
-    INSERT INTO story_job_events (id, job_id, device_id, event_type, checkpoint, detail, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).bind(
-    `story_event_${crypto.randomUUID()}`, jobId, deviceId || null,
-    eventType, checkpoint || null, String(detail || "").slice(0, 1000), new Date().toISOString()
-  ).run();
-}
-
-function getStoryJobById(db, jobId) {
-  return db.prepare("SELECT * FROM story_publish_jobs WHERE id = ? LIMIT 1").bind(jobId).first();
-}
-
-function publicStoryJob(job) {
-  if (!job) return null;
-  const { media_key, media_token, ...safe } = job;
-  return safe;
-}
-
-function decodeBase64(value) {
-  try {
-    const binary = atob(value.replace(/\s/g, ""));
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-    return bytes;
-  } catch {
-    throw httpError("invalid_story_media", 400);
-  }
-}
-
-async function sha256Hex(value) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value)));
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function bearerToken(request) {
-  return String(request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
-}
-
 function cleanIdentifier(value, maxLength = 160) {
   return String(value || "").trim().replace(/[^a-zA-Z0-9._:-]/g, "").slice(0, maxLength);
 }
@@ -738,6 +1821,69 @@ function httpError(message, status) {
   const error = new Error(message);
   error.status = status;
   return error;
+}
+
+async function uploadCatalogImage(env, request) {
+  if (!env.MEDIA_STORAGE) throw httpError("media_storage_unavailable", 503);
+  const maximumRequestBytes = CATALOG_IMAGE_MAX_BYTES + 64 * 1024;
+  if (Number(request.headers.get('content-length') || 0) > maximumRequestBytes) throw httpError('request_too_large', 413);
+  // Bound the multipart body even if Transfer-Encoding omitted Content-Length.
+  const limited = await readLimitedBytes(request, maximumRequestBytes);
+  request = new Request(request.url, { method: request.method, headers: request.headers, body: limited });
+  const form = await request.formData();
+  const slug = normalizeSlug(form.get("slug") || "amaro");
+  const token = String(form.get("token") || "");
+  await authorizeTenant(env, request, slug, token);
+
+  const file = form.get("file");
+  if (!file || typeof file.arrayBuffer !== "function") throw httpError("catalog_image_required", 400);
+  const contentType = String(file.type || "").toLowerCase();
+  const extension = CATALOG_IMAGE_TYPES[contentType];
+  if (!extension) throw httpError("catalog_image_type_not_allowed", 415);
+  if (!file.size || file.size > CATALOG_IMAGE_MAX_BYTES) throw httpError("catalog_image_too_large", 413);
+
+  const key = `catalog/${slug}/${crypto.randomUUID()}.${extension}`;
+  const bytes = await file.arrayBuffer();
+  await env.MEDIA_STORAGE.put(key, bytes, {
+    metadata: {
+      contentType,
+      originalName: boundedText(file.name, 180),
+      restaurantSlug: slug,
+      uploadedAt: new Date().toISOString(),
+    },
+  });
+
+  const imageUrl = new URL(request.url);
+  imageUrl.pathname = "/";
+  imageUrl.search = "";
+  imageUrl.searchParams.set("action", "getCatalogImage");
+  imageUrl.searchParams.set("key", key);
+  return json({
+    ok: true,
+    image_url: imageUrl.toString(),
+    key,
+    content_type: contentType,
+    size: bytes.byteLength,
+  }, 201);
+}
+
+async function serveCatalogImage(env, request, url) {
+  if (!env.MEDIA_STORAGE) return new Response("Not found", { status: 404, headers: CORS_HEADERS });
+  const key = String(url.searchParams.get("key") || "");
+  if (!/^catalog\/[a-z0-9-]+\/[a-f0-9-]+\.(?:jpg|png|webp)$/.test(key)) {
+    return new Response("Not found", { status: 404, headers: CORS_HEADERS });
+  }
+  const object = await env.MEDIA_STORAGE.get(key, { type: "stream", cacheTtl: 86400 });
+  if (!object) return new Response("Not found", { status: 404, headers: CORS_HEADERS });
+  const extension = key.split(".").pop();
+  const contentType = extension === "png" ? "image/png" : extension === "webp" ? "image/webp" : "image/jpeg";
+  const headers = {
+    ...CORS_HEADERS,
+    "content-type": contentType,
+    "cache-control": "public, max-age=31536000, immutable",
+    "x-content-type-options": "nosniff",
+  };
+  return new Response(request.method === "HEAD" ? null : object, { status: 200, headers });
 }
 
 async function getCatalog(db, slug) {
@@ -755,10 +1901,169 @@ async function getCatalog(db, slug) {
   return { restaurant, items: items.results || [], assets: assets.results || [] };
 }
 
+function catalogCacheKey(slug) {
+  return ["catalog", CATALOG_CACHE_VERSION, normalizeSlug(slug)].join(":");
+}
+
+async function readCatalogSnapshot(env, slug) {
+  return readCacheJson(env, catalogCacheKey(slug));
+}
+
+async function cacheCatalogSnapshot(env, slug, catalog, source) {
+  const snapshot = {
+    restaurant: publicRestaurant(catalog.restaurant || fallbackRestaurant(slug)),
+    items: Array.isArray(catalog.items) ? catalog.items : [],
+    assets: Array.isArray(catalog.assets) ? catalog.assets : [],
+    catalog_source: source,
+    cached_at: new Date().toISOString(),
+  };
+  if (env.INSIGHTS_CACHE) {
+    await env.INSIGHTS_CACHE.put(catalogCacheKey(slug), JSON.stringify(snapshot));
+  }
+  return snapshot;
+}
+
+function isFreshCatalogSnapshot(snapshot) {
+  const cachedAt = Date.parse(snapshot?.cached_at || 0);
+  return Number.isFinite(cachedAt) && Date.now() - cachedAt < 5 * 60 * 1000;
+}
+
+async function fetchAmaroPublishedCatalog() {
+  const [catalogResponse, assetsResponse] = await Promise.all([
+    fetch(AMARO_PUBLISHED_CATALOG_URL, { signal: AbortSignal.timeout(5000) }),
+    fetch(AMARO_PUBLISHED_ASSETS_URL, { signal: AbortSignal.timeout(5000) }),
+  ]);
+  if (!catalogResponse.ok) throw new Error(`published_catalog_unavailable:${catalogResponse.status}`);
+  const items = await catalogResponse.json();
+  let assets = [];
+  if (assetsResponse.ok) {
+    const assetIndex = await assetsResponse.json();
+    assets = Array.isArray(assetIndex) ? assetIndex : Array.isArray(assetIndex?.assets) ? assetIndex.assets : [];
+  }
+  return {
+    restaurant: fallbackRestaurant("amaro"),
+    items: Array.isArray(items) ? items : [],
+    assets,
+  };
+}
+
+async function getRestaurantResilient(env, slugValue) {
+  const slug = normalizeSlug(slugValue);
+  const cached = await readCatalogSnapshot(env, slug);
+  if (cached?.restaurant) {
+    return { restaurant: cached.restaurant, restaurant_source: "catalog_cache" };
+  }
+  if (await readCacheJson(env, D1_READ_BLOCK_KEY)) {
+    return { restaurant: fallbackRestaurant(slug), restaurant_source: "fallback" };
+  }
+  try {
+    const restaurant = await getRestaurant(env.DB, slug);
+    return { restaurant: restaurant || fallbackRestaurant(slug), restaurant_source: restaurant ? "d1" : "fallback" };
+  } catch (error) {
+    if (!isD1CapacityError(error)) throw error;
+    await markD1ReadBlocked(env, error);
+    return { restaurant: fallbackRestaurant(slug), restaurant_source: "fallback" };
+  }
+}
+
+async function getCatalogResilient(env, slugValue) {
+  const slug = normalizeSlug(slugValue);
+  const cached = await readCatalogSnapshot(env, slug);
+  const readBlocked = await readCacheJson(env, D1_READ_BLOCK_KEY);
+  if (cached && (readBlocked || isFreshCatalogSnapshot(cached))) {
+    return { ...cached, catalog_source: readBlocked ? "kv_fallback" : "kv_fresh" };
+  }
+
+  if (!readBlocked) {
+    try {
+      const catalog = await getCatalog(env.DB, slug);
+      return cacheCatalogSnapshot(env, slug, catalog, "d1");
+    } catch (error) {
+      if (!isD1CapacityError(error)) throw error;
+      await markD1ReadBlocked(env, error);
+    }
+  }
+
+  if (cached) return { ...cached, catalog_source: "kv_fallback" };
+  if (slug === "amaro") {
+    const published = await fetchAmaroPublishedCatalog();
+    return cacheCatalogSnapshot(env, slug, published, "published_fallback");
+  }
+  return {
+    restaurant: fallbackRestaurant(slug),
+    items: [],
+    assets: [],
+    catalog_source: "empty_fallback",
+    cached_at: new Date().toISOString(),
+  };
+}
+
+async function cacheCatalogItemMutation(env, slugValue, item) {
+  const slug = normalizeSlug(slugValue);
+  const current = await getCatalogResilient(env, slug);
+  const items = current.items.filter((entry) => entry.id !== item.id);
+  items.push(item);
+  return cacheCatalogSnapshot(env, slug, { ...current, items }, current.catalog_source || "kv_mutation");
+}
+
+function optimisticCatalogItem(payload) {
+  const slug = normalizeSlug(payload.slug || "amaro");
+  const now = new Date().toISOString();
+  const sectionTitle = boundedText(payload.section_title || payload.sectionTitle || payload.category || "Catálogo", 100);
+  const sectionId = cleanIdentifier(
+    payload.section_id || payload.sectionId || normalizeKey(sectionTitle).replace(/\s+/g, "-"),
+    100,
+  ) || "catalogo";
+  return {
+    id: payload.id,
+    restaurant_id: `rest_${slug}`,
+    section_id: sectionId,
+    section_title: sectionTitle,
+    name: boundedText(payload.name, 140),
+    category: boundedText(payload.category || sectionTitle, 100),
+    description: boundedText(payload.description, 1200),
+    price: boundedText(payload.price, 40),
+    image_url: boundedText(payload.image_url || payload.imageUrl, 1000),
+    source_repo: "",
+    source_path: "",
+    source_url: "",
+    sort_order: Number.isFinite(Number(payload.sort_order ?? payload.sortOrder))
+      ? Math.max(0, Math.trunc(Number(payload.sort_order ?? payload.sortOrder)))
+      : 9999,
+    is_active: 1,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+async function saveCatalogItemResilient(env, payload, request) {
+  const slug = normalizeSlug(payload.slug || "amaro");
+  const tenant = await authorizeTenant(env, request, slug, payload.token);
+  const prepared = {
+    ...payload,
+    slug,
+    token: tenant.admin_token,
+    id: cleanIdentifier(payload.id || `catalog_${slug}_${crypto.randomUUID()}`, 160),
+    allow_create_with_id: !payload.id,
+  };
+  try {
+    const item = await saveCatalogItem(env.DB, prepared);
+    await cacheCatalogItemMutation(env, slug, item);
+    return { item, storage: "d1", replay_queued: false };
+  } catch (error) {
+    if (slug !== "amaro" || !isD1CapacityError(error)) throw error;
+    const item = optimisticCatalogItem(prepared);
+    const replayQueued = await enqueueDeferredMutation(env, "catalog_item", prepared);
+    if (!replayQueued) throw new Error("catalog_mutation_queue_unavailable");
+    await cacheCatalogItemMutation(env, slug, item);
+    return { item, storage: "kv_pending_d1", replay_queued: true };
+  }
+}
+
 async function saveCatalogItem(db, payload) {
   const slug = normalizeSlug(payload.slug || "amaro");
   const restaurant = await requireRestaurant(db, slug);
-  assertRestaurantToken(restaurant, payload.token);
+  await assertRestaurantToken(restaurant, payload.token);
 
   const name = boundedText(payload.name, 140);
   if (!name) throw httpError("catalog_item_name_required", 400);
@@ -768,7 +2073,7 @@ async function saveCatalogItem(db, payload) {
     ? await db.prepare("SELECT * FROM catalog_items WHERE id = ? AND restaurant_id = ? LIMIT 1")
       .bind(requestedId, restaurant.id).first()
     : null;
-  if (requestedId && !existing) throw httpError("catalog_item_not_found", 404);
+  if (requestedId && !existing && !payload.allow_create_with_id) throw httpError("catalog_item_not_found", 404);
 
   const sectionTitle = boundedText(payload.section_title || payload.sectionTitle || existing?.section_title || payload.category || "Catálogo", 100);
   const sectionId = cleanIdentifier(
@@ -776,7 +2081,7 @@ async function saveCatalogItem(db, payload) {
     100
   ) || "catalogo";
   const now = new Date().toISOString();
-  const id = existing?.id || `catalog_${slug}_${crypto.randomUUID()}`;
+  const id = existing?.id || requestedId || `catalog_${slug}_${crypto.randomUUID()}`;
   let sortOrder = Number(payload.sort_order ?? payload.sortOrder ?? existing?.sort_order);
   if (!Number.isFinite(sortOrder)) {
     const last = await db.prepare(`
@@ -803,6 +2108,7 @@ async function saveCatalogItem(db, payload) {
       sort_order = excluded.sort_order,
       is_active = 1,
       updated_at = excluded.updated_at
+    WHERE catalog_items.restaurant_id = excluded.restaurant_id
   `).bind(
     id,
     restaurant.id,
@@ -829,12 +2135,300 @@ function boundedText(value, maxLength) {
   return String(value || "").trim().slice(0, maxLength);
 }
 
-async function getMenu(db, slug, date = "") {
+function menuCacheKey(slug, date) {
+  return ["menu", MENU_CACHE_VERSION, normalizeSlug(slug), normalizeDate(date)].join(":");
+}
+
+function menuHistoryKey(slug) {
+  return ["menu-history", MENU_CACHE_VERSION, normalizeSlug(slug)].join(":");
+}
+
+function fallbackRestaurant(slug = "amaro") {
+  const normalizedSlug = normalizeSlug(slug);
+  return {
+    id: `rest_${normalizedSlug}`,
+    slug: normalizedSlug,
+    name: normalizedSlug === "amaro" ? "Amaro Café" : titleize(normalizedSlug),
+  };
+}
+
+function stableTextHash(value) {
+  let hash = 2166136261;
+  for (const character of String(value || "")) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function normalizeCachedMenuRecord(record, defaultSource = "platform") {
+  const menu = record?.menu || {};
+  const slug = normalizeSlug(record?.restaurant?.slug || record?.slug || "amaro");
+  const date = normalizeDate(menu.date || record?.date) || todayIso();
+  const source = String(record?.response_source || record?.source || defaultSource || "platform");
+  const menuId = String(menu.id || record?.menu_id || `menu_${slug}_${date}`);
+  const items = (Array.isArray(record?.items) ? record.items : []).slice(0, 30).map((item, index) => ({
+    id: String(item.id || `item_${slug}_${date}_${index + 1}_${stableTextHash(item.name)}`),
+    menu_day_id: menuId,
+    name: boundedText(item.name, 140),
+    category: boundedText(item.category || "Executivo", 100),
+    description: boundedText(item.description, 1200),
+    price: boundedText(item.price, 40),
+    image_url: boundedText(item.image_url || item.imageUrl, 1000),
+    is_highlight: toBooleanInteger(item.is_highlight ?? item.isHighlight ?? 1),
+    sort_order: Number(item.sort_order || item.sortOrder || index + 1),
+    created_at: item.created_at || menu.created_at || record?.received_at || new Date().toISOString(),
+  })).filter((item) => item.name);
+  const fingerprint = stableTextHash(`${date}|${items.map((item) => normalizeKey(item.name)).sort().join("|")}`);
+  return {
+    restaurant: publicRestaurant({ ...fallbackRestaurant(slug), ...(record?.restaurant || {}), slug }),
+    menu: {
+      id: menuId,
+      restaurant_id: String(menu.restaurant_id || record?.restaurant?.id || `rest_${slug}`),
+      date,
+      title: boundedText(menu.title || record?.title || "Almoço de Hoje", 180),
+      price: boundedText(menu.price || record?.price, 40),
+      service_hours: boundedText(menu.service_hours || menu.serviceHours || record?.service_hours, 100),
+      story_link: boundedText(menu.story_link || menu.storyLink || record?.story_link, 1000),
+      notes: boundedText(menu.notes || record?.notes, 1200),
+      is_published: toBooleanInteger(menu.is_published ?? menu.isPublished ?? 1),
+      published_at: menu.published_at || menu.publishedAt || record?.received_at || new Date().toISOString(),
+      created_at: menu.created_at || menu.createdAt || record?.received_at || new Date().toISOString(),
+      updated_at: menu.updated_at || menu.updatedAt || record?.received_at || new Date().toISOString(),
+    },
+    items,
+    response_source: source,
+    response_id: String(record?.response_id || `${source}:${date}:${fingerprint}`),
+    received_at: record?.received_at || menu.updated_at || menu.created_at || new Date().toISOString(),
+  };
+}
+
+function sourcePriority(source) {
+  if (source === "platform") return 3;
+  if (source === "d1") return 2;
+  if (source === "google_forms") return 1;
+  return 0;
+}
+
+async function readMenuHistory(env, slug) {
+  if (!env.INSIGHTS_CACHE) return [];
+  try {
+    return await env.INSIGHTS_CACHE.get(menuHistoryKey(slug), "json") || [];
+  } catch (error) {
+    console.warn("QrStack menu history cache read failed", { error: error?.message || String(error) });
+    return [];
+  }
+}
+
+async function mergeMenuHistory(env, slug, incomingRecords) {
+  if (!env.INSIGHTS_CACHE) return [];
+  const current = await readMenuHistory(env, slug);
+  const byId = new Map(current.map((record) => [record.response_id, record]));
+  incomingRecords.forEach((record) => {
+    const normalized = normalizeCachedMenuRecord(record, record.response_source);
+    const previous = byId.get(normalized.response_id);
+    if (!previous || String(normalized.received_at) >= String(previous.received_at)) byId.set(normalized.response_id, normalized);
+  });
+  const merged = [...byId.values()]
+    .sort((a, b) => String(b.received_at || b.menu?.date).localeCompare(String(a.received_at || a.menu?.date)))
+    .slice(0, 500);
+  await env.INSIGHTS_CACHE.put(menuHistoryKey(slug), JSON.stringify(merged));
+  return merged;
+}
+
+async function cacheMenuRecord(env, record) {
+  if (!env.INSIGHTS_CACHE || !record?.menu?.date) return record;
+  const normalized = normalizeCachedMenuRecord(record, record.response_source);
+  const key = menuCacheKey(normalized.restaurant.slug, normalized.menu.date);
+  const existing = await env.INSIGHTS_CACHE.get(key, "json");
+  if (!existing || sourcePriority(normalized.response_source) >= sourcePriority(existing.response_source)) {
+    await env.INSIGHTS_CACHE.put(key, JSON.stringify(normalized));
+  }
+  await mergeMenuHistory(env, normalized.restaurant.slug, [normalized]);
+  return normalized;
+}
+
+async function readCachedMenu(env, slug, date = "") {
+  if (!env.INSIGHTS_CACHE) return null;
+  if (date) return env.INSIGHTS_CACHE.get(menuCacheKey(slug, date), "json");
+  const history = await readMenuHistory(env, slug);
+  return getVisibleResponses(history)[0] || null;
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (quoted) {
+      if (character === '"' && text[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else if (character === '"') quoted = false;
+      else field += character;
+    } else if (character === '"') quoted = true;
+    else if (character === ",") {
+      row.push(field);
+      field = "";
+    } else if (character === "\n") {
+      row.push(field.replace(/\r$/, ""));
+      rows.push(row);
+      row = [];
+      field = "";
+    } else field += character;
+  }
+  if (field || row.length) {
+    row.push(field.replace(/\r$/, ""));
+    rows.push(row);
+  }
+  return rows;
+}
+
+function brazilianDateToIso(value) {
+  const match = String(value || "").match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : normalizeDate(value);
+}
+
+function brazilianTimestampToIso(value) {
+  const match = String(value || "").match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}):(\d{2}))?/);
+  if (!match) return normalizeTimestamp(value) || new Date().toISOString();
+  return `${match[3]}-${match[2]}-${match[1]}T${match[4] || "00"}:${match[5] || "00"}:${match[6] || "00"}-03:00`;
+}
+
+async function fetchGoogleFormRecords(date = "") {
+  const query = date
+    ? `select A,B,C,D,E,F,G,H,I where B = date '${date}' order by A desc`
+    : "select A,B,C,D,E,F,G,H,I order by A desc";
+  const url = new URL(`https://docs.google.com/spreadsheets/d/${AMARO_FORM_SHEET_ID}/gviz/tq`);
+  url.searchParams.set("tqx", "out:csv");
+  url.searchParams.set("sheet", AMARO_FORM_SHEET_NAME);
+  url.searchParams.set("tq", query);
+  const response = await fetch(url.toString(), { headers: { accept: "text/csv" } });
+  if (!response.ok) throw new Error(`google_forms_sync_failed:${response.status}`);
+  const rows = parseCsv(await response.text()).slice(1);
+  return rows.map((row) => {
+    const responseDate = brazilianDateToIso(row[1]);
+    const receivedAt = brazilianTimestampToIso(row[0]);
+    const names = row.slice(2, 9).map((name) => String(name || "").trim()).filter(Boolean);
+    if (!responseDate || !names.length) return null;
+    const fingerprint = stableTextHash(`${responseDate}|${names.map(normalizeKey).sort().join("|")}`);
+    const menuId = `menu_amaro_${responseDate}_forms_${fingerprint}`;
+    return normalizeCachedMenuRecord({
+      restaurant: fallbackRestaurant("amaro"),
+      menu: {
+        id: menuId,
+        restaurant_id: "rest_amaro",
+        date: responseDate,
+        title: "Almoço de Hoje",
+        service_hours: "11h às 15h",
+        is_published: 1,
+        published_at: receivedAt,
+        created_at: receivedAt,
+        updated_at: receivedAt,
+      },
+      items: names.map((name, index) => ({ name, category: "Executivo", is_highlight: 1, sort_order: index + 1 })),
+      response_source: "google_forms",
+      response_id: `google_forms:${responseDate}:${fingerprint}`,
+      received_at: receivedAt,
+    }, "google_forms");
+  }).filter(Boolean);
+}
+
+async function syncGoogleFormDate(env, date) {
+  try {
+    const records = await fetchGoogleFormRecords(date);
+    if (!records.length) return [];
+    const latest = records.sort((a, b) => String(b.received_at).localeCompare(String(a.received_at)))[0];
+    await cacheMenuRecord(env, latest);
+    return records;
+  } catch (error) {
+    console.warn("QrStack Google Forms daily sync failed", { date, error: error?.message || String(error) });
+    return [];
+  }
+}
+
+async function syncGoogleFormHistory(env) {
+  try {
+    const records = await fetchGoogleFormRecords();
+    await mergeMenuHistory(env, "amaro", records);
+    return records;
+  } catch (error) {
+    console.warn("QrStack Google Forms history sync failed", { error: error?.message || String(error) });
+    return [];
+  }
+}
+
+function getVisibleResponses(records) {
+  const datesWithPrimary = new Set(records
+    .filter((record) => sourcePriority(record.response_source) >= sourcePriority("d1"))
+    .map((record) => record.menu?.date));
+  return records
+    .filter((record) => record.response_source !== "google_forms" || !datesWithPrimary.has(record.menu?.date))
+    .sort((a, b) => String(b.received_at || b.menu?.date).localeCompare(String(a.received_at || a.menu?.date)));
+}
+
+async function getVisibleMenuResponses(env, slug) {
+  return getVisibleResponses(await readMenuHistory(env, slug));
+}
+
+async function backfillD1MenuCache(env, slug = "amaro") {
+  const normalizedSlug = normalizeSlug(slug);
+  const restaurant = await requireRestaurant(env.DB, normalizedSlug);
+  const menuRows = await env.DB.prepare(`
+    SELECT * FROM menu_days
+    WHERE restaurant_id = ?
+    ORDER BY date DESC, updated_at DESC
+    LIMIT 180
+  `).bind(restaurant.id).all();
+  const menus = menuRows.results || [];
+  if (!menus.length) return { cached: 0 };
+  const placeholders = menus.map(() => "?").join(",");
+  const itemRows = await env.DB.prepare(`
+    SELECT * FROM menu_items
+    WHERE menu_day_id IN (${placeholders})
+    ORDER BY menu_day_id, sort_order, name
+  `).bind(...menus.map((menu) => menu.id)).all();
+  const items = itemRows.results || [];
+  for (const menu of menus) {
+    await cacheMenuRecord(env, normalizeCachedMenuRecord({
+      restaurant,
+      menu,
+      items: items.filter((item) => item.menu_day_id === menu.id),
+      response_source: "d1",
+      response_id: `d1:${menu.id}`,
+      received_at: menu.updated_at || menu.created_at,
+    }, "d1"));
+  }
+  return { cached: menus.length };
+}
+
+async function getMenu(env, slug, date = "") {
+  const normalizedSlug = normalizeSlug(slug);
+  let cached = await readCachedMenu(env, normalizedSlug, date);
+  if (cached) return cached;
+  if (normalizedSlug === "amaro" && date) {
+    await syncGoogleFormDate(env, date);
+    cached = await readCachedMenu(env, normalizedSlug, date);
+    if (cached) return cached;
+  }
+  try {
+    const result = await getMenuD1(env.DB, normalizedSlug, date);
+    if (result.menu) await cacheMenuRecord(env, normalizeCachedMenuRecord({ ...result, response_source: "d1" }, "d1"));
+    return result;
+  } catch (error) {
+    if (!isD1CapacityError(error)) throw error;
+    return { restaurant: fallbackRestaurant(normalizedSlug), menu: null, items: [], cache_status: "d1_quota_no_cached_menu" };
+  }
+}
+
+async function getMenuD1(db, slug, date = "") {
   const restaurant = await requireRestaurant(db, normalizeSlug(slug));
   const menu = date
-    ? await db.prepare("SELECT * FROM menu_days WHERE restaurant_id = ? AND date = ? ORDER BY updated_at DESC LIMIT 1")
+    ? await db.prepare("SELECT * FROM menu_days WHERE restaurant_id = ? AND date = ? AND is_published = 1 ORDER BY updated_at DESC LIMIT 1")
       .bind(restaurant.id, date).first()
-    : await db.prepare("SELECT * FROM menu_days WHERE restaurant_id = ? ORDER BY date DESC, updated_at DESC LIMIT 1")
+    : await db.prepare("SELECT * FROM menu_days WHERE restaurant_id = ? AND is_published = 1 ORDER BY date DESC, updated_at DESC LIMIT 1")
       .bind(restaurant.id).first();
   if (!menu) return { restaurant, menu: null, items: [] };
   const items = await db.prepare("SELECT * FROM menu_items WHERE menu_day_id = ? ORDER BY sort_order, name")
@@ -842,10 +2436,59 @@ async function getMenu(db, slug, date = "") {
   return { restaurant, menu, items: items.results || [] };
 }
 
-async function saveMenuDay(db, payload) {
+async function saveMenuDay(env, payload, request) {
+  const slug = normalizeSlug(payload.slug || "amaro");
+  const tenant = await authorizeTenant(env, request, slug, payload.token);
+  // Menu identities are derived from the authenticated tenant, not client input.
+  payload = { ...payload, slug, token: tenant.admin_token,
+    menu_id: `menu_${slug}_${normalizeDate(payload.date) || todayIso()}` };
+  const now = new Date().toISOString();
+  const cachedPayload = normalizeCachedMenuRecord({
+    slug,
+    menu: {
+      id: payload.menu_id || payload.menuId || `menu_${slug}_${normalizeDate(payload.date) || todayIso()}`,
+      date: normalizeDate(payload.date) || todayIso(),
+      title: payload.title,
+      price: payload.price,
+      service_hours: payload.service_hours || payload.serviceHours,
+      story_link: payload.story_link || payload.storyLink,
+      notes: payload.notes,
+      is_published: 1,
+      published_at: now,
+      created_at: now,
+      updated_at: now,
+    },
+    items: payload.items,
+    response_source: "platform",
+    received_at: now,
+  }, "platform");
+  if (slug === "amaro") await cacheMenuRecord(env, cachedPayload);
+  try {
+    const saved = await saveMenuDayD1(env.DB, payload);
+    const cached = normalizeCachedMenuRecord({ ...saved, response_source: "platform", received_at: now }, "platform");
+    await cacheMenuRecord(env, cached);
+    return { ...saved, storage: "d1" };
+  } catch (error) {
+    if (slug !== "amaro" || !isD1CapacityError(error)) throw error;
+    const replayQueued = await enqueueDeferredMutation(env, "menu_day", {
+      ...payload,
+      slug,
+      menu_id: cachedPayload.menu.id,
+    });
+    return {
+      ...cachedPayload,
+      duplicate: false,
+      storage: "kv_pending_d1",
+      fallback_reason: "d1_read_quota",
+      replay_queued: replayQueued,
+    };
+  }
+}
+
+async function saveMenuDayD1(db, payload) {
   const slug = normalizeSlug(payload.slug || "amaro");
   const restaurant = await requireRestaurant(db, slug);
-  assertRestaurantToken(restaurant, payload.token);
+  await assertRestaurantToken(restaurant, payload.token);
   const date = normalizeDate(payload.date) || todayIso();
   const menuId = payload.menu_id || payload.menuId || `menu_${slug}_${date}`;
   const now = new Date().toISOString();
@@ -874,7 +2517,7 @@ async function saveMenuDay(db, payload) {
       .bind(menuId).all();
     const existingItems = existingItemsResult.results || [];
     if (menuContentFingerprint(existingMenu, existingItems) === menuContentFingerprint(incomingMenu, incomingItems)) {
-      return { ...(await getMenu(db, slug, date)), duplicate: true };
+      return { ...(await getMenuD1(db, slug, date)), duplicate: true };
     }
   }
 
@@ -894,6 +2537,7 @@ async function saveMenuDay(db, payload) {
         is_published = 1,
         published_at = excluded.published_at,
         updated_at = excluded.updated_at
+      WHERE menu_days.restaurant_id = excluded.restaurant_id
     `).bind(
       menuId,
       restaurant.id,
@@ -907,12 +2551,13 @@ async function saveMenuDay(db, payload) {
       now,
       now
     ),
-    db.prepare("DELETE FROM menu_items WHERE menu_day_id = ?").bind(menuId),
+    db.prepare("DELETE FROM menu_items WHERE menu_day_id = ? AND EXISTS (SELECT 1 FROM menu_days WHERE id = ? AND restaurant_id = ?)").bind(menuId, menuId, restaurant.id),
     ...incomingItems.map((item, index) => db.prepare(`
       INSERT INTO menu_items (
         id, menu_day_id, name, category, description, price, image_url,
         is_highlight, sort_order, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM menu_days WHERE id = ? AND restaurant_id = ?)
     `).bind(
       `item_${menuId}_${index + 1}_${normalizeKey(item.name).slice(0, 40)}`,
       menuId,
@@ -923,11 +2568,13 @@ async function saveMenuDay(db, payload) {
       item.image_url,
       item.is_highlight,
       item.sort_order,
-      now
+      now,
+      menuId,
+      restaurant.id
     )),
   ];
   await db.batch(statements);
-  return { ...(await getMenu(db, slug, date)), duplicate: false };
+  return { ...(await getMenuD1(db, slug, date)), duplicate: false };
 }
 
 function menuContentFingerprint(menu, items) {
@@ -950,9 +2597,9 @@ function menuContentFingerprint(menu, items) {
   });
 }
 
-function assertRestaurantToken(restaurant, receivedToken) {
+async function assertRestaurantToken(restaurant, receivedToken) {
   const expected = String(restaurant.admin_token || "");
-  if (!expected || String(receivedToken || "") !== expected) {
+  if (!await equalTenantToken(receivedToken, expected)) {
     const error = new Error("unauthorized");
     error.status = 401;
     throw error;
@@ -961,7 +2608,17 @@ function assertRestaurantToken(restaurant, receivedToken) {
 
 function eventWhere(slug, bounds = null, extraSql = "") {
   const normalizedBounds = bounds || {};
-  const clauses = ["restaurant_slug = ?", "is_test_event = 0"];
+  const clauses = [
+    "restaurant_slug = ?",
+    "is_test_event = 0",
+    `(event_type <> 'page_view' OR id NOT LIKE 'recovered-pageview:%' OR NOT EXISTS (
+      SELECT 1 FROM analytics_events real_pageview
+      WHERE real_pageview.restaurant_slug = analytics_events_normalized.restaurant_slug
+        AND real_pageview.session_id = analytics_events_normalized.session_id
+        AND real_pageview.event_type = 'page_view'
+        AND real_pageview.id NOT LIKE 'recovered-pageview:%'
+    ))`,
+  ];
   const params = [slug];
   if (normalizedBounds.start) {
     clauses.push("created_at >= ?");
@@ -1070,7 +2727,7 @@ function json(payload, status = 200, headers = JSON_HEADERS) {
 
 function jsonp(url, payload, status = 200, headers = JSON_HEADERS) {
   const callback = url.searchParams.get("callback");
-  if (!callback) return json(payload, status, headers);
+  if (!callback || headers['cache-control'] === 'no-store') return json(payload, status, headers);
   const safeCallback = callback.replace(/[^\w.$]/g, "");
   return new Response(`${safeCallback}(${JSON.stringify(payload)});`, {
     status,
@@ -1082,9 +2739,13 @@ function buildDateBounds(filters) {
   const start = normalizeDate(filters.startDate);
   const end = normalizeDate(filters.endDate);
   return {
-    start: start ? `${start}T00:00:00.000Z` : "",
-    endExclusive: end ? `${addDays(end, 1)}T00:00:00.000Z` : "",
+    start: start ? dateStartUtc(start) : "",
+    endExclusive: end ? dateStartUtc(addDays(end, 1)) : "",
   };
+}
+
+function dateStartUtc(isoDate) {
+  return `${isoDate}T03:00:00.000Z`;
 }
 
 function normalizeDate(value) {
@@ -1163,7 +2824,7 @@ function peakHourFromCounts(counts) {
   const entries = Object.entries(counts || {}).sort((a, b) => b[1] - a[1]);
   if (!entries.length) return "";
   const [hour, count] = entries[0];
-  return `${hour}h com ${count} acesso${count === 1 ? "" : "s"}`;
+  return `${hour}h com ${Number(count).toLocaleString("pt-BR")} acesso${count === 1 ? "" : "s"}`;
 }
 
 function periodLabel(startDate, endDate) {
@@ -1172,14 +2833,19 @@ function periodLabel(startDate, endDate) {
   return `${startDate || "início"} até ${endDate || todayIso()}`;
 }
 
-function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+function todayIso(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: BUSINESS_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 function daysAgoIso(days) {
-  const date = new Date();
-  date.setUTCDate(date.getUTCDate() - Number(days || 0));
-  return date.toISOString().slice(0, 10);
+  return addDays(todayIso(), -Number(days || 0));
 }
 
 function addDays(isoDate, days) {

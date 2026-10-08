@@ -46,6 +46,7 @@ function renderWorkspace({ active = "overview", title, subtitle = "", content, r
         <p class="sidebar-label">${client ? "Restaurante" : "Workspace"}</p>
         <nav class="workspace-nav">${links.map((link) => navItem(link)).join("")}</nav>
         <div class="sidebar-bottom">
+          ${!client ? `<button type="button" class="workspace-nav-item" data-owner-logout>${uiIcon("arrow-left")}<span>Sair da gestão</span></button>` : ""}
           <a class="workspace-nav-item" href="${client && owner ? ownerLink() : "#/home"}">${uiIcon(client && owner ? "arrow-left" : "layers")}<span>${client && owner ? "Voltar à central" : "Trocar acesso"}</span></a>
           <div class="sidebar-account"><span class="account-avatar">${client ? "A" : "Q"}</span><div><strong>${client ? restaurant.name : "Administração"}</strong><small>${client ? "Restaurante" : "QrStack"}</small></div><span class="account-dot" title="Sessão aberta"></span></div>
         </div>
@@ -89,7 +90,7 @@ async function hydrateWorkspaceOverview() {
   if (!target) return;
   try {
     const restaurant = getRestaurant(ACTIVE_CLIENT_SLUG);
-    const data = await endpointGet(restaurant.analyticsEndpoint || QRSTACK_API_URL, "getInsights", { slug: restaurant.slug, key: OWNER_ACCESS_TOKEN });
+    const data = await endpointGet(restaurant.analyticsEndpoint || QRSTACK_API_URL, "getInsights", { slug: restaurant.slug, key: OWNER_SESSION_TOKEN });
     if (!target.isConnected) return;
     const stats = data.insights || {};
     target.innerHTML = `<div class="kpi-strip">${workspaceKpi("Acessos ao cardápio", stats.total_accesses ?? stats.total_page_views, "Histórico completo", "scan-line")}${workspaceKpi("Visitantes únicos", stats.unique_visitors_total, "Identidades rastreáveis", "users")}${workspaceKpi("Visitantes recorrentes", stats.returning_visitors_total, "Duas ou mais sessões", "refresh-cw")}${workspaceKpi("Instagram → Direto", stats.instagram_to_direct?.instagram_to_direct_visitors, "Identidades que retornaram", "arrow-up-right")}</div><div class="data-footnote">${uiIcon("activity")}Leitura ${stats.collected_at ? formatDateTime(stats.collected_at) : "recebida da base"}<span>${data.analytics_storage?.ingestion_status === "fallback_active" ? "Contingência ativa" : data.analytics_storage?.dashboard_status === "cached_snapshot" ? "Consolidado salvo" : "Base analítica"}</span></div>`;
@@ -146,8 +147,8 @@ function filterWorkspaceCatalog() {
 
 function renderWorkspaceLinks() {
   const restaurant = getRestaurant(ACTIVE_CLIENT_SLUG);
-  const links = [["Cardápio público", "external-link", restaurantOriginalMenuUrl(restaurant, "platform")], ["Instagram", "smartphone", restaurantOriginalMenuUrl(restaurant, "instagram")], ["WhatsApp", "link", restaurantOriginalMenuUrl(restaurant, "whatsapp")], ["QR Code", "scan-line", restaurantOriginalMenuUrl(restaurant, "qr")], ["Acesso do restaurante", "store", restaurantAccessUrl(restaurant)]];
-  return `<section>${renderRestaurantRow(restaurant)}<div class="section-title-row"><h2>Links do restaurante</h2><span>${escapeHtml(restaurant.name)}</span></div><div class="workspace-link-list">${links.map(([label, icon, url]) => `<div class="workspace-link-row">${uiIcon(icon)}<div><strong>${label}</strong><span>${escapeHtml(url)}</span></div><button class="icon-button" type="button" data-copy="${escapeAttr(url)}" aria-label="Copiar ${label}" title="Copiar ${label}">${uiIcon("copy")}</button><a class="icon-button" href="${escapeAttr(url)}" target="_blank" rel="noreferrer" title="Abrir ${label}" aria-label="Abrir ${label}">${uiIcon("arrow-up-right")}</a></div>`).join("")}</div><p class="data-footnote">${uiIcon("circle-help")}A origem só é identificada por QR quando o link contém a marcação de QR Code.</p></section>`;
+  const links = [["Cardápio público", "external-link", restaurantOriginalMenuUrl(restaurant, "platform")], ["Instagram", "smartphone", restaurantOriginalMenuUrl(restaurant, "instagram")], ["WhatsApp", "link", restaurantOriginalMenuUrl(restaurant, "whatsapp")], ["QR Code", "scan-line", restaurantOriginalMenuUrl(restaurant, "qr")]];
+  return `<section>${renderRestaurantRow(restaurant)}<div class="section-title-row"><h2>Links do restaurante</h2><span>${escapeHtml(restaurant.name)}</span></div><div class="workspace-link-list">${links.map(([label, icon, url]) => `<div class="workspace-link-row">${uiIcon(icon)}<div><strong>${label}</strong><span>${escapeHtml(url)}</span></div><button class="icon-button" type="button" data-copy="${escapeAttr(url)}" aria-label="Copiar ${label}" title="Copiar ${label}">${uiIcon("copy")}</button><a class="icon-button" href="${escapeAttr(url)}" target="_blank" rel="noreferrer" title="Abrir ${label}" aria-label="Abrir ${label}">${uiIcon("arrow-up-right")}</a></div>`).join("")}</div><div class="workspace-link-row">${uiIcon("store")}<div><strong>Acesso privado do restaurante</strong><span>Copie apenas quando precisar compartilhar com a equipe autorizada.</span></div><button class="button secondary" type="button" data-copy-client-access="${escapeAttr(restaurant.slug)}">Copiar link privado</button></div><p class="data-footnote">${uiIcon("circle-help")}A origem só é identificada por QR quando o link contém a marcação de QR Code.</p></section>`;
 }
 
 function setWorkspaceInsightsView(view = workspaceInsightView) {
