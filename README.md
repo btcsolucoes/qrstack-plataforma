@@ -45,8 +45,13 @@ de acessar ou substituir registros de outro restaurante. Respostas públicas
 usam listas de campos permitidos, inclusive para snapshots antigos. Credenciais,
 notas internas, fontes privadas e mensagens de erro de infraestrutura não são
 expostas. O frontend não tem acesso direto ao banco, token estático de cliente,
-JSONP autenticado ou cache persistente de analytics. O token antigo do Amaro
-foi rotacionado no D1 e nos caches privados em 2026-10-07 porque esteve no histórico público.
+JSONP autenticado ou cache persistente de analytics. Em 2026-10-08, o acesso
+compartilhado anterior do Amaro foi restabelecido no D1 e nos caches privados
+por solicitação explícita do gestor, para preservar o link já distribuído.
+Esse link funciona como credencial do restaurante: seus portadores podem alterar
+o cardápio. Ele não autentica a gestão QrStack e continua sujeito ao plano do cliente.
+O token não deve ser novamente embutido no frontend nem tratado como segredo
+forte, pois já esteve no histórico público.
 
 ### Senha e recuperação
 
