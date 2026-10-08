@@ -17,7 +17,7 @@ const failure = (error, status) => ({ ok: false, error, status });
 const SESSION_MS = 4 * 60 * 60 * 1000;
 const RESET_MS = 15 * 60 * 1000;
 const randomToken = () => hex(crypto.getRandomValues(new Uint8Array(32)));
-const passwordAllowed = password => typeof password === 'string' && password.length >= 12 && password.length <= 128 && password === password.trim();
+const passwordAllowed = password => typeof password === 'string' && password.length >= 8 && password.length <= 128 && password === password.trim();
 const RATE_POLICIES = {
   login: [10, 300], legacy_auth: [120, 60], password_change: [5, 900],
   reset_request: [3, 900], reset_submit: [10, 900], reset_delivery: [3, 3600],

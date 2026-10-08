@@ -535,3 +535,11 @@ body:not(.public-mode) .insight-bar { display: block; width: 100%; min-height: 0
 .owner-password-form input { width: 100%; min-height: 44px; box-sizing: border-box; }
 .owner-password-form button { justify-self: start; }
 .owner-password-form p { margin: 0 0 8px; }
+.password-input { position: relative; width: 100%; }
+body:not(.public-mode) .password-input input { padding-right: 90px; }
+body:not(.public-mode) .password-input .password-toggle { position: absolute; right: 4px; top: 4px; bottom: 4px; min-height: 36px; padding: 4px 10px; border-radius: 4px; background: #edf3ef; color: #245c4c; font-size: 12px; }
+body:not(.public-mode) .password-input .password-toggle:hover { background: #dceae1; }
+body:not(.public-mode) .password-feedback { font-size: 12px; line-height: 1.5; color: var(--muted); min-height: 18px; }
+body:not(.public-mode) .password-feedback[data-state="valid"] { color: #246747; }
+body:not(.public-mode) .password-feedback[data-state="invalid"] { color: #a72f2f; }
+body:not(.public-mode) .password-input input[aria-invalid="true"] { border-color: #ba5555; }

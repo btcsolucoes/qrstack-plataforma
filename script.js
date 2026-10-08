@@ -1070,6 +1070,61 @@ function renderHome() {
     </div>`;
 }
 
+function renderPasswordInput(id, name, label, { autocomplete = "new-password", purpose = "", describedBy = "", placeholder = "" } = {}) {
+  const visibilityLabel = label === "Confirmar nova senha" ? "confirmação da nova senha" : label.toLowerCase();
+  return `<label for="${id}">${label}</label><div class="password-input">
+    <input id="${id}" name="${name}" type="password" autocomplete="${autocomplete}" maxlength="128" required data-password-input
+      ${purpose ? `data-password-${purpose} minlength="8"` : ""} ${describedBy ? `aria-describedby="${describedBy}"` : ""} ${placeholder ? `placeholder="${placeholder}"` : ""} />
+    <button type="button" class="password-toggle" data-password-toggle aria-controls="${id}" aria-label="Mostrar ${visibilityLabel}" aria-pressed="false">Mostrar</button>
+  </div>`;
+}
+
+function passwordFeedback(password, confirmation) {
+  const valid = password.length >= 8 && password.length <= 128 && password === password.trim();
+  return { valid, matches: valid && confirmation === password,
+    error: !valid ? "Use de 8 a 128 caracteres, sem espaços no início ou no fim." : confirmation !== password ? "A confirmação precisa ser igual à nova senha." : "" };
+}
+
+function updatePasswordFeedback(form) {
+  const password = form?.querySelector("[data-password-new]");
+  const confirmation = form?.querySelector("[data-password-confirm]");
+  if (!password || !confirmation) return true;
+  const result = passwordFeedback(password.value, confirmation.value);
+  const rules = form.querySelector("[data-password-rules]");
+  const match = form.querySelector("[data-password-match]");
+  rules.dataset.state = !password.value ? "idle" : result.valid ? "valid" : "invalid";
+  rules.textContent = !password.value ? "Mínimo de 8 caracteres. Caracteres especiais são opcionais." : result.valid ? "Comprimento válido. Caracteres especiais são opcionais." : "Use de 8 a 128 caracteres, sem espaços no início ou no fim.";
+  match.dataset.state = !confirmation.value ? "idle" : result.matches ? "valid" : "invalid";
+  match.textContent = !confirmation.value ? "Repita a nova senha para confirmar." : result.matches ? "As senhas coincidem." : "As senhas ainda não coincidem.";
+  password.setAttribute("aria-invalid", String(Boolean(password.value) && !result.valid));
+  confirmation.setAttribute("aria-invalid", String(Boolean(confirmation.value) && !result.matches));
+  password.setCustomValidity(password.value && !result.valid ? "Use de 8 a 128 caracteres, sem espaços no início ou no fim." : "");
+  confirmation.setCustomValidity(confirmation.value && !result.matches ? "A confirmação precisa ser igual à nova senha." : "");
+  return result.matches;
+}
+
+function setPasswordVisibility(input, visible) {
+  input.type = visible ? "text" : "password";
+  const button = input.closest(".password-input").querySelector("[data-password-toggle]");
+  button.textContent = visible ? "Ocultar" : "Mostrar";
+  button.setAttribute("aria-pressed", String(visible));
+  button.setAttribute("aria-label", button.getAttribute("aria-label").replace(/^(Mostrar|Ocultar)/, visible ? "Ocultar" : "Mostrar"));
+}
+
+function hidePasswords(root = document) {
+  root.querySelectorAll("[data-password-input]").forEach(input => setPasswordVisibility(input, false));
+}
+
+document.addEventListener("input", event => {
+  if (event.target.matches("[data-password-new], [data-password-confirm]")) updatePasswordFeedback(event.target.form);
+});
+document.addEventListener("change", event => {
+  if (event.target.matches("[data-password-new], [data-password-confirm]")) updatePasswordFeedback(event.target.form);
+});
+document.addEventListener("keydown", event => { if (event.key === "Escape") hidePasswords(); });
+document.addEventListener("visibilitychange", () => { if (document.hidden) hidePasswords(); });
+window.addEventListener("blur", () => hidePasswords());
+
 function renderOwnerGate() {
   setSystemTheme();
   app.innerHTML = `
@@ -1080,8 +1135,7 @@ function renderOwnerGate() {
         <h1>Central QrStack</h1>
         <p>Informe sua senha para abrir o ambiente de gestão.</p>
         <form class="access-form" data-owner-access>
-          <label for="owner-access-key">Senha da gestão</label>
-          <input id="owner-access-key" name="ownerAccessKey" type="password" autocomplete="current-password" placeholder="Digite sua senha" required />
+          ${renderPasswordInput("owner-access-key", "ownerAccessKey", "Senha da gestão", { autocomplete: "current-password", placeholder: "Digite sua senha" })}
           <div class="actions">
             <button type="submit">Entrar na Central</button>
             <a class="button secondary" href="#/home">Voltar ao início</a>
@@ -1109,9 +1163,10 @@ function renderOwnerReset() {
   setSystemTheme();
   const content = ownerResetToken ? `<p>Escolha uma nova senha exclusiva para sua gestão.</p>
     <form class="access-form" data-owner-reset>
-      <label for="reset-password">Nova senha</label><input id="reset-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required />
-      <label for="reset-confirmation">Confirmar nova senha</label><input id="reset-confirmation" name="confirmation" type="password" autocomplete="new-password" minlength="12" maxlength="128" required />
-      <p>Use de 12 a 128 caracteres, sem espaços no início ou no fim.</p>
+      ${renderPasswordInput("reset-password", "password", "Nova senha", { purpose: "new", describedBy: "reset-guidance" })}
+      <p id="reset-guidance" class="password-feedback" data-password-rules data-state="idle" aria-live="polite">Mínimo de 8 caracteres. Caracteres especiais são opcionais.</p>
+      ${renderPasswordInput("reset-confirmation", "confirmation", "Confirmar nova senha", { purpose: "confirm", describedBy: "reset-match" })}
+      <p id="reset-match" class="password-feedback" data-password-match data-state="idle" role="status" aria-live="polite">Repita a nova senha para confirmar.</p>
       <button type="submit">Salvar nova senha</button><p data-auth-status role="status" aria-live="polite"></p>
     </form>` : `<p>Abra o link recebido por e-mail. Se ele expirou, solicite novas instruções.</p><a class="button" href="#/recuperar">Solicitar novo link</a>`;
   app.innerHTML = `<section class="entry-screen entry-screen--gate"><div class="access-panel"><img class="access-panel__logo" src="${ASSETS.qrstackWordmark}" alt="QrStack" /><h1>Redefinir senha</h1>${content}<a href="#/hq">Voltar ao acesso da gestão</a></div></section>`;
@@ -1194,13 +1249,11 @@ function renderOwnerPassword() {
   return `<section class="owner-password-card"><h2>Alterar senha da gestão</h2>
     <p>Escolha uma senha exclusiva para seu acesso à Central QrStack.</p>
     <form data-owner-password class="owner-password-form">
-      <label for="current-password">Senha atual</label>
-      <input id="current-password" name="currentPassword" type="password" autocomplete="current-password" maxlength="128" required />
-      <label for="new-password">Nova senha</label>
-      <input id="new-password" name="newPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128" aria-describedby="password-guidance" required />
-      <p id="password-guidance" class="muted">Use de 12 a 128 caracteres, sem espaços no início ou no fim. Você pode usar uma frase fácil de lembrar.</p>
-      <label for="confirm-password">Confirmar nova senha</label>
-      <input id="confirm-password" name="confirmPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128" required />
+      ${renderPasswordInput("current-password", "currentPassword", "Senha atual", { autocomplete: "current-password" })}
+      ${renderPasswordInput("new-password", "newPassword", "Nova senha", { purpose: "new", describedBy: "password-guidance" })}
+      <p id="password-guidance" class="password-feedback" data-password-rules data-state="idle" aria-live="polite">Mínimo de 8 caracteres. Caracteres especiais são opcionais.</p>
+      ${renderPasswordInput("confirm-password", "confirmPassword", "Confirmar nova senha", { purpose: "confirm", describedBy: "password-match" })}
+      <p id="password-match" class="password-feedback" data-password-match data-state="idle" role="status" aria-live="polite">Repita a nova senha para confirmar.</p>
       <button type="submit">Salvar nova senha</button>
       <p data-password-status role="status" aria-live="polite"></p>
     </form>
@@ -1228,19 +1281,20 @@ function attachOwnerPasswordHandler() {
     const current = form.elements.currentPassword.value;
     const next = form.elements.newPassword.value;
     const status = form.querySelector("[data-password-status]");
-    if (next !== form.elements.confirmPassword.value) { status.textContent = "A confirmação precisa ser igual à nova senha."; return; }
-    if (next !== next.trim()) { status.textContent = "Remova os espaços no início e no fim da nova senha."; return; }
-    const button = form.querySelector("button");
+    if (!updatePasswordFeedback(form)) { status.textContent = passwordFeedback(next, form.elements.confirmPassword.value).error; form.reportValidity(); return; }
+    const button = form.querySelector('button[type="submit"]');
     button.disabled = true;
+    hidePasswords(form);
     status.textContent = "Salvando sua nova senha...";
     try {
       await updateOwnerPassword(current, next);
       form.reset();
+      updatePasswordFeedback(form);
       status.textContent = "Senha alterada. Você continua conectado aqui. Use a nova senha nos próximos acessos.";
     } catch (error) {
       const messages = {
         unauthorized: "A senha atual está incorreta. Confira e tente novamente.",
-        invalid_new_password: "Use de 12 a 128 caracteres, sem espaços no início ou no fim.",
+        invalid_new_password: "Use de 8 a 128 caracteres, sem espaços no início ou no fim. Caracteres especiais são opcionais.",
         password_unchanged: "Escolha uma senha diferente da atual.",
         credential_changed: "A senha foi alterada em outro acesso. Entre novamente com a senha mais recente.",
         too_many_attempts: "Muitas tentativas. Aguarde cinco minutos antes de tentar novamente.",
@@ -3947,10 +4001,11 @@ document.addEventListener("submit", async (event) => {
     const button = form.querySelector('button[type="submit"]');
     if (button.disabled) return;
     const status = form.querySelector("[data-auth-status]");
-    if (resetForm && (form.elements.password.value !== form.elements.confirmation.value || form.elements.password.value !== form.elements.password.value.trim())) {
-      status.textContent = "Confira a confirmação e remova espaços no início ou no fim da senha."; return;
+    if (resetForm && !updatePasswordFeedback(form)) {
+      status.textContent = passwordFeedback(form.elements.password.value, form.elements.confirmation.value).error; form.reportValidity(); return;
     }
     button.disabled = true;
+    hidePasswords(form);
     status.textContent = "Aguarde...";
     try {
       if (recoveryForm) {
@@ -4009,6 +4064,12 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("click", async (event) => {
+  const passwordToggle = event.target.closest("[data-password-toggle]");
+  if (passwordToggle) {
+    const input = document.getElementById(passwordToggle.getAttribute("aria-controls"));
+    if (input) setPasswordVisibility(input, input.type === "password");
+    return;
+  }
   if (event.target.closest("[data-owner-logout]")) {
     event.preventDefault();
     try { await apiPost({action:"logoutOwner", owner_key: OWNER_SESSION_TOKEN}); }
