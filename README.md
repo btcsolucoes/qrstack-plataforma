@@ -35,6 +35,10 @@ limite por conta, com resposta genérica para não revelar endereços cadastrado
 O remetente precisa estar autorizado: o relay de Gmail está em
 `apps-script-recovery/`, como alternativa ao binding Cloudflare Email.
 Sem remetente configurado, a interface informa indisponibilidade, sem simular envio.
+Em 2026-10-08, o envio pelo Gmail foi ativado e a entrega de um link solicitado
+pela plataforma foi confirmada na caixa de entrada da gestão. Senhas e tokens
+de recuperação continuam sob controle do Worker; o Apps Script apenas envia o e-mail
+após validar a assinatura do servidor.
 
 ### Isolamento e dados públicos
 

@@ -1,8 +1,20 @@
 # Recuperação de senha pelo Gmail
 
 Este projeto separado permite enviar a recuperação usando o Gmail do gestor,
-sem domínio próprio e sem senha de aplicativo. Está pronto para implantação,
-mas o proprietário precisa autorizar a permissão de envio no Google.
+sem domínio próprio e sem senha de aplicativo. O proprietário precisa autorizar
+a permissão de envio no Google antes da primeira implantação.
+
+## Estado da implantação
+
+Em 2026-10-08, a autorização já concedida foi conferida, a versão 1 foi publicada
+e os secrets `GMAIL_RELAY_URL`, `GMAIL_RELAY_SECRET` e `OWNER_RECOVERY_EMAIL`
+foram configurados no Worker. Um pedido feito na tela pública de recuperação
+produziu um e-mail confirmado na caixa de entrada de `qrstack@gmail.com`.
+O link recebido abriu a tela de definição da nova senha. A senha da gestão não
+foi alterada durante essa validação. A cópia local da credencial do relay fica
+protegida por DPAPI; o arquivo temporário em texto simples foi removido.
+
+## Configuração em outro ambiente
 
 1. Abra `https://script.google.com/home/start` com a conta que enviará os e-mails.
 2. Crie um projeto separado e copie `Code.gs` e `appsscript.json` desta pasta.
