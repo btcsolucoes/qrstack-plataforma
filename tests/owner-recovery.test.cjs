@@ -24,6 +24,26 @@ async function fixture(t) {
   return { db, store, env, mails, call };
 }
 
+test('password changes accept eight plain characters and reject seven', async t => {
+  const f = await fixture(t);
+  const rejected = await f.call('changeOwnerPassword', { current_password: initial, new_password: 'abcdefg' });
+  assert.equal(rejected.status, 400);
+  assert.equal(rejected.data.error, 'invalid_new_password');
+  assert.equal((await f.store.verify(initial, 'verify')).ok, true);
+  assert.equal((await f.call('changeOwnerPassword', { current_password: initial, new_password: 'abcdefgh' })).status, 200);
+  assert.equal((await f.call('loginOwner', { password: 'abcdefgh' })).status, 200);
+});
+
+test('recovery accepts eight digits without special characters and preserves the link after rejected lengths', async t => {
+  const f = await fixture(t);
+  const reset = await f.store.issueReset('owner@example.test', 'owner@example.test');
+  for (const password of ['1234567', 'a'.repeat(129), ' 12345678']) {
+    assert.equal((await f.call('resetOwnerPassword', { token: reset.token, new_password: password })).data.error, 'invalid_new_password');
+  }
+  assert.equal((await f.call('resetOwnerPassword', { token: reset.token, new_password: '12345678' })).status, 200);
+  assert.equal((await f.call('loginOwner', { password: '12345678' })).status, 200);
+});
+
 test('sessions have bounded lifetimes, use hashed tokens and are revoked by logout and password changes', async t => {
   const f = await fixture(t);
   const login = await f.call('loginOwner', { password: initial });

@@ -59,7 +59,7 @@ forte, pois já esteve no histórico público.
 
 ### Senha e recuperação
 
-Em **Minha senha**, o gestor informa a senha atual e define outra com 12 a 128
+Em **Minha senha**, o gestor informa a senha atual e define outra com 8 a 128
 caracteres. A alteração vale imediatamente para as próximas requisições da gestão;
 os acessos dos restaurantes e a credencial do Apps Script não são alterados.
 A senha fica armazenada como hash PBKDF2 com salt exclusivo no Durable Object

@@ -40,9 +40,37 @@ test('owner password screen is private and keeps passwords masked', () => {
   assert.match(owner, /href="#\/hq\/senha"/);
   assert.equal((owner.match(/type="password"/g) || []).length, 3);
   assert.match(owner, /autocomplete="current-password"/);
-  assert.match(owner, /minlength="12"/);
+  assert.match(owner, /minlength="8"/);
+  assert.equal((owner.match(/data-password-toggle/g) || []).length, 3);
+  assert.match(owner, /Caracteres especiais são opcionais/);
   const client = run('renderWorkspace({client:true,title:"Restaurante",content:""})');
   assert.doesNotMatch(client, /href="#\/hq\/senha"/);
+});
+
+test('password confirmation validates length and equality without composition requirements', () => {
+  const run = runtime();
+  for (const value of ['abcdefgh', '12345678', 'palavra simples']) {
+    assert.equal(run(`passwordFeedback(${JSON.stringify(value)}, ${JSON.stringify(value)}).matches`), true);
+  }
+  assert.equal(run('passwordFeedback("abcdefg", "abcdefg").valid'), false);
+  assert.equal(run('passwordFeedback("abcdefgh", "abcdefgi").matches'), false);
+  assert.equal(run('passwordFeedback(" abcdefgh", " abcdefgh").valid'), false);
+});
+
+test('password preview preserves the value and updates accessible toggle state in both directions', () => {
+  const run = runtime();
+  run(`var attributes = {'aria-label':'Mostrar nova senha'};
+    var toggle = {textContent:'Mostrar', getAttribute:key=>attributes[key],setAttribute:(key,value)=>attributes[key]=value};
+    var field = {type:'password',value:'abcdefgh',closest:()=>({querySelector:()=>toggle})};
+    setPasswordVisibility(field,true);`);
+  assert.equal(run('field.type'), 'text');
+  assert.equal(run('attributes["aria-pressed"]'), 'true');
+  assert.equal(run('attributes["aria-label"]'), 'Ocultar nova senha');
+  run('setPasswordVisibility(field,false)');
+  assert.equal(run('field.type'), 'password');
+  assert.equal(run('field.value'), 'abcdefgh');
+  assert.equal(run('toggle.textContent'), 'Mostrar');
+  assert.equal(run('attributes["aria-pressed"]'), 'false');
 });
 
 test('password mutation is sent once and updates the current session only after confirmed success', async () => {
