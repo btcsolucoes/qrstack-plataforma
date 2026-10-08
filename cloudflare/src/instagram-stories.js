@@ -1,15 +1,18 @@
 // Private API publisher protocol. Instagram sessions and passwords stay on the runner.
 import { entitlement, isOwner } from './plans.js';
+import { authorizeTenant } from './tenant-auth.js';
 const MAX_MEDIA_BYTES = 6 * 1024 * 1024;
 export const MAX_STORY_REQUEST_BYTES = Math.ceil(MAX_MEDIA_BYTES / 3) * 4 + 32 * 1024;
 const MEDIA_TTL_SECONDS = 48 * 60 * 60;
+// Conservative QrStack private-publisher policy, not an official Instagram quota.
+const PUBLICATION_WINDOW_MS = 24 * 60 * 60 * 1000;
 const ACTIVE = ["claimed", "preparing", "publishing"];
 const RETIRED_ACTIONS = new Set(["registerStoryAgent", "getAgentRelease", "getNextStoryJob", "updateStoryJob", "getStoryMedia"]);
 const ACTIONS = new Set(["registerInstagramPublisher", "bindInstagramAccount", "getStoryPublishingConfig", "createStoryJob", "getStoryJob", "getNextInstagramStoryJob", "updateInstagramStoryJob", "getInstagramStoryMedia", "getInstagramPublisherJob"]);
 const HEADERS = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "access-control-allow-origin": "*" };
 
-function response(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: HEADERS }); }
-function fail(code, status = 400) { const error = new Error(code); error.status = status; throw error; }
+function response(value, status = 200, extraHeaders = {}) { return new Response(JSON.stringify(value), { status, headers: { ...HEADERS, ...extraHeaders } }); }
+function fail(code, status = 400, retryAfter = 0) { const error = new Error(code); error.status = status; error.retryAfter = retryAfter; throw error; }
 function now() { return new Date().toISOString(); }
 function id(value, maximum = 160) {
   const text = String(value || "").trim();
@@ -33,10 +36,11 @@ async function owner(env, request, payload) {
   const supplied = payload.owner_key || bearer(request);
   if (!await isOwner(env, request, supplied)) fail("unauthorized", 401);
 }
-async function restaurant(env, slugValue, token) {
+async function restaurant(env, request, slugValue, token) {
   const slug = id(slugValue, 100).toLowerCase();
+  const authorized = await authorizeTenant(env, request, slug, token);
   const row = await env.DB.prepare("SELECT id, slug, admin_token, story_link FROM restaurants WHERE slug = ? LIMIT 1").bind(slug).first();
-  if (!row || !row.admin_token || !token || !(await equalSecret(token, row.admin_token))) fail("unauthorized", 401);
+  if (!row || row.id !== authorized.id) fail("unauthorized", 401);
   return row;
 }
 async function publisher(env, request, publisherId) {
@@ -50,13 +54,23 @@ async function bindingFor(env, restaurantId) {
   return env.DB.prepare(`SELECT b.*, p.is_active AS publisher_active FROM instagram_account_bindings b
     JOIN instagram_publishers p ON p.publisher_id = b.publisher_id WHERE b.restaurant_id = ? LIMIT 1`).bind(restaurantId).first();
 }
-async function configuration(env, restaurantId) {
+async function publicationDelay(env, instagramUserId, excludedJobId = "") {
+  if (!instagramUserId) return 0;
+  const row = await env.DB.prepare(`SELECT MAX(COALESCE(completed_at, started_at)) AS latest_attempt
+    FROM instagram_story_jobs WHERE instagram_user_id = ? AND id <> ?`)
+    .bind(instagramUserId, excludedJobId).first();
+  const last = Date.parse(row?.latest_attempt || "");
+  return Number.isFinite(last) ? Math.max(0, Math.ceil((last + PUBLICATION_WINDOW_MS - Date.now()) / 1000)) : 0;
+}
+async function configuration(env, restaurantId, excludedJobId = "") {
   const binding = await bindingFor(env, restaurantId);
   const access = await entitlement(env, restaurantId);
   const unknown = binding && await env.DB.prepare("SELECT id FROM instagram_story_jobs WHERE restaurant_id = ? AND status = 'outcome_unknown' LIMIT 1").bind(restaurantId).first();
+  const delay = binding && await publicationDelay(env, binding.instagram_user_id, excludedJobId);
   const state = unknown ? "outcome_unknown" : !access.features.autopublish ? "plan_required" : !binding ? "unconfigured" : !binding.publisher_active ? "publisher_inactive"
-    : !binding.enabled || env.INSTAGRAM_PUBLISHING_ENABLED === "false" ? "disabled" : "ready";
+    : !binding.enabled || env.INSTAGRAM_PUBLISHING_ENABLED === "false" ? "disabled" : delay ? "cooldown" : "ready";
   return { provider: "private_api", enabled: state === "ready", state,
+    retry_after_seconds: delay || 0,
     publisher_id: binding?.publisher_id || null, instagram_username: binding?.instagram_username || null, instagram_user_id: binding?.instagram_user_id || null };
 }
 function publicJob(job) {
@@ -77,7 +91,7 @@ function matchesBinding(job, config) {
   return config.publisher_id === job.publisher_id && config.instagram_username === job.instagram_username && config.instagram_user_id === job.instagram_user_id;
 }
 async function privateJobResult(env, request, job) {
-  const publishing = await configuration(env, job.restaurant_id);
+  const publishing = await configuration(env, job.restaurant_id, job.id);
   const mediaUrl = new URL(request.url);
   mediaUrl.search = "";
   mediaUrl.searchParams.set("action", "getInstagramStoryMedia");
@@ -150,8 +164,8 @@ function decodeImage(payload) {
   if (!(new Map([["image/png", png], ["image/jpeg", jpeg], ["image/webp", webp]])).get(type)) fail("invalid_story_media_type", 415);
   return { bytes, type };
 }
-async function enqueue(env, payload) {
-  const tenant = await restaurant(env, payload.slug, payload.token);
+async function enqueue(env, request, payload) {
+  const tenant = await restaurant(env, request, payload.slug, payload.token);
   const clientId = id(payload.client_request_id);
   const config = await configuration(env, tenant.id);
   let link;
@@ -166,6 +180,7 @@ async function enqueue(env, payload) {
     if (existing.request_sha256 !== requestHash) fail("idempotency_key_conflict", 409);
     return { job: publicJob(existing), duplicate: true };
   }
+  if (config.state === "cooldown") fail("instagram_publication_cooldown", 429, config.retry_after_seconds);
   if (!config.enabled) fail(config.state === "outcome_unknown" ? "instagram_outcome_unknown" : "instagram_account_not_ready", 409);
   const jobId = `ig_story_${crypto.randomUUID()}`;
   const mediaKey = `instagram-stories/${tenant.slug}/${jobId}`;
@@ -183,10 +198,12 @@ async function enqueue(env, payload) {
         WHERE b.restaurant_id = ? AND b.publisher_id = ? AND b.instagram_username = ? AND b.instagram_user_id = ? AND b.enabled = 1 AND p.is_active = 1)
       AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs WHERE restaurant_id = ? AND status = 'outcome_unknown')
       AND EXISTS(SELECT 1 FROM restaurant_plans WHERE restaurant_id = ? AND plan = 'performance')
+      AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs recent WHERE recent.instagram_user_id = ? AND COALESCE(recent.completed_at, recent.started_at) > ?)
       ON CONFLICT(restaurant_id, client_request_id) DO NOTHING`)
       .bind(jobId, tenant.id, tenant.slug, config.publisher_id, config.instagram_username, config.instagram_user_id, menuDayId || null,
         link.href, mediaKey, mediaHash, type, bytes.length, imageSource, clientId, requestHash, timestamp, timestamp, timestamp,
-        tenant.id, config.publisher_id, config.instagram_username, config.instagram_user_id, tenant.id, tenant.id),
+        tenant.id, config.publisher_id, config.instagram_username, config.instagram_user_id, tenant.id, tenant.id,
+        config.instagram_user_id, new Date(Date.now() - PUBLICATION_WINDOW_MS).toISOString()),
       env.DB.prepare(`INSERT INTO instagram_story_job_events(id, job_id, publisher_id, status, checkpoint, created_at)
         SELECT ?, ?, ?, 'pending', 'queued', ? WHERE changes() > 0`)
         .bind(`ig_event_${crypto.randomUUID()}`, jobId, config.publisher_id, timestamp)];
@@ -215,10 +232,11 @@ async function claim(env, request, params) {
           AND b.instagram_user_id = j.instagram_user_id AND b.instagram_username = j.instagram_username
           AND EXISTS(SELECT 1 FROM restaurant_plans WHERE restaurant_id = j.restaurant_id AND plan = 'performance')
           AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs uncertain WHERE uncertain.restaurant_id = j.restaurant_id AND uncertain.status = 'outcome_unknown')
+          AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs recent WHERE recent.instagram_user_id = j.instagram_user_id AND recent.id <> j.id AND COALESCE(recent.completed_at, recent.started_at) > ?)
         ORDER BY j.queued_at, j.id LIMIT 1)
       AND status = 'pending'
       AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs active WHERE active.publisher_id = ? AND active.status IN ('claimed','preparing','publishing'))`)
-      .bind(token, timestamp, timestamp, agent.publisher_id, agent.publisher_id),
+      .bind(token, timestamp, timestamp, agent.publisher_id, new Date(Date.now() - PUBLICATION_WINDOW_MS).toISOString(), agent.publisher_id),
       env.DB.prepare(`INSERT INTO instagram_story_job_events(id, job_id, publisher_id, status, checkpoint, created_at)
         SELECT ?, id, publisher_id, 'claimed', 'claimed', ? FROM instagram_story_jobs WHERE claim_token = ? AND changes() > 0`)
         .bind(`ig_event_${crypto.randomUUID()}`, timestamp, token)];
@@ -246,7 +264,8 @@ async function update(env, request, params, payload) {
   if (status === "failed_attention" && job.status === "failed_attention") return { job: publicJob(job), duplicate: true };
   if (!transitions[status].includes(job.status)) fail("invalid_story_job_transition", 409);
   if (status === "publishing" || status === "preparing") {
-    const config = await configuration(env, job.restaurant_id);
+    const config = await configuration(env, job.restaurant_id, job.id);
+    if (config.state === "cooldown") fail("instagram_publication_cooldown", 429, config.retry_after_seconds);
     if (!config.enabled || !matchesBinding(job, config)) fail("instagram_account_not_ready", 409);
   }
   const timestamp = now();
@@ -261,8 +280,10 @@ async function update(env, request, params, payload) {
       WHERE b.restaurant_id = instagram_story_jobs.restaurant_id AND b.publisher_id = instagram_story_jobs.publisher_id
       AND b.instagram_username = instagram_story_jobs.instagram_username AND b.instagram_user_id = instagram_story_jobs.instagram_user_id AND b.enabled = 1 AND p.is_active = 1)
       AND EXISTS(SELECT 1 FROM restaurant_plans WHERE restaurant_id = instagram_story_jobs.restaurant_id AND plan = 'performance')
-      AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs uncertain WHERE uncertain.restaurant_id = instagram_story_jobs.restaurant_id AND uncertain.status = 'outcome_unknown')` : ""}`)
-    .bind(status, checkpoint, errorCode, mediaId, status, timestamp, status, timestamp, timestamp, job.id, job.publisher_id, job.claim_token, ...transitions[status]),
+      AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs uncertain WHERE uncertain.restaurant_id = instagram_story_jobs.restaurant_id AND uncertain.status = 'outcome_unknown')
+      AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs recent WHERE recent.instagram_user_id = instagram_story_jobs.instagram_user_id AND recent.id <> instagram_story_jobs.id AND COALESCE(recent.completed_at, recent.started_at) > ?)` : ""}`)
+    .bind(status, checkpoint, errorCode, mediaId, status, timestamp, status, timestamp, timestamp, job.id, job.publisher_id, job.claim_token, ...transitions[status],
+      ...(guarded ? [new Date(Date.now() - PUBLICATION_WINDOW_MS).toISOString()] : [])),
     env.DB.prepare(`INSERT INTO instagram_story_job_events(id, job_id, publisher_id, status, checkpoint, error_code, created_at)
       SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() > 0`)
       .bind(`ig_event_${crypto.randomUUID()}`, job.id, job.publisher_id, status, checkpoint, errorCode, timestamp)];
@@ -286,9 +307,9 @@ export async function handleInstagramStories(request, env, payload, action) {
     let result;
     if (action === "registerInstagramPublisher") result = await register(env, request, payload);
     if (action === "bindInstagramAccount") result = await bindAccount(env, request, payload);
-    if (action === "createStoryJob") result = await enqueue(env, payload);
+    if (action === "createStoryJob") result = await enqueue(env, request, payload);
     if (action === "getStoryPublishingConfig" || action === "getStoryJob") {
-      const tenant = await restaurant(env, params.get("slug"), params.get("token") || bearer(request));
+      const tenant = await restaurant(env, request, params.get("slug"), params.get("token") || bearer(request));
       if (action === "getStoryPublishingConfig") result = { publishing: await configuration(env, tenant.id) };
       else {
         const jobId = params.get("job") || params.get("job_id");
@@ -312,6 +333,8 @@ export async function handleInstagramStories(request, env, payload, action) {
     return response({ ok: true, ...result }, action === "createStoryJob" && !result.duplicate ? 201 : 200);
   } catch (error) {
     // Do not return SQL, credentials, or arbitrary backend errors to callers.
-    return response({ ok: false, error: error.status ? error.message : "instagram_story_internal_error" }, error.status || 500);
+    return response({ ok: false, error: error.status ? error.message : "instagram_story_internal_error",
+      ...(error.retryAfter ? { retry_after_seconds: error.retryAfter } : {}) }, error.status || 500,
+      error.retryAfter ? { "retry-after": String(error.retryAfter) } : {});
   }
 }

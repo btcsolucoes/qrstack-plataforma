@@ -1,6 +1,7 @@
 import { handleInstagramStories, MAX_STORY_REQUEST_BYTES } from "./instagram-stories.js";
 import { handlePlans, authorizeInsights } from "./plans.js";
-import { verifyOwner, handleOwnerPassword } from "./owner-auth.js";
+import { verifyOwner, handleOwnerPassword, enforceRateLimit } from "./owner-auth.js";
+import { authorizeTenant, getTenant, equalTenantToken, publicRestaurant, publicRestaurantResult, publicCatalogResult, publicMenuResult } from "./tenant-auth.js";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -15,7 +16,10 @@ const READ_CACHE_HEADERS = {
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
-  "access-control-allow-headers": "content-type, authorization, x-claim-token, x-owner-key",
+  "access-control-allow-headers": "content-type, authorization, x-claim-token, x-owner-key, x-owner-session, x-client-token",
+  "access-control-expose-headers": "Retry-After",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
 };
 
 const DEFAULT_SHEETS_FALLBACK_URL = "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec";
@@ -70,6 +74,7 @@ export default {
       }
       if (routedAction === "uploadCatalogImage") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+        await enforceRateLimit(env, request, 'tenant_write');
         return await uploadCatalogImage(env, request);
       }
       const payload = request.method === "POST" ? await readPayload(request) : {};
@@ -77,25 +82,32 @@ export default {
         ? payload.action || url.searchParams.get("action") || "trackEvent"
         : url.searchParams.get("action") || "health";
 
-      const passwordResponse = await handleOwnerPassword(request, env, payload, action);
+      if (['saveCatalogItem', 'saveMenuDay', 'createStoryJob'].includes(action)) await enforceRateLimit(env, request, 'tenant_write');
+      if (['getRestaurant', 'getCatalog', 'getMenu', 'getInsights', 'getRestaurantPlan', 'getStoryPublishingConfig', 'getStoryJob', 'verifyClientAccess'].includes(action)) await enforceRateLimit(env, request, 'tenant_read');
+      if (action === 'trackEvent') await enforceRateLimit(env, request, 'public_write');
+      const passwordResponse = await handleOwnerPassword(request, env, payload, action, ctx);
       if (passwordResponse) return passwordResponse;
+      if (action === 'verifyClientAccess') {
+        if (request.method !== 'POST') return json({ ok: false, error: 'method_not_allowed' }, 405);
+        await authorizeTenant(env, request, payload.slug, payload.token);
+        return json({ ok: true });
+      }
+      if (action === 'getRestaurantAccess') {
+        if (request.method !== 'GET') return json({ ok: false, error: 'method_not_allowed' }, 405);
+        await assertOwner(url.searchParams, request, env);
+        const tenant = await getTenant(env, url.searchParams.get('slug'));
+        if (!tenant) throw httpError('restaurant_not_found', 404);
+        return json({ ok: true, token: tenant.admin_token });
+      }
       const planResponse = await handlePlans(request, env, payload, action);
       if (planResponse) return planResponse;
       const instagramResponse = await handleInstagramStories(request, env, payload, action);
       if (instagramResponse) return instagramResponse;
 
       if (action === "health") {
-        const analyticsStorage = await getAnalyticsStorageHealth(env);
         return jsonp(url, {
           ok: true,
           service: "qrstack-d1",
-          version: "archive-live-v16-instagram-publisher",
-          fallback_storage: "google_sheets",
-          analytics_storage: analyticsStorage,
-          story_automation: env.INSTAGRAM_PUBLISHING_ENABLED !== "false",
-          story_publisher: "private_api",
-          android_story_agent: "retired",
-          analytics_read_model: "daily_rollups",
         });
       }
 
@@ -187,12 +199,12 @@ export default {
 
       if (action === "getRestaurant") {
         const slug = url.searchParams.get("slug") || "amaro";
-        return jsonp(url, { ok: true, ...(await getRestaurantResilient(env, slug)) }, 200, READ_CACHE_HEADERS);
+        return jsonp(url, { ok: true, ...publicRestaurantResult(await getRestaurantResilient(env, slug)) }, 200, READ_CACHE_HEADERS);
       }
 
       if (action === "getCatalog") {
         const slug = url.searchParams.get("slug") || "amaro";
-        return jsonp(url, { ok: true, ...(await getCatalogResilient(env, slug)) }, 200, READ_CACHE_HEADERS);
+        return jsonp(url, { ok: true, ...publicCatalogResult(await getCatalogResilient(env, slug)) }, 200, READ_CACHE_HEADERS);
       }
 
       if (action === "getRollupStatus") {
@@ -224,26 +236,27 @@ export default {
 
       if (action === "saveCatalogItem") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        const result = await saveCatalogItemResilient(env, payload);
+        const result = await saveCatalogItemResilient(env, payload, request);
         return json({ ok: true, ...result }, result.storage === "d1" ? 200 : 202);
       }
 
       if (action === "getMenu") {
         const slug = url.searchParams.get("slug") || "amaro";
         const date = normalizeDate(url.searchParams.get("date"));
-        return jsonp(url, { ok: true, ...(await getMenu(env, slug, date)) }, 200, READ_CACHE_HEADERS);
+        return jsonp(url, { ok: true, ...publicMenuResult(await getMenu(env, slug, date)) }, 200, READ_CACHE_HEADERS);
       }
 
       if (action === "saveMenuDay") {
         if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
-        return json({ ok: true, ...(await saveMenuDay(env, payload)) });
+        const saved = await saveMenuDay(env, payload, request);
+        return json({ ok: true, ...saved, restaurant: publicRestaurant(saved.restaurant) });
       }
 
       if (action === "getMenuResponses") {
         await assertOwner(url.searchParams, request, env);
         const slug = normalizeSlug(url.searchParams.get("slug") || "amaro");
         if (slug === "amaro") await syncGoogleFormHistory(env);
-        return jsonp(url, { ok: true, responses: await getVisibleMenuResponses(env, slug) }, 200, READ_CACHE_HEADERS);
+        return jsonp(url, { ok: true, responses: (await getVisibleMenuResponses(env, slug)).map(row => ({ ...row, restaurant: publicRestaurant(row.restaurant) })) }, 200, JSON_HEADERS);
       }
 
       if (action === "cacheMenuRecords") {
@@ -261,7 +274,8 @@ export default {
 
       return jsonp(url, { ok: false, error: "unknown_action", action }, 404);
     } catch (error) {
-      return json({ ok: false, error: error.message || String(error) }, error.status || 500);
+      return json({ ok: false, error: error.status ? error.message : 'service_unavailable' }, error.status || 500,
+        { ...JSON_HEADERS, ...(error.status === 429 ? { 'retry-after': String(error.retryAfter || 60) } : {}) });
     }
   },
 
@@ -488,6 +502,7 @@ async function storeEventInSheets(env, payload, request) {
   const body = {
     ...payload,
     action: "trackEvent",
+    owner_key: env.SHEETS_OWNER_ACCESS_TOKEN || '',
     id: payload.id,
     cliente: payload.cliente || payload.slug || payload.restaurant_slug || "amaro",
     slug: payload.slug || payload.cliente || payload.restaurant_slug || "amaro",
@@ -516,16 +531,27 @@ async function storeEventInSheets(env, payload, request) {
 }
 
 async function readPayload(request) {
-  if (Number(request.headers.get("content-length") || 0) > MAX_STORY_REQUEST_BYTES) throw httpError("request_too_large", 413);
+  const bytes = await readLimitedBytes(request, MAX_STORY_REQUEST_BYTES);
+  const text = new TextDecoder().decode(bytes);
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return Object.fromEntries(new URLSearchParams(text));
+  }
+}
+
+async function readLimitedBytes(request, maximum) {
+  if (Number(request.headers.get("content-length") || 0) > maximum) throw httpError("request_too_large", 413);
   const reader = request.body?.getReader();
-  if (!reader) return {};
+  if (!reader) return new Uint8Array();
   const chunks = [];
   let size = 0;
   while (true) {
     const chunk = await reader.read();
     if (chunk.done) break;
     size += chunk.value.byteLength;
-    if (size > MAX_STORY_REQUEST_BYTES) {
+    if (size > maximum) {
       await reader.cancel();
       throw httpError("request_too_large", 413);
     }
@@ -534,13 +560,7 @@ async function readPayload(request) {
   const bytes = new Uint8Array(size);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  const text = new TextDecoder().decode(bytes);
-  if (!text) return {};
-  try {
-    return JSON.parse(text);
-  } catch {
-    return Object.fromEntries(new URLSearchParams(text));
-  }
+  return bytes;
 }
 
 async function assertOwner(params, request, env, bodyKey = "") {
@@ -1181,9 +1201,8 @@ async function getRestaurant(db, slug) {
 async function requireRestaurant(db, slug) {
   const restaurant = await getRestaurant(db, slug);
   if (restaurant) return restaurant;
-  const id = `rest_${slug}`;
-  await db.prepare("INSERT INTO restaurants (id, slug, name) VALUES (?, ?, ?)").bind(id, slug, titleize(slug)).run();
-  return getRestaurant(db, slug);
+  // Public reads/analytics must not provision arbitrary tenants in the database.
+  throw httpError('restaurant_not_found', 404);
 }
 
 async function trackEvent(db, payload, request) {
@@ -1806,16 +1825,15 @@ function httpError(message, status) {
 
 async function uploadCatalogImage(env, request) {
   if (!env.MEDIA_STORAGE) throw httpError("media_storage_unavailable", 503);
+  const maximumRequestBytes = CATALOG_IMAGE_MAX_BYTES + 64 * 1024;
+  if (Number(request.headers.get('content-length') || 0) > maximumRequestBytes) throw httpError('request_too_large', 413);
+  // Bound the multipart body even if Transfer-Encoding omitted Content-Length.
+  const limited = await readLimitedBytes(request, maximumRequestBytes);
+  request = new Request(request.url, { method: request.method, headers: request.headers, body: limited });
   const form = await request.formData();
   const slug = normalizeSlug(form.get("slug") || "amaro");
   const token = String(form.get("token") || "");
-  if (slug === "amaro") {
-    const expected = env.AMARO_ADMIN_TOKEN || "qrstack-amaro-2026";
-    if (token !== expected) throw httpError("unauthorized", 401);
-  } else {
-    const restaurant = await requireRestaurant(env.DB, slug);
-    assertRestaurantToken(restaurant, token);
-  }
+  await authorizeTenant(env, request, slug, token);
 
   const file = form.get("file");
   if (!file || typeof file.arrayBuffer !== "function") throw httpError("catalog_image_required", 400);
@@ -1893,7 +1911,7 @@ async function readCatalogSnapshot(env, slug) {
 
 async function cacheCatalogSnapshot(env, slug, catalog, source) {
   const snapshot = {
-    restaurant: catalog.restaurant || fallbackRestaurant(slug),
+    restaurant: publicRestaurant(catalog.restaurant || fallbackRestaurant(slug)),
     items: Array.isArray(catalog.items) ? catalog.items : [],
     assets: Array.isArray(catalog.assets) ? catalog.assets : [],
     catalog_source: source,
@@ -2018,15 +2036,13 @@ function optimisticCatalogItem(payload) {
   };
 }
 
-async function saveCatalogItemResilient(env, payload) {
+async function saveCatalogItemResilient(env, payload, request) {
   const slug = normalizeSlug(payload.slug || "amaro");
-  if (slug === "amaro") {
-    const expected = env.AMARO_ADMIN_TOKEN || "qrstack-amaro-2026";
-    if (String(payload.token || "") !== expected) throw httpError("unauthorized", 401);
-  }
+  const tenant = await authorizeTenant(env, request, slug, payload.token);
   const prepared = {
     ...payload,
     slug,
+    token: tenant.admin_token,
     id: cleanIdentifier(payload.id || `catalog_${slug}_${crypto.randomUUID()}`, 160),
     allow_create_with_id: !payload.id,
   };
@@ -2047,7 +2063,7 @@ async function saveCatalogItemResilient(env, payload) {
 async function saveCatalogItem(db, payload) {
   const slug = normalizeSlug(payload.slug || "amaro");
   const restaurant = await requireRestaurant(db, slug);
-  assertRestaurantToken(restaurant, payload.token);
+  await assertRestaurantToken(restaurant, payload.token);
 
   const name = boundedText(payload.name, 140);
   if (!name) throw httpError("catalog_item_name_required", 400);
@@ -2092,6 +2108,7 @@ async function saveCatalogItem(db, payload) {
       sort_order = excluded.sort_order,
       is_active = 1,
       updated_at = excluded.updated_at
+    WHERE catalog_items.restaurant_id = excluded.restaurant_id
   `).bind(
     id,
     restaurant.id,
@@ -2164,7 +2181,7 @@ function normalizeCachedMenuRecord(record, defaultSource = "platform") {
   })).filter((item) => item.name);
   const fingerprint = stableTextHash(`${date}|${items.map((item) => normalizeKey(item.name)).sort().join("|")}`);
   return {
-    restaurant: { ...fallbackRestaurant(slug), ...(record?.restaurant || {}), slug },
+    restaurant: publicRestaurant({ ...fallbackRestaurant(slug), ...(record?.restaurant || {}), slug }),
     menu: {
       id: menuId,
       restaurant_id: String(menu.restaurant_id || record?.restaurant?.id || `rest_${slug}`),
@@ -2409,9 +2426,9 @@ async function getMenu(env, slug, date = "") {
 async function getMenuD1(db, slug, date = "") {
   const restaurant = await requireRestaurant(db, normalizeSlug(slug));
   const menu = date
-    ? await db.prepare("SELECT * FROM menu_days WHERE restaurant_id = ? AND date = ? ORDER BY updated_at DESC LIMIT 1")
+    ? await db.prepare("SELECT * FROM menu_days WHERE restaurant_id = ? AND date = ? AND is_published = 1 ORDER BY updated_at DESC LIMIT 1")
       .bind(restaurant.id, date).first()
-    : await db.prepare("SELECT * FROM menu_days WHERE restaurant_id = ? ORDER BY date DESC, updated_at DESC LIMIT 1")
+    : await db.prepare("SELECT * FROM menu_days WHERE restaurant_id = ? AND is_published = 1 ORDER BY date DESC, updated_at DESC LIMIT 1")
       .bind(restaurant.id).first();
   if (!menu) return { restaurant, menu: null, items: [] };
   const items = await db.prepare("SELECT * FROM menu_items WHERE menu_day_id = ? ORDER BY sort_order, name")
@@ -2419,12 +2436,12 @@ async function getMenuD1(db, slug, date = "") {
   return { restaurant, menu, items: items.results || [] };
 }
 
-async function saveMenuDay(env, payload) {
+async function saveMenuDay(env, payload, request) {
   const slug = normalizeSlug(payload.slug || "amaro");
-  if (slug === "amaro") {
-    const expected = env.AMARO_ADMIN_TOKEN || "qrstack-amaro-2026";
-    if (String(payload.token || "") !== expected) throw httpError("unauthorized", 401);
-  }
+  const tenant = await authorizeTenant(env, request, slug, payload.token);
+  // Menu identities are derived from the authenticated tenant, not client input.
+  payload = { ...payload, slug, token: tenant.admin_token,
+    menu_id: `menu_${slug}_${normalizeDate(payload.date) || todayIso()}` };
   const now = new Date().toISOString();
   const cachedPayload = normalizeCachedMenuRecord({
     slug,
@@ -2471,7 +2488,7 @@ async function saveMenuDay(env, payload) {
 async function saveMenuDayD1(db, payload) {
   const slug = normalizeSlug(payload.slug || "amaro");
   const restaurant = await requireRestaurant(db, slug);
-  assertRestaurantToken(restaurant, payload.token);
+  await assertRestaurantToken(restaurant, payload.token);
   const date = normalizeDate(payload.date) || todayIso();
   const menuId = payload.menu_id || payload.menuId || `menu_${slug}_${date}`;
   const now = new Date().toISOString();
@@ -2520,6 +2537,7 @@ async function saveMenuDayD1(db, payload) {
         is_published = 1,
         published_at = excluded.published_at,
         updated_at = excluded.updated_at
+      WHERE menu_days.restaurant_id = excluded.restaurant_id
     `).bind(
       menuId,
       restaurant.id,
@@ -2533,12 +2551,13 @@ async function saveMenuDayD1(db, payload) {
       now,
       now
     ),
-    db.prepare("DELETE FROM menu_items WHERE menu_day_id = ?").bind(menuId),
+    db.prepare("DELETE FROM menu_items WHERE menu_day_id = ? AND EXISTS (SELECT 1 FROM menu_days WHERE id = ? AND restaurant_id = ?)").bind(menuId, menuId, restaurant.id),
     ...incomingItems.map((item, index) => db.prepare(`
       INSERT INTO menu_items (
         id, menu_day_id, name, category, description, price, image_url,
         is_highlight, sort_order, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM menu_days WHERE id = ? AND restaurant_id = ?)
     `).bind(
       `item_${menuId}_${index + 1}_${normalizeKey(item.name).slice(0, 40)}`,
       menuId,
@@ -2549,7 +2568,9 @@ async function saveMenuDayD1(db, payload) {
       item.image_url,
       item.is_highlight,
       item.sort_order,
-      now
+      now,
+      menuId,
+      restaurant.id
     )),
   ];
   await db.batch(statements);
@@ -2576,9 +2597,9 @@ function menuContentFingerprint(menu, items) {
   });
 }
 
-function assertRestaurantToken(restaurant, receivedToken) {
+async function assertRestaurantToken(restaurant, receivedToken) {
   const expected = String(restaurant.admin_token || "");
-  if (!expected || String(receivedToken || "") !== expected) {
+  if (!await equalTenantToken(receivedToken, expected)) {
     const error = new Error("unauthorized");
     error.status = 401;
     throw error;
@@ -2706,7 +2727,7 @@ function json(payload, status = 200, headers = JSON_HEADERS) {
 
 function jsonp(url, payload, status = 200, headers = JSON_HEADERS) {
   const callback = url.searchParams.get("callback");
-  if (!callback) return json(payload, status, headers);
+  if (!callback || headers['cache-control'] === 'no-store') return json(payload, status, headers);
   const safeCallback = callback.replace(/[^\w.$]/g, "");
   return new Response(`${safeCallback}(${JSON.stringify(payload)});`, {
     status,

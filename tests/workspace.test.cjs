@@ -8,7 +8,7 @@ function runtime(overrides = {}) {
   const root = path.resolve(__dirname, '..');
   const storage = () => {
     const values = new Map();
-    return { getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value) };
+    return { getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
   };
   const context = vm.createContext({
     console, URL, URLSearchParams, Intl, Date, Math, JSON, Map, Set, structuredClone, TextEncoder, Blob, setTimeout, clearTimeout,
@@ -47,14 +47,15 @@ test('owner password screen is private and keeps passwords masked', () => {
 
 test('password mutation is sent once and updates the current session only after confirmed success', async () => {
   const run = runtime();
-  run('var sent, retryOptions; fetchWithRetry=async(url,options,retry)=>{sent=JSON.parse(options.body);retryOptions=retry;return {ok:true,json:async()=>({ok:true})}}');
+  run('var sent, retryOptions; fetchWithRetry=async(url,options,retry)=>{sent=JSON.parse(options.body);retryOptions=retry;return {ok:true,json:async()=>({ok:true,session_token:"new-session",expires_at:"2026-10-08T00:00:00Z"})}}');
   await run('updateOwnerPassword("old-password", "new-long-password")');
   assert.equal(run('retryOptions.attempts'), 1);
   assert.equal(run('sent.action'), 'changeOwnerPassword');
-  assert.equal(run('sessionStorage.getItem("qrstack:owner-credential")'), 'new-long-password');
+  assert.equal(run('sessionStorage.getItem("qrstack:owner-session")'), 'new-session');
   run('fetchWithRetry=async()=>({ok:false,json:async()=>({ok:false,error:"unauthorized"})})');
   await assert.rejects(run('updateOwnerPassword("wrong-password", "unconfirmed-password")'), /unauthorized/);
-  assert.equal(run('OWNER_ACCESS_TOKEN'), 'new-long-password');
+  assert.equal(run('OWNER_SESSION_TOKEN'), 'new-session');
+  assert.equal(run('sessionStorage.getItem("qrstack:owner-credential")'), null);
 });
 
 test('basic and unverified plans lock Stories; Divulgação offers download and copied link without publishing', () => {
@@ -70,13 +71,15 @@ test('basic and unverified plans lock Stories; Divulgação offers download and 
 
 test('public frontend contains no embedded owner key and verifies owner access with the backend', async () => {
   const run = runtime();
-  assert.equal(run('OWNER_ACCESS_TOKEN'), '');
+  assert.equal(run('OWNER_SESSION_TOKEN'), '');
   run('var credentials; apiPost=async data=>{credentials=data; throw new Error("unauthorized")};');
   assert.equal(await run('hasOwnerAccess(new URLSearchParams({key:"wrong"}))'), false);
   assert.equal(run('ownerVerified'), false);
-  run('apiPost=async data=>{credentials=data;return {ok:true}}');
+  run('apiPost=async data=>{credentials=data;return {ok:true,session_token:"test-owner-session"}}');
   assert.equal(await run('hasOwnerAccess(new URLSearchParams({key:"owner-test"}))'), true);
-  assert.equal(run('credentials.action'), 'verifyOwnerAccess');
+  assert.equal(run('credentials.action'), 'loginOwner');
+  assert.equal(run('sessionStorage.getItem("qrstack:owner-session")'), 'test-owner-session');
+  assert.equal(run('sessionStorage.getItem("qrstack:owner-credential")'), null);
   assert.equal(run('ownerLink("clientes")'), '#/hq/clientes');
 });
 
@@ -279,4 +282,74 @@ test('a polling response from the previous route cannot change the current Story
   await run('polling');
   assert.equal(run('statusChanges'), 0);
   assert.equal(run('timers.length'), 0);
+});
+
+
+test('public restaurant normalization and persisted state discard credentials and private analytics', () => {
+  const run = runtime();
+  assert.equal(run('fromSheetRestaurant({slug:"amaro",admin_token:"server-should-not-return-this"}).adminToken'), undefined);
+  run('state.restaurants[0].adminToken="legacy-token"; state.restaurants[0].nested={password:"old-password",session_token:"session"}; state.events=[{id:"private"}]; saveState()');
+  const stored = run('localStorage.getItem(STORE_KEY)');
+  assert.doesNotMatch(stored, /legacy-token|old-password|session_token|"private"/);
+  run('ownerVerified=true; saveCachedInsightsHtml({slug:"amaro"},{},"private-metrics")');
+  assert.equal(run('localStorage.getItem(INSIGHTS_CACHE_KEY)'), null);
+  assert.equal(run('getCachedInsightsHtml({slug:"amaro"}).html'), 'private-metrics');
+  run('clearOwnerSession()');
+  assert.equal(run('getCachedInsightsHtml({slug:"amaro"})'), null);
+});
+
+test('private API credentials only travel in headers to the fixed Worker endpoint', async () => {
+  const run = runtime();
+  run('var requests=[]; fetchWithRetry=async(url,options)=>{requests.push({url,options});return {ok:true,json:async()=>({ok:true})}}');
+  await run('apiGet("getRestaurantPlan",{slug:"amaro",token:"private-client-token"})');
+  assert.doesNotMatch(run('requests[0].url'), /private-client-token|token=/);
+  assert.equal(run('requests[0].options.headers["X-Client-Token"]'), 'private-client-token');
+  await run('apiPost({action:"saveMenu",slug:"amaro",token:"private-client-token"})');
+  assert.doesNotMatch(run('requests[1].options.body'), /private-client-token/);
+  assert.equal(run('requests[1].options.headers["X-Client-Token"]'), 'private-client-token');
+  await assert.rejects(run('endpointGet("https://untrusted.example/", "getInsights", {token:"private-client-token"})'), /authenticated_endpoint_not_allowed/);
+  assert.equal(run('requests.length'), 2);
+});
+
+test('restaurant access is validated by the server rather than stored public restaurant metadata', async () => {
+  const run = runtime();
+  run('var checked; apiPost=async data=>{checked=data;throw new Error("unauthorized")}; sessionStorage.setItem("qrstack:client-access:amaro","1")');
+  assert.equal(await run('hasClientAccess({slug:"amaro",adminToken:"known-public-value"},new URLSearchParams({token:"known-public-value"}))'), false);
+  assert.equal(run('clientToken({slug:"amaro"})'), '');
+  run('apiPost=async data=>{checked=data;return {ok:true}}');
+  assert.equal(await run('hasClientAccess({slug:"amaro"},new URLSearchParams({token:"valid-client-secret"}))'), true);
+  assert.equal(run('checked.action'), 'verifyClientAccess');
+  assert.equal(run('clientToken({slug:"amaro"})'), 'valid-client-secret');
+  assert.doesNotMatch(run('clientPortalLink({slug:"amaro"})'), /valid-client-secret|token=/);
+  assert.doesNotMatch(run('localStorage.getItem(STORE_KEY)'), /valid-client-secret/);
+});
+
+test('password recovery token is sent once, stays out of storage, and does not log the user in', async () => {
+  const run = runtime();
+  run('var sent,settings; ownerResetToken="one-time-reset"; fetchWithRetry=async(url,options,retry)=>{sent=JSON.parse(options.body);settings=retry;return {ok:true,json:async()=>({ok:true})}}');
+  await run('completeOwnerRecovery("new-password-long")');
+  assert.equal(run('sent.token'), 'one-time-reset');
+  assert.equal(run('sent.action'), 'resetOwnerPassword');
+  assert.equal(run('settings.attempts'), 1);
+  assert.equal(run('ownerResetToken'), '');
+  assert.equal(run('OWNER_SESSION_TOKEN'), '');
+  assert.equal(run('ownerVerified'), false);
+  assert.doesNotMatch(run('localStorage.getItem(STORE_KEY)'), /one-time-reset|new-password-long/);
+});
+
+test('rate-limit responses preserve server retry guidance and are never automatically replayed', async () => {
+  const run = runtime();
+  run('var calls=0; fetchWithRetry=async()=>{calls++;return {ok:false,status:429,headers:{get:()=>"120"},json:async()=>({ok:false,error:"rate_limited"})}}');
+  await assert.rejects(run('requestOwnerRecovery("test@example.com")'), error => error.message === 'too_many_attempts' && error.retryAfter === 120);
+  assert.equal(run('calls'), 1);
+  assert.match(run('authRetryMessage({retryAfter:120})'), /2 minuto/);
+});
+
+
+test('reset and access secrets are removed from both query and fragment without removing harmless view state', () => {
+  let replacement;
+  const run = runtime({location: {origin:'https://example.test',pathname:'/app/',search:'?token=secret&v=1',hash:'#/redefinir?token=secret&view=reset'}, history:{replaceState:(_state,_title,url)=>{replacement=url}}});
+  run('removeAccessFromUrl("token")');
+  assert.equal(replacement, '/app/?v=1#/redefinir?view=reset');
+  assert.doesNotMatch(replacement, /secret|token=/);
 });

@@ -7,10 +7,16 @@ const ASSETS = {
 const QRSTACK_D1_API_URL = "https://qrstack-api.qrstack.workers.dev";
 const QRSTACK_API_URL = QRSTACK_D1_API_URL;
 const ACTIVE_CLIENT_SLUG = "amaro";
-const ACTIVE_CLIENT_TOKEN = "qrstack-amaro-2026";
-let OWNER_ACCESS_TOKEN = "";
+let OWNER_SESSION_TOKEN = "";
 let ownerVerified = false;
-try { OWNER_ACCESS_TOKEN = sessionStorage.getItem("qrstack:owner-credential") || ""; } catch {}
+let ownerAccessError = "";
+let ownerResetToken = "";
+const clientTokens = new Map();
+const privateInsightsCache = new Map();
+try {
+  sessionStorage.removeItem("qrstack:owner-credential");
+  OWNER_SESSION_TOKEN = sessionStorage.getItem("qrstack:owner-session") || "";
+} catch {}
 const STORY_AUTOMATION_ENABLED = true;
 const OWNER_SESSION_KEY = "qrstack:owner-access";
 const CLIENT_SESSION_PREFIX = "qrstack:client-access:";
@@ -42,7 +48,6 @@ const DEFAULT_STATE = {
       sectionsUrl: `${AMARO_ASSETS_BASE_URL}qrstack/amaro-sections.json`,
       liveMenuEndpoint: "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec",
       analyticsEndpoint: QRSTACK_D1_API_URL || "https://script.google.com/macros/s/AKfycbzm64OAl5G59pLyzl_bEPt64NwFohyhdBFTI_44Zu2UDF4gTpwaSuGcPAV-I3U57nHy/exec",
-      adminToken: ACTIVE_CLIENT_TOKEN,
       reminderTime: "09:00",
       reminderEnabled: false,
       messageTemplate:
@@ -150,7 +155,7 @@ function hydratePersistedState(parsedState) {
       analyticsEndpoint,
     };
   });
-  return parsedState;
+  return publicPersistedState(parsedState);
 }
 
 function normalizedAnalyticsEndpoint(restaurant, defaults = {}) {
@@ -166,8 +171,26 @@ function persistRuntimeStateMigrations() {
   saveState();
 }
 
+function publicPersistedState(value) {
+  const scrub = (entry) => {
+    if (Array.isArray(entry)) return entry.map(scrub);
+    if (!entry || typeof entry !== "object") return entry;
+    return Object.fromEntries(Object.entries(entry).filter(([key]) => !/token|password|credential|secret|session|planAccess|admin|notes|messageTemplate|reminder/i.test(key)).map(([key, item]) => [key, scrub(item)]));
+  };
+  const menus = (value.menuDays || []).filter(menu => menu.isPublished);
+  const ids = new Set(menus.map(menu => menu.id));
+  return { restaurants: scrub(value.restaurants || []), menuDays: scrub(menus), menuItems: scrub((value.menuItems || []).filter(item => ids.has(item.menuDayId))), storyAssets: [], events: [] };
+}
+
 function saveState() {
-  localStorage.setItem(STORE_KEY, JSON.stringify(state));
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(publicPersistedState(state)));
+    localStorage.removeItem(INSIGHTS_CACHE_KEY);
+    for (let index = localStorage.length - 1; index >= 0; index--) {
+      const key = localStorage.key(index);
+      if ((key.startsWith("qrstack-platform-") && key !== STORE_KEY) || key.startsWith("qrstack-insights-") || /^qrstack:owner-(credential|session|access)$/.test(key)) localStorage.removeItem(key);
+    }
+  } catch {}
 }
 
 function insightsCacheId(restaurant, filters = {}) {
@@ -178,34 +201,16 @@ function insightsCacheId(restaurant, filters = {}) {
   ].join(":");
 }
 
-function readInsightsCache() {
-  try {
-    return JSON.parse(localStorage.getItem(INSIGHTS_CACHE_KEY) || "{}");
-  } catch {
-    return {};
-  }
-}
+function readInsightsCache() { return Object.fromEntries(privateInsightsCache); }
 
 function getCachedInsightsHtml(restaurant, filters = {}) {
-  if (isClientWorkspace()) return null;
-  const cache = readInsightsCache();
-  return cache[insightsCacheId(restaurant, filters)] || null;
+  if (isClientWorkspace() || !ownerVerified) return null;
+  return privateInsightsCache.get(insightsCacheId(restaurant, filters)) || null;
 }
 
 function saveCachedInsightsHtml(restaurant, filters = {}, html = "") {
-  if (isClientWorkspace()) return;
-  if (!html) return;
-  try {
-    const cache = readInsightsCache();
-    cache[insightsCacheId(restaurant, filters)] = {
-      html,
-      savedAt: new Date().toISOString(),
-    };
-    const entries = Object.entries(cache).slice(-12);
-    localStorage.setItem(INSIGHTS_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
-  } catch {
-    // Cache is only a resilience layer; the dashboard must keep working without it.
-  }
+  if (isClientWorkspace() || !ownerVerified || !html) return;
+  privateInsightsCache.set(insightsCacheId(restaurant, filters), { html, savedAt: new Date().toISOString() });
 }
 
 function clearInsightsRetry(restaurant) {
@@ -228,124 +233,64 @@ function scheduleInsightsRetry(restaurant, delayMs = 18000) {
   );
 }
 
+function apiCredentials(params = {}) {
+  const headers = {};
+  const client = params.token || "";
+  const owner = params.key || params.owner_key || (!client && ownerVerified ? OWNER_SESSION_TOKEN : "");
+  if (owner) headers["X-Owner-Session"] = owner;
+  else if (client) headers["X-Client-Token"] = client;
+  return headers;
+}
+
+async function apiResult(response) {
+  let data;
+  try { data = await response.json(); } catch { throw new Error("api_invalid_response"); }
+  if (!response.ok || data.ok === false) {
+    const error = new Error(data.error || "api_request_failed");
+    error.retryAfter = Number(response.headers?.get?.("Retry-After") || data.retry_after || 0);
+    if (response.status === 429) error.message = "too_many_attempts";
+    if (response.status === 401 && OWNER_SESSION_TOKEN && !["invalid_password", "invalid_reset_token"].includes(data.error)) clearOwnerSession();
+    throw error;
+  }
+  return data;
+}
+
 async function apiGet(action, params = {}) {
   if (!QRSTACK_API_URL) throw new Error("missing_api_url");
   const url = new URL(QRSTACK_API_URL);
   url.searchParams.set("action", action);
-  const ownerKey = params.key || params.owner_key;
   Object.entries(params).forEach(([key, value]) => {
-    if (key === "key" || key === "owner_key") return;
+    if (["key", "owner_key", "token"].includes(key)) return;
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   });
-  const response = await fetchWithRetry(url.toString(), { cache: "no-store", ...(ownerKey ? { headers: { "X-Owner-Key": encodeURIComponent(ownerKey) } } : {}) }, { timeoutMs: 15000, attempts: 2 });
-  const text = await response.text();
-  if (!text.trim().startsWith("{")) throw new Error("api_not_public_or_not_json");
-  const data = JSON.parse(text);
-  if (!response.ok || data.ok === false) throw new Error(data.error || "api_request_failed");
-  return data;
+  return apiResult(await fetchWithRetry(url.toString(), { cache: "no-store", referrerPolicy: "no-referrer", headers: apiCredentials(params) }, { timeoutMs: 15000, attempts: 1 }));
 }
 
 async function endpointGet(endpoint, action, params = {}) {
   if (!endpoint) throw new Error("missing_endpoint");
-  if (params.key || params.owner_key) {
-    if (new URL(endpoint).origin !== new URL(QRSTACK_API_URL).origin) throw new Error("owner_endpoint_not_allowed");
+  const url = new URL(endpoint);
+  const isProtected = params.key || params.owner_key || params.token || action === "getInsights";
+  if (isProtected) {
+    if (url.origin !== new URL(QRSTACK_API_URL).origin || url.pathname !== new URL(QRSTACK_API_URL).pathname) throw new Error("authenticated_endpoint_not_allowed");
     return apiGet(action, params);
   }
-  const url = new URL(endpoint);
   url.searchParams.set("action", action);
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, value);
   });
-  const corsEndpoint = supportsCorsEndpoint(endpoint);
-  if (action === "getInsights" && !corsEndpoint) return endpointJsonp(url, 15000);
-  try {
-    const response = await fetchWithRetry(
-      url.toString(),
-      { cache: "no-store" },
-      { timeoutMs: action === "getInsights" ? 30000 : 15000, attempts: 2 }
-    );
-    const text = await response.text();
-    if (!text.trim().startsWith("{")) throw new Error("endpoint_not_public_or_not_json");
-    const data = JSON.parse(text);
-    if (!response.ok || data.ok === false) throw new Error(data.error || "endpoint_request_failed");
-    return data;
-  } catch (error) {
-    if (action === "getInsights") return endpointJsonp(url, 30000);
-    throw error;
-  }
-}
-
-function supportsCorsEndpoint(endpoint = "") {
-  const text = String(endpoint || "").toLowerCase();
-  return text.includes("workers.dev") || text.includes("pages.dev") || text.includes("cloudflare");
-}
-
-function endpointJsonp(url, timeoutMs = 90000) {
-  if (typeof document === "undefined" || typeof window === "undefined") {
-    return Promise.reject(new Error("jsonp_not_available"));
-  }
-  const jsonpUrl = new URL(url.toString());
-  const callbackName = `__qrstackJsonp${Date.now()}${Math.random().toString(16).slice(2)}`;
-  jsonpUrl.searchParams.set("callback", callbackName);
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const script = document.createElement("script");
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      cleanup(true);
-      reject(new Error("endpoint_jsonp_timeout"));
-    }, timeoutMs);
-    const cleanup = (keepLateCallback = false) => {
-      clearTimeout(timeout);
-      if (keepLateCallback) {
-        window[callbackName] = () => {};
-        setTimeout(() => {
-          delete window[callbackName];
-        }, 120000);
-      } else {
-        delete window[callbackName];
-      }
-      script.remove();
-    };
-    window[callbackName] = (data) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (!data || data.ok === false) reject(new Error(data?.error || "endpoint_jsonp_failed"));
-      else resolve(data);
-    };
-    script.onerror = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(new Error("endpoint_jsonp_error"));
-    };
-    script.async = true;
-    script.src = jsonpUrl.toString();
-    document.head.appendChild(script);
-  });
+  return apiResult(await fetchWithRetry(url.toString(), { cache: "no-store", referrerPolicy: "no-referrer" }, { timeoutMs: 15000, attempts: 1 }));
 }
 
 async function apiPost(payload) {
   if (!QRSTACK_API_URL) throw new Error("missing_api_url");
-  const body = JSON.stringify(payload);
-  const canKeepAlive = new Blob([body]).size <= 60 * 1024;
-  const response = await fetchWithRetry(
-    QRSTACK_API_URL,
-    {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=UTF-8" },
-      body,
-      keepalive: canKeepAlive,
-    },
-    { timeoutMs: 20000, attempts: 2 }
-  );
-  const text = await response.text();
-  if (!text.trim().startsWith("{")) throw new Error("api_not_public_or_not_json");
-  const data = JSON.parse(text);
-  if (!response.ok || data.ok === false) throw new Error(data.error || "api_request_failed");
-  return data;
+  const { owner_key, key, ...data } = payload;
+  const token = data.slug ? data.token : "";
+  if (data.slug) delete data.token;
+  const body = JSON.stringify(data);
+  return apiResult(await fetchWithRetry(QRSTACK_API_URL, {
+    method: "POST", cache: "no-store", referrerPolicy: "no-referrer",
+    headers: { "Content-Type": "application/json", ...apiCredentials({ owner_key, key, token }) }, body,
+  }, { timeoutMs: 20000, attempts: 1 }));
 }
 
 async function uploadCatalogImage(file, restaurant) {
@@ -353,13 +298,12 @@ async function uploadCatalogImage(file, restaurant) {
   const optimized = await optimizeCatalogImage(file);
   const body = new FormData();
   body.set("slug", restaurant.slug);
-  body.set("token", restaurant.adminToken || ACTIVE_CLIENT_TOKEN);
   body.set("file", optimized, optimized.name);
   const url = new URL(QRSTACK_API_URL);
   url.searchParams.set("action", "uploadCatalogImage");
   const response = await fetchWithRetry(
     url.toString(),
-    { method: "POST", body },
+    { method: "POST", body, referrerPolicy: "no-referrer", headers: apiCredentials({token: clientToken(restaurant)}) },
     { timeoutMs: 45000, attempts: 2 }
   );
   const text = await response.text();
@@ -512,7 +456,6 @@ function fromSheetRestaurant(row) {
     catalogUrl: row.catalog_url || defaults.catalogUrl || "",
     sectionsUrl: row.sections_url || defaults.sectionsUrl || "",
     liveMenuEndpoint: row.live_menu_endpoint || defaults.liveMenuEndpoint || "",
-    adminToken: row.admin_token || ACTIVE_CLIENT_TOKEN,
     reminderTime: row.reminder_time || "",
     reminderEnabled: String(row.reminder_enabled).toUpperCase() === "TRUE",
     messageTemplate: row.message_template || "",
@@ -563,6 +506,12 @@ async function router() {
   const params = new URLSearchParams(hashQuery || window.location.search);
   const source = resolveTrafficSource(params).source;
 
+  if (parts[0] === "recuperar") return renderOwnerRecovery();
+  if (parts[0] === "redefinir") {
+    if (params.get("token")) { ownerResetToken = params.get("token"); removeAccessFromUrl("token"); }
+    return renderOwnerReset();
+  }
+  ownerResetToken = "";
   if (!hash || parts[0] === "home") return renderHome();
   if (parts[0] === "hq" || parts[0] === "central") return renderOwnerRoute(parts[1] || "overview", params);
   if (parts[0] === "cliente" || parts[0] === "admin") return renderClientRoute(parts[1] || ACTIVE_CLIENT_SLUG, params, currentRouteVersion);
@@ -582,42 +531,79 @@ async function renderOwnerRoute(tab, params) {
 }
 
 async function renderClientRoute(slug, params, version) {
-  const localRestaurant = getRestaurant(slug);
-  workspaceClientView = params.get("view") || "formulario";
-  app.innerHTML = renderWorkspace({ client: true, restaurant: localRestaurant, active: "formulario", title: "Cardápio do dia", content: renderWorkspaceLoading("Sincronizando o cardápio e os pratos...") });
-  if (hasClientAccess(localRestaurant, params)) return renderClientPortal(slug, version);
   const restaurant = await syncRestaurantFromApi(slug);
   if (!isCurrentRoute(version)) return;
-  if (!hasClientAccess(restaurant, params)) return renderClientGate(restaurant);
+  workspaceClientView = params.get("view") || "formulario";
+  if (!await hasClientAccess(restaurant, params)) { if (isCurrentRoute(version)) renderClientGate(restaurant); return; }
+  if (!isCurrentRoute(version)) return;
   return renderClientPortal(slug, version);
 }
 
-async function hasOwnerAccess(params) {
-  const key = params.get("key") || OWNER_ACCESS_TOKEN;
-  if (!key) return false;
-  try {
-    await apiPost({ action: "verifyOwnerAccess", owner_key: key });
-    OWNER_ACCESS_TOKEN = key;
-    ownerVerified = true;
-    try { sessionStorage.setItem("qrstack:owner-credential", key); } catch {}
-    rememberAccess(OWNER_SESSION_KEY);
-    if (params.get("key") && typeof history !== "undefined") {
-      const cleanParams = new URLSearchParams(location.hash.split("?")[1] || "");
-      cleanParams.delete("key");
-      history.replaceState(null, "", location.hash.split("?")[0] + (cleanParams.size ? "?" + cleanParams : ""));
-    }
-    return true;
-  } catch { return false; }
+function clearOwnerSession() {
+  OWNER_SESSION_TOKEN = "";
+  ownerVerified = false;
+  privateInsightsCache.clear();
+  try { sessionStorage.removeItem("qrstack:owner-session"); sessionStorage.removeItem(OWNER_SESSION_KEY); } catch {}
 }
 
-function hasClientAccess(restaurant, params) {
-  const token = params.get("token");
-  const expectedToken = restaurant.adminToken || ACTIVE_CLIENT_TOKEN;
-  if (token === expectedToken) {
+function acceptOwnerSession(data) {
+  if (!data.session_token || typeof data.session_token !== "string") throw new Error("invalid_owner_session");
+  OWNER_SESSION_TOKEN = data.session_token;
+  ownerVerified = true;
+  try { sessionStorage.setItem("qrstack:owner-session", data.session_token); } catch {}
+  rememberAccess(OWNER_SESSION_KEY);
+}
+
+function removeAccessFromUrl(param) {
+  if (typeof history === "undefined") return;
+  const clean = new URLSearchParams(location.hash.split("?")[1] || "");
+  const search = new URLSearchParams(location.search || "");
+  clean.delete(param);
+  search.delete(param);
+  history.replaceState(null, "", location.pathname + (search.size ? "?" + search : "") + location.hash.split("?")[0] + (clean.size ? "?" + clean : ""));
+}
+
+async function hasOwnerAccess(params = new URLSearchParams()) {
+  const password = params.get("key");
+  if (password) removeAccessFromUrl("key");
+  if (!password && !OWNER_SESSION_TOKEN) return false;
+  try {
+    if (password) acceptOwnerSession(await apiPost({ action: "loginOwner", password }));
+    else { await apiPost({ action: "verifyOwnerAccess", owner_key: OWNER_SESSION_TOKEN }); ownerVerified = true; }
+    ownerAccessError = "";
+    return true;
+  } catch (error) {
+    clearOwnerSession();
+    ownerAccessError = error.message === "too_many_attempts" ? authRetryMessage(error) : "Não foi possível entrar. Confira a senha e tente novamente.";
+    return false;
+  }
+}
+
+function clientToken(restaurant) {
+  const slug = restaurant?.slug;
+  if (!slug) return "";
+  if (clientTokens.has(slug)) return clientTokens.get(slug);
+  try { return sessionStorage.getItem("qrstack:client-token:" + slug) || ""; } catch { return ""; }
+}
+
+async function hasClientAccess(restaurant, params = new URLSearchParams()) {
+  const token = params.get("token") || clientToken(restaurant);
+  if (params.get("token")) removeAccessFromUrl("token");
+  if (!token && !OWNER_SESSION_TOKEN) return false;
+  try {
+    await apiPost({ action: "verifyClientAccess", slug: restaurant.slug, token, ...(!token && OWNER_SESSION_TOKEN ? {owner_key: OWNER_SESSION_TOKEN} : {}) });
+    if (!token && OWNER_SESSION_TOKEN) ownerVerified = true;
+    if (token) {
+      clientTokens.set(restaurant.slug, token);
+      try { sessionStorage.setItem("qrstack:client-token:" + restaurant.slug, token); } catch {}
+    }
     rememberAccess(clientSessionKey(restaurant));
     return true;
+  } catch {
+    clientTokens.delete(restaurant.slug);
+    try { sessionStorage.removeItem("qrstack:client-token:" + restaurant.slug); sessionStorage.removeItem(clientSessionKey(restaurant)); } catch {}
+    return false;
   }
-  return hasRememberedAccess(clientSessionKey(restaurant));
 }
 
 function rememberAccess(key) {
@@ -645,7 +631,7 @@ function ownerLink(tab = "overview") {
 }
 
 function clientPortalLink(restaurant) {
-  return `#/cliente/${restaurant.slug}?token=${encodeURIComponent(restaurant.adminToken || ACTIVE_CLIENT_TOKEN)}`;
+  return `#/cliente/${encodeURIComponent(restaurant.slug)}?portal=1`;
 }
 
 function publicMenuHash(restaurant, source = "qr") {
@@ -1092,18 +1078,60 @@ function renderOwnerGate() {
         <img class="access-panel__logo" src="${ASSETS.qrstackWordmark}" alt="QrStack" />
         <p class="eyebrow">Acesso interno</p>
         <h1>Central QrStack</h1>
-        <p>Insira sua chave para abrir o ambiente de gestão.</p>
+        <p>Informe sua senha para abrir o ambiente de gestão.</p>
         <form class="access-form" data-owner-access>
-          <label for="owner-access-key">Chave ou link de acesso</label>
-          <input id="owner-access-key" name="ownerAccessKey" type="password" autocomplete="current-password" placeholder="Digite sua senha ou cole o link da Central" required />
+          <label for="owner-access-key">Senha da gestão</label>
+          <input id="owner-access-key" name="ownerAccessKey" type="password" autocomplete="current-password" placeholder="Digite sua senha" required />
           <div class="actions">
             <button type="submit">Entrar na Central</button>
             <a class="button secondary" href="#/home">Voltar ao início</a>
+            <a href="#/recuperar">Esqueci minha senha</a>
           </div>
         </form>
       </div>
     </section>
   `;
+}
+
+function renderOwnerRecovery() {
+  setSystemTheme();
+  app.innerHTML = `<section class="entry-screen entry-screen--gate"><div class="access-panel">
+    <img class="access-panel__logo" src="${ASSETS.qrstackWordmark}" alt="QrStack" />
+    <h1>Recuperar acesso</h1><p>Informe o e-mail cadastrado para receber as instruções de redefinição.</p>
+    <form class="access-form" data-owner-recovery><label for="recovery-email">E-mail</label>
+      <input id="recovery-email" name="email" type="email" autocomplete="email" maxlength="254" required />
+      <button type="submit">Enviar instruções</button><p data-auth-status role="status" aria-live="polite"></p>
+    </form><a href="#/hq">Voltar ao acesso da gestão</a>
+  </div></section>`;
+}
+
+function renderOwnerReset() {
+  setSystemTheme();
+  const content = ownerResetToken ? `<p>Escolha uma nova senha exclusiva para sua gestão.</p>
+    <form class="access-form" data-owner-reset>
+      <label for="reset-password">Nova senha</label><input id="reset-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required />
+      <label for="reset-confirmation">Confirmar nova senha</label><input id="reset-confirmation" name="confirmation" type="password" autocomplete="new-password" minlength="12" maxlength="128" required />
+      <p>Use de 12 a 128 caracteres, sem espaços no início ou no fim.</p>
+      <button type="submit">Salvar nova senha</button><p data-auth-status role="status" aria-live="polite"></p>
+    </form>` : `<p>Abra o link recebido por e-mail. Se ele expirou, solicite novas instruções.</p><a class="button" href="#/recuperar">Solicitar novo link</a>`;
+  app.innerHTML = `<section class="entry-screen entry-screen--gate"><div class="access-panel"><img class="access-panel__logo" src="${ASSETS.qrstackWordmark}" alt="QrStack" /><h1>Redefinir senha</h1>${content}<a href="#/hq">Voltar ao acesso da gestão</a></div></section>`;
+}
+
+async function requestOwnerRecovery(email) {
+  return apiPost({ action: "requestOwnerPasswordReset", email });
+}
+
+async function completeOwnerRecovery(password) {
+  if (!ownerResetToken) throw new Error("invalid_reset_token");
+  const result = await apiPost({ action: "resetOwnerPassword", token: ownerResetToken, new_password: password });
+  ownerResetToken = "";
+  clearOwnerSession();
+  return result;
+}
+
+function authRetryMessage(error) {
+  const seconds = Number(error?.retryAfter || 0);
+  return seconds > 0 ? `Muitas tentativas. Aguarde ${Math.max(1, Math.ceil(seconds / 60))} minuto(s) antes de tentar novamente.` : "Muitas tentativas. Aguarde alguns minutos antes de tentar novamente.";
 }
 
 function renderClientGate(restaurant) {
@@ -1117,7 +1145,7 @@ function renderClientGate(restaurant) {
         <p>Use o link privado enviado pela QrStack para abrir o formulário.</p>
         <form class="access-form" data-client-access data-slug="${restaurant.slug}">
           <label for="client-access-token">Token ou link privado</label>
-          <input id="client-access-token" name="clientAccessToken" autocomplete="off" placeholder="Cole o token ou link do restaurante" />
+          <input id="client-access-token" name="clientAccessToken" type="password" autocomplete="off" placeholder="Cole o token ou link do restaurante" />
           <div class="actions">
             <button type="submit">Abrir formulário</button>
             <a class="button secondary" href="${publicMenuHash(restaurant, "platform")}">Ver cardápio público</a>
@@ -1184,14 +1212,11 @@ function renderOwnerPassword() {
 async function updateOwnerPassword(currentPassword, newPassword) {
   // Never automatically replay a credential mutation after an ambiguous network failure.
   const response = await fetchWithRetry(QRSTACK_API_URL, {
-    method: "POST", headers: { "Content-Type": "text/plain;charset=UTF-8" },
+    method: "POST", cache: "no-store", referrerPolicy: "no-referrer", headers: { "Content-Type": "application/json", "X-Owner-Session": OWNER_SESSION_TOKEN },
     body: JSON.stringify({ action: "changeOwnerPassword", current_password: currentPassword, new_password: newPassword }),
   }, { timeoutMs: 20000, attempts: 1 });
-  const result = await response.json();
-  if (!response.ok || !result.ok) throw new Error(result.error || "owner_auth_unavailable");
-  OWNER_ACCESS_TOKEN = newPassword;
-  ownerVerified = true;
-  try { sessionStorage.setItem("qrstack:owner-credential", newPassword); } catch {}
+  const result = await apiResult(response);
+  acceptOwnerSession(result);
   return result;
 }
 
@@ -1282,7 +1307,7 @@ function renderPlanLock(feature, plan) {
 async function syncClientPlan(restaurant) {
   restaurant.planAccess = null;
   try {
-    const data = await apiGet("getRestaurantPlan", { slug: restaurant.slug, token: restaurant.adminToken });
+    const data = await apiGet("getRestaurantPlan", { slug: restaurant.slug, token: clientToken(restaurant) });
     restaurant.planAccess = data.entitlement;
   } catch { /* Fail closed for paid features; the menu remains available. */ }
   return restaurant.planAccess;
@@ -1291,7 +1316,7 @@ async function hydrateClientPlans() {
   const target = document.getElementById("client-plans");
   if (!target) return;
   try {
-    const data = await apiGet("listRestaurantPlans", { key: OWNER_ACCESS_TOKEN });
+    const data = await apiGet("listRestaurantPlans", { key: OWNER_SESSION_TOKEN });
     if (!target.isConnected) return;
     const count = target.parentElement.querySelector(".section-title-row span");
     if (count) count.textContent = `${data.restaurants.length} ${data.restaurants.length === 1 ? "restaurante" : "restaurantes"}`;
@@ -1309,7 +1334,7 @@ async function hydrateClientPlans() {
         const status = form.querySelector("[data-plan-status]");
         button.disabled = true;
         try {
-          const response = await apiPost({ action: "setRestaurantPlan", owner_key: OWNER_ACCESS_TOKEN, slug: form.dataset.clientPlan, plan: form.elements.plan.value });
+          const response = await apiPost({ action: "setRestaurantPlan", owner_key: OWNER_SESSION_TOKEN, slug: form.dataset.clientPlan, plan: form.elements.plan.value });
           status.textContent = `Plano salvo: ${response.entitlement.name}. Os acessos do cliente foram atualizados.`;
         } catch { status.textContent = "Não foi possível confirmar a alteração. Reabra a lista para conferir o plano salvo."; }
         finally { button.disabled = false; }
@@ -1382,7 +1407,7 @@ async function hydrateMenuResponses() {
   const target = document.getElementById("responses-live");
   if (!target) return;
   try {
-    const data = await apiGet("getMenuResponses", { slug: ACTIVE_CLIENT_SLUG, key: OWNER_ACCESS_TOKEN, fresh: Date.now() });
+    const data = await apiGet("getMenuResponses", { slug: ACTIVE_CLIENT_SLUG, key: OWNER_SESSION_TOKEN, fresh: Date.now() });
     target.innerHTML = renderMenuResponseRows(Array.isArray(data.responses) ? data.responses : []);
   } catch (error) {
     console.warn("QrStack response history unavailable:", error.message);
@@ -1712,7 +1737,7 @@ async function refreshStoryPublishing(draft) {
   draft.panel.querySelector("#story-publishing-account").textContent = "Consultando a conta vinculada...";
   updateStoryControls(draft);
   try {
-    const params = { slug: draft.restaurant.slug, token: draft.restaurant.adminToken, fresh: Date.now() };
+    const params = { slug: draft.restaurant.slug, token: clientToken(draft.restaurant), fresh: Date.now() };
     const [config, latest] = await Promise.all([apiGet("getStoryPublishingConfig", params), apiGet("getStoryJob", params)]);
     if (!storyComposerIsCurrent(draft) || draft.configVersion !== version) return;
     draft.publishing = config.publishing;
@@ -1764,7 +1789,7 @@ function attachStoryAccountHandlers() {
     const summary = form.closest("[data-story-account-card]").querySelector("[data-story-account-summary]");
     const button = form.querySelector('button[type="submit"]');
     try {
-      const response = await apiGet("getStoryPublishingConfig", { slug: restaurant.slug, token: restaurant.adminToken, fresh: Date.now() });
+      const response = await apiGet("getStoryPublishingConfig", { slug: restaurant.slug, token: clientToken(restaurant), fresh: Date.now() });
       if (!form.isConnected) return;
       const publishing = response.publishing || {};
       for (const field of ["publisher_id", "instagram_username", "instagram_user_id"]) form.elements[field].value = publishing[field] || "";
@@ -1779,7 +1804,7 @@ function attachStoryAccountHandlers() {
       form.dataset.submitting = "true";
       button.disabled = true;
       try {
-        const response = await apiPost({ action: "bindInstagramAccount", owner_key: OWNER_ACCESS_TOKEN, slug: restaurant.slug,
+        const response = await apiPost({ action: "bindInstagramAccount", owner_key: OWNER_SESSION_TOKEN, slug: restaurant.slug,
           publisher_id: form.elements.publisher_id.value.trim(), instagram_username: form.elements.instagram_username.value.trim().replace(/^@/, ""),
           instagram_user_id: form.elements.instagram_user_id.value.trim(), enabled: form.elements.enabled.checked });
         if (form.isConnected) summary.textContent = storyPublishingDescription(response.publishing);
@@ -2174,7 +2199,7 @@ function attachCatalogManagerHandlers(restaurant) {
       const data = await apiPost({
         action: "saveCatalogItem",
         slug: restaurant.slug,
-        token: restaurant.adminToken || ACTIVE_CLIENT_TOKEN,
+        token: clientToken(restaurant),
         id: form.elements.catalogItemId.value,
         name: form.elements.catalogName.value.trim(),
         section_id: sectionSelect.value === "__new__" ? normalizeKey(sectionTitle).replace(/\s+/g, "-") : sectionSelect.value,
@@ -2298,7 +2323,7 @@ function saveStoryPreview(restaurant, menu, source = "auto") {
   apiPost({
     action: "saveStoryAsset",
     slug: restaurant.slug,
-    token: restaurant.adminToken,
+    token: clientToken(restaurant),
     menu_day_id: menu.id,
     image_url: "local-canvas-preview",
     template_name: templateName,
@@ -2314,7 +2339,7 @@ async function queueStoryPublication(restaurant, menu, requestId, media, draft) 
   const response = await apiPost({
     action: "createStoryJob",
     slug: restaurant.slug,
-    token: restaurant.adminToken,
+    token: clientToken(restaurant),
     menu_day_id: menu.id,
     story_link: menu.storyLink || restaurantStoryLink(restaurant),
     content_type: media.contentType,
@@ -2342,7 +2367,7 @@ function pollStoryPublication(restaurant, jobId, attempt = 0, draft = storyCompo
     try {
       const data = await apiGet("getStoryJob", {
         slug: restaurant.slug,
-        token: restaurant.adminToken,
+        token: clientToken(restaurant),
         job: jobId,
       });
       const job = data.job;
@@ -2433,7 +2458,7 @@ async function saveMenuForm(restaurant, menuId, formData) {
     const response = await apiPost({
       action: "saveMenuDay",
       slug: restaurant.slug,
-      token: restaurant.adminToken || ACTIVE_CLIENT_TOKEN,
+      token: clientToken(restaurant),
       date: menu.date,
       title: menu.title,
       price: menu.price,
@@ -2606,7 +2631,7 @@ async function hydrateInsights(restaurant, options = {}) {
     const endpoint = clientView ? QRSTACK_API_URL : restaurant.analyticsEndpoint || restaurant.liveMenuEndpoint || QRSTACK_API_URL;
     const data = await endpointGet(endpoint, "getInsights", {
       slug: restaurant.slug,
-      ...(clientView ? { token: restaurant.adminToken } : { key: OWNER_ACCESS_TOKEN }),
+      ...(clientView ? { token: clientToken(restaurant) } : { key: OWNER_SESSION_TOKEN }),
       startDate: filters.startDate,
       endDate: filters.endDate,
       refresh: forceRefresh ? "1" : "",
@@ -3914,16 +3939,58 @@ document.addEventListener("submit", async (event) => {
     return;
   }
 
+  const recoveryForm = event.target.closest("[data-owner-recovery]");
+  const resetForm = event.target.closest("[data-owner-reset]");
+  if (recoveryForm || resetForm) {
+    event.preventDefault();
+    const form = recoveryForm || resetForm;
+    const button = form.querySelector('button[type="submit"]');
+    if (button.disabled) return;
+    const status = form.querySelector("[data-auth-status]");
+    if (resetForm && (form.elements.password.value !== form.elements.confirmation.value || form.elements.password.value !== form.elements.password.value.trim())) {
+      status.textContent = "Confira a confirmação e remova espaços no início ou no fim da senha."; return;
+    }
+    button.disabled = true;
+    status.textContent = "Aguarde...";
+    try {
+      if (recoveryForm) {
+        await requestOwnerRecovery(form.elements.email.value.trim());
+        form.reset();
+        status.textContent = "Se o endereço estiver cadastrado, você receberá as instruções. Confira também a pasta de spam.";
+      } else {
+        await completeOwnerRecovery(form.elements.password.value);
+        form.reset();
+        window.location.hash = "#/hq";
+        toast("Senha redefinida. Entre com a nova senha.");
+      }
+    } catch (error) {
+      status.textContent = error.message === "too_many_attempts" ? authRetryMessage(error) : error.message === "recovery_unavailable"
+        ? "A recuperação por e-mail está temporariamente indisponível. Tente novamente mais tarde."
+        : recoveryForm ? "Se o endereço estiver cadastrado, você receberá as instruções. Aguarde antes de solicitar novamente."
+        : "Não foi possível redefinir a senha. O link pode ter expirado ou já ter sido usado. Solicite um novo link.";
+      if (error.message === "too_many_attempts") {
+        const wait = Math.max(1, Number(error.retryAfter || 60));
+        button.dataset.retryAt = String(Date.now() + wait * 1000);
+        window.setTimeout(() => { delete button.dataset.retryAt; button.disabled = false; }, wait * 1000);
+      }
+    } finally { if (!button.dataset.retryAt) button.disabled = false; }
+    return;
+  }
+
   const ownerAccessForm = event.target.closest("[data-owner-access]");
   if (ownerAccessForm) {
     event.preventDefault();
+    const submit = ownerAccessForm.querySelector('button[type="submit"]');
+    if (submit.disabled) return;
+    submit.disabled = true;
     const rawAccess = new FormData(ownerAccessForm).get("ownerAccessKey");
     const key = /^https?:\/\//i.test(String(rawAccess)) ? extractAccessParam(rawAccess, "key") : String(rawAccess || "");
     if (await hasOwnerAccess(new URLSearchParams({ key }))) {
       window.location.hash = ownerLink("overview");
       return;
     }
-    toast("Chave da Central inválida.");
+    submit.disabled = false;
+    toast(ownerAccessError || "Não foi possível entrar. Tente novamente mais tarde.");
     return;
   }
 
@@ -3933,9 +4000,7 @@ document.addEventListener("submit", async (event) => {
     const restaurant = getRestaurant(clientAccessForm.dataset.slug || ACTIVE_CLIENT_SLUG);
     const rawAccess = new FormData(clientAccessForm).get("clientAccessToken");
     const token = extractAccessParam(rawAccess, "token");
-    const expectedToken = restaurant.adminToken || ACTIVE_CLIENT_TOKEN;
-    if (token === expectedToken) {
-      rememberAccess(clientSessionKey(restaurant));
+    if (await hasClientAccess(restaurant, new URLSearchParams({token}))) {
       window.location.hash = clientPortalLink(restaurant);
       return;
     }
@@ -3944,6 +4009,29 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("click", async (event) => {
+  if (event.target.closest("[data-owner-logout]")) {
+    event.preventDefault();
+    try { await apiPost({action:"logoutOwner", owner_key: OWNER_SESSION_TOKEN}); }
+    catch { toast("A saída local foi concluída. A sessão remota será encerrada ao expirar."); }
+    clearOwnerSession();
+    window.location.hash = "#/hq";
+    renderOwnerGate();
+    return;
+  }
+  const accessCopy = event.target.closest("[data-copy-client-access]");
+  if (accessCopy) {
+    event.preventDefault();
+    if (accessCopy.disabled) return;
+    accessCopy.disabled = true;
+    try {
+      const data = await apiGet("getRestaurantAccess", {slug: accessCopy.dataset.copyClientAccess, key: OWNER_SESSION_TOKEN});
+      if (!data.token) throw new Error("missing_client_access");
+      await copyToClipboard(absoluteAppUrl(`#/cliente/${encodeURIComponent(accessCopy.dataset.copyClientAccess)}?token=${encodeURIComponent(data.token)}`));
+      toast("Link privado copiado. Compartilhe somente com os responsáveis do restaurante.");
+    } catch (error) { toast(error.message === "too_many_attempts" ? authRetryMessage(error) : "Não foi possível obter o link privado. Entre novamente na gestão."); }
+    finally { accessCopy.disabled = false; }
+    return;
+  }
   const chartPoint = event.target.closest("[data-chart-point]");
   if (chartPoint) {
     showChartPointDetails(chartPoint);
@@ -4031,4 +4119,12 @@ async function copyToClipboard(value) {
     document.execCommand("copy");
     textarea.remove();
   }
+}
+
+// Remove the old offline shell; private screens and credentials must never be cached by it.
+if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.getRegistrations().then(registrations => registrations.forEach(registration => registration.unregister())).catch(() => {});
+    if ("caches" in window) caches.keys().then(keys => keys.forEach(key => caches.delete(key))).catch(() => {});
+  });
 }

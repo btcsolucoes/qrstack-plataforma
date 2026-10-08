@@ -1,17 +1,11 @@
 import { verifyOwner } from './owner-auth.js';
+import { authorizeTenant, getTenant, publicRestaurant } from './tenant-auth.js';
 export const PLANS = Object.freeze({
   cardapio: { name: 'RSTACK CARDÁPIO', features: { menu: true, story: false, autopublish: false, analytics: false } },
   divulgacao: { name: 'QRSTACK DIVULGAÇÃO', features: { menu: true, story: true, autopublish: false, analytics: false } },
   performance: { name: 'QRSTACK PERFORMANCE', features: { menu: true, story: true, autopublish: true, analytics: true } },
 });
 function deny(code, status = 403) { const error = new Error(code); error.status = status; throw error; }
-async function same(a, b) {
-  if (!a || !b) return false;
-  const hash = async value => new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(value))));
-  const [left, right] = await Promise.all([hash(a), hash(b)]);
-  let diff = 0; for (let i = 0; i < left.length; i++) diff |= left[i] ^ right[i];
-  return diff === 0;
-}
 function bearer(request) { return request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || ''; }
 export async function isOwner(env, request, supplied = '') {
   return verifyOwner(env, request, supplied || bearer(request));
@@ -19,13 +13,7 @@ export async function isOwner(env, request, supplied = '') {
 function capacity(error) { return /row read limit|rows read|daily.*limit|quota|exceeded.*D1/i.test(String(error?.message || '')); }
 async function cached(env, key) { return env.INSIGHTS_CACHE?.get ? env.INSIGHTS_CACHE.get(key, 'json') : null; }
 async function saveCache(env, key, value) { if (env.INSIGHTS_CACHE) await env.INSIGHTS_CACHE.put(key, JSON.stringify(value)); }
-async function tenantFor(env, slug) {
-  const saved = await cached(env, 'plans:tenant:' + slug);
-  if (saved) return saved;
-  const row = await env.DB.prepare('SELECT id, slug, admin_token FROM restaurants WHERE slug = ?').bind(slug).first();
-  if (row) await saveCache(env, 'plans:tenant:' + slug, row);
-  return row;
-}
+const tenantFor = getTenant;
 async function syncPlan(env, record) {
   const timestamp = record.updated_at;
   await env.DB.batch([
@@ -48,8 +36,7 @@ export async function entitlement(env, restaurantId) {
 }
 export async function authorizeInsights(env, request, params) {
   if (await isOwner(env, request, params.get('key') || params.get('owner_key'))) return;
-  const tenant = await tenantFor(env, params.get('slug') || 'amaro');
-  if (!tenant || !await same(params.get('token') || bearer(request), tenant.admin_token)) deny('unauthorized', 401);
+  const tenant = await authorizeTenant(env, request, params.get('slug') || 'amaro', params.get('token'));
   if (!(await entitlement(env, tenant.id)).features.analytics) deny('plan_performance_required');
 }
 export async function handlePlans(request, env, payload, action) {
@@ -73,12 +60,12 @@ export async function handlePlans(request, env, payload, action) {
         rows = await cached(env, 'plans:restaurants');
         if (!rows) throw error;
       }
-      result.restaurants = await Promise.all(rows.map(async row => ({ ...row, plan: (await entitlement(env, row.id)).plan })));
+      result.restaurants = await Promise.all(rows.map(async row => ({ ...publicRestaurant(row), plan: (await entitlement(env, row.id)).plan })));
     } else if (action !== 'verifyOwnerAccess') {
       const slug = String(payload.slug || params.get('slug') || '');
       const tenant = await tenantFor(env, slug);
       if (!tenant) deny('restaurant_not_found', 404);
-      if (!owner && !await same(params.get('token') || bearer(request), tenant.admin_token)) deny('unauthorized', 401);
+      if (!owner) await authorizeTenant(env, request, slug, params.get('token'));
       if (action === 'setRestaurantPlan') {
         if (!Object.hasOwn(PLANS, payload.plan || '')) deny('invalid_plan', 400);
         const previous = await cached(env, 'plans:access:' + tenant.id);

@@ -43,6 +43,8 @@ function fixture(t) {
     OWNER_AUTH: { getByName() { return {
       async verify(...args) { return (await authStore).verify(...args); },
       async change(...args) { return (await authStore).change(...args); },
+      async rateLimit(...args) { return (await authStore).rateLimit(...args); },
+      async verifySession(...args) { return (await authStore).verifySession(...args); },
     }; } },
     DB: {
       prepare(sql) {
@@ -79,7 +81,7 @@ function fixture(t) {
     if (options.claimToken) headers.set('x-claim-token', options.claimToken);
     const request = new Request(url, { method, headers });
     const response = await handleInstagramStories(request, env, method === 'POST' ? bodyOrQuery : {}, action);
-    if (response.headers.get('content-type')?.includes('application/json')) return { status: response.status, data: await response.json() };
+    if (response.headers.get('content-type')?.includes('application/json')) return { status: response.status, data: await response.json(), headers: response.headers };
     return { status: response.status, bytes: new Uint8Array(await response.arrayBuffer()), headers: response.headers };
   }
   async function setupAccount({ slug = 'internal', publisherId = 'test-windows', username = 'internal_test', userId = '12345', token = publisherToken, enabled = true } = {}) {
@@ -150,7 +152,7 @@ test('concurrent duplicate submissions return one job while changed payload conf
   assert.deepEqual(results.map(result => result.status).sort(), [200, 200, 201]);
   assert.equal(new Set(results.map(result => result.data.job.id)).size, 1);
   assert.equal(f.sqlite.prepare('SELECT count(*) n FROM instagram_story_jobs').get().n, 1);
-  assert.equal(f.kv.size, 1);
+  assert.equal([...f.kv.keys()].filter(key => key.startsWith('instagram-stories/')).length, 1);
   assert.equal((await f.enqueue({ story_link: 'https://example.test/changed' })).data.error, 'idempotency_key_conflict');
   assert.equal((await f.enqueue({ client_request_id: '' })).status, 400);
 });
@@ -292,7 +294,7 @@ test('enqueue refuses a stale account snapshot if the binding changes before ins
   };
   assert.equal((await f.enqueue()).status, 409);
   assert.equal(f.sqlite.prepare('SELECT count(*) n FROM instagram_story_jobs').get().n, 0);
-  assert.equal(f.kv.size, 0);
+  assert.equal([...f.kv.keys()].filter(key => key.startsWith('instagram-stories/')).length, 0);
 });
 
 test('account reassignment cannot race a newly enqueued unresolved job', async t => {
@@ -334,7 +336,72 @@ test('uncertain publication blocks the account and is only cleared by a confirme
   assert.equal((await f.enqueue({ client_request_id: 'another-new-request' })).data.error, 'instagram_outcome_unknown');
   assert.equal((await f.update(job, 'failed_attention')).status, 409);
   assert.equal((await f.update(job, 'completed', { media_id: 'confirmed_12345' })).status, 200);
+  // Reconciliation clears uncertainty, but cannot waive the daily buffer.
+  assert.equal((await f.claim()).data.job, null);
+  f.sqlite.prepare('UPDATE instagram_story_jobs SET started_at = ?, completed_at = ? WHERE id = ?')
+    .run(new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(), new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(), job.id);
   assert.equal((await f.claim()).data.job.status, 'claimed');
+});
+
+test('daily account buffer blocks new submissions and queued jobs but preserves idempotent completion', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  await f.enqueue({ client_request_id: 'already-queued' });
+  const job = (await f.claim()).data.job;
+  assert.equal((await f.update(job, 'publishing')).status, 200);
+  const active = await f.call('getInstagramPublisherJob', { publisher_id: job.publisher_id, job_id: job.id }, { token: publisherToken, claimToken: job.claim_token });
+  assert.equal(active.data.can_publish, true); // Its own permit must not freeze its guard.
+  assert.equal((await f.update(job, 'completed', { media_id: 'confirmed-123' })).status, 200);
+  const config = (await f.call('getStoryPublishingConfig', { slug: 'internal', token: 'internal-test-token' })).data.publishing;
+  assert.equal(config.enabled, false);
+  assert.equal(config.state, 'cooldown');
+  assert.ok(config.retry_after_seconds > 86390 && config.retry_after_seconds <= 86400);
+  const blocked = await f.enqueue({ client_request_id: 'too-soon' });
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.data.error, 'instagram_publication_cooldown');
+  assert.equal(Number(blocked.headers.get('retry-after')), blocked.data.retry_after_seconds);
+  assert.equal((await f.claim()).data.job, null);
+  assert.equal((await f.update(job, 'completed', { media_id: 'confirmed-123' })).data.duplicate, true);
+  assert.equal((await f.enqueue()).data.job.id, job.id);
+  const expired = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+  f.sqlite.prepare('UPDATE instagram_story_jobs SET started_at = ?, completed_at = ? WHERE id = ?').run(expired, expired, job.id);
+  const next = (await f.claim()).data.job;
+  assert.equal(next.client_request_id, 'already-queued');
+  assert.equal((await f.update(next, 'publishing')).status, 200);
+});
+
+test('atomic permission rejects a publication entering the daily window after preflight', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  await f.enqueue({ client_request_id: 'already-queued' });
+  const first = (await f.claim()).data.job;
+  await f.update(first, 'publishing');
+  await f.update(first, 'completed', { media_id: 'confirmed-123' });
+  const expired = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+  f.sqlite.prepare('UPDATE instagram_story_jobs SET started_at = ?, completed_at = ? WHERE id = ?').run(expired, expired, first.id);
+  const second = (await f.claim()).data.job;
+  const original = f.env.DB.batch;
+  f.env.DB.batch = statements => {
+    f.sqlite.prepare('UPDATE instagram_story_jobs SET completed_at = ? WHERE id = ?').run(new Date().toISOString(), first.id);
+    return original(statements);
+  };
+  assert.equal((await f.update(second, 'publishing')).status, 409);
+  assert.equal(f.sqlite.prepare('SELECT status FROM instagram_story_jobs WHERE id = ?').get(second.id).status, 'claimed');
+  assert.equal(f.sqlite.prepare("SELECT count(*) n FROM instagram_story_job_events WHERE status='publishing'").get().n, 1);
+});
+
+test('publication window follows immutable Instagram identity after a restaurant rebind', async t => {
+  const f = fixture(t);
+  await f.setupAccount(); await f.enqueue();
+  const job = (await f.claim()).data.job;
+  await f.update(job, 'publishing');
+  await f.update(job, 'completed', { media_id: 'confirmed-123' });
+  await f.setupAccount({ slug: 'other', username: 'other_test', userId: '67890' });
+  assert.equal((await f.call('getStoryPublishingConfig', { slug: 'other', token: 'other-test-token' })).data.publishing.state, 'ready');
+  f.sqlite.exec("DELETE FROM instagram_account_bindings WHERE restaurant_id = 'r-internal'");
+  await f.setupAccount({ slug: 'other', username: 'internal_test', userId: '12345' });
+  assert.equal((await f.call('getStoryPublishingConfig', { slug: 'other', token: 'other-test-token' })).data.publishing.state, 'cooldown');
+  assert.equal((await f.enqueue({ slug: 'other', token: 'other-test-token', client_request_id: 'rebind-attempt' })).status, 429);
 });
 
 test('ambiguous permission transport failure can conservatively freeze a job before publishing state', async t => {

@@ -9,7 +9,7 @@ Plataforma QrStack para gerenciar clientes, formulários, cardápios dinâmicos,
 - `#/hq/respostas` - respostas dos formulários.
 - `#/hq/stories` - Stories gerados.
 - `#/hq/insights` - insights internos.
-- `#/cliente/amaro?token=qrstack-amaro-2026` - formulário simplificado do restaurante.
+- `#/cliente/amaro` - formulário do restaurante; o link privado é obtido em **Restaurantes → Copiar link privado**.
 - `#/r/amaro?src=qr` - cardápio público com tracking de origem. Para o Amaro, a rota carrega o cardápio original do repositório `carda-pio`.
 
 ## Escopo atual
@@ -26,6 +26,30 @@ Na gestão **Restaurantes**, cada cliente possui um seletor de plano persistido 
 Cadastros sem plano começam em Cardápio. A gestão QrStack mantém acesso aos
 analytics de todos; o portal do cliente segue o plano atribuído. A chave da
 gestão é validada no Worker e não fica embutida no JavaScript público.
+O login troca a senha por uma sessão aleatória com validade de quatro horas.
+O navegador guarda apenas essa sessão, não a senha. Logout, troca ou redefinição
+revogam as sessões correspondentes. Links de recuperação são enviados somente
+ao e-mail configurado no servidor, expiram em quinze minutos e têm uso único.
+Solicitações e tentativas têm limites persistentes por IP; o envio também tem
+limite por conta, com resposta genérica para não revelar endereços cadastrados.
+O remetente precisa estar autorizado: o relay de Gmail está em
+`apps-script-recovery/`, como alternativa ao binding Cloudflare Email.
+Sem remetente configurado, a interface informa indisponibilidade, sem simular envio.
+
+### Isolamento e dados públicos
+
+O D1 não implementa as políticas RLS do PostgreSQL. O equivalente obrigatório
+neste projeto é a autorização por restaurante no Worker e as restrições
+`restaurant_id` nas consultas e gravações. Testes negativos cobrem tentativas
+de acessar ou substituir registros de outro restaurante. Respostas públicas
+usam listas de campos permitidos, inclusive para snapshots antigos. Credenciais,
+notas internas, fontes privadas e mensagens de erro de infraestrutura não são
+expostas. O frontend não tem acesso direto ao banco, token estático de cliente,
+JSONP autenticado ou cache persistente de analytics. O token antigo do Amaro
+foi rotacionado no D1 e nos caches privados em 2026-10-07 porque esteve no histórico público.
+
+### Senha e recuperação
+
 Em **Minha senha**, o gestor informa a senha atual e define outra com 12 a 128
 caracteres. A alteração vale imediatamente para as próximas requisições da gestão;
 os acessos dos restaurantes e a credencial do Apps Script não são alterados.
