@@ -180,13 +180,25 @@ test('Story composer offers branded generation or upload and starts with publish
   assert.doesNotMatch(html, /telefone|Android|APK|type="password"/i);
 });
 
-test('account configuration contains only public identifiers and no Instagram login', () => {
+test('owner account configuration includes a masked one-time password and session status', () => {
   const html = runtime()('renderHqStories()');
   assert.match(html, /name="publisher_id"/);
   assert.match(html, /name="instagram_username"/);
   assert.match(html, /name="instagram_user_id"/);
   assert.match(html, /view=story-panel/);
-  assert.doesNotMatch(html, /type="password"|name="(?:password|service_token)"|APK|Android/);
+  assert.match(html, /name="password" type="password"/);
+  assert.match(html, /data-instagram-session-status/);
+  assert.match(html, /data-password-toggle/);
+  assert.match(html, /Conectar sessão/);
+  assert.doesNotMatch(html, /name="service_token"|APK|Android/);
+});
+
+test('session presentation separates cached verification, pending login and runner availability', () => {
+  const run = runtime();
+  assert.match(run('instagramSessionDescription({configured:false})'), /não vinculada/);
+  assert.match(run('instagramSessionDescription({configured:true,state:"connected",publisher_online:false,verified_at:"2026-10-08T12:00:00Z"})'), /última confirmação.*offline.*Última confirmação/);
+  assert.match(run('instagramSessionDescription({configured:true,state:"connected",request_status:"processing",publisher_online:true})'), /Conectando.*online/);
+  assert.match(run('instagramSessionDescription({configured:true,state:"verification_required"})'), /aplicativo oficial/);
 });
 
 test('publication requires an enabled ready private publisher with a complete account identity', () => {

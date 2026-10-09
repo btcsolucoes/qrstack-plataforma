@@ -36,10 +36,12 @@ function fixture(t) {
   sqlite.exec(migration);
   sqlite.exec(migration); // Retry-safe migration, preserving old records.
   sqlite.exec(fs.readFileSync(path.join(root, 'cloudflare/migrations/0011_restaurant_plans.sql'), 'utf8'));
+  for (let i = 0; i < 2; i++) sqlite.exec(fs.readFileSync(path.join(root, 'cloudflare/migrations/0012_instagram_sessions.sql'), 'utf8'));
   sqlite.exec("INSERT INTO restaurant_plans SELECT id, 'performance', '2026-10-06' FROM restaurants");
   const kv = new Map();
   const env = {
     OWNER_ACCESS_TOKEN: ownerKey,
+    INSTAGRAM_CREDENTIAL_KEY: 'ab'.repeat(32),
     OWNER_AUTH: { getByName() { return {
       async verify(...args) { return (await authStore).verify(...args); },
       async change(...args) { return (await authStore).change(...args); },
@@ -72,7 +74,7 @@ function fixture(t) {
   };
   async function call(action, bodyOrQuery = {}, options = {}) {
     const { handleInstagramStories } = await modulePromise;
-    const method = options.method || (['registerInstagramPublisher', 'bindInstagramAccount', 'createStoryJob', 'updateInstagramStoryJob'].includes(action) ? 'POST' : 'GET');
+    const method = options.method || (['registerInstagramPublisher', 'bindInstagramAccount', 'createStoryJob', 'updateInstagramStoryJob', 'requestInstagramConnection', 'claimInstagramConnection', 'reportInstagramSessions', 'completeInstagramConnection'].includes(action) ? 'POST' : 'GET');
     const url = new URL('https://worker.example.test/');
     url.searchParams.set('action', action);
     if (method === 'GET') for (const [name, value] of Object.entries(bodyOrQuery)) url.searchParams.set(name, value);
@@ -100,6 +102,87 @@ function fixture(t) {
   }
   return { env, sqlite, kv, call, setupAccount, enqueue, claim, update };
 }
+
+async function requestConnection(f) {
+  return f.call('requestInstagramConnection', { owner_key: ownerKey, slug: 'internal', password: 'FICTIONAL_PASSWORD_123' });
+}
+async function claimConnection(f, token = publisherToken, publisher_id = 'test-windows') {
+  return f.call('claimInstagramConnection', { publisher_id }, { token });
+}
+test('Instagram credentials are owner-only, encrypted and delivered once to the assigned publisher', async t => {
+  const f = fixture(t);
+  await f.setupAccount({ enabled: false });
+  assert.equal((await f.call('requestInstagramConnection', { slug: 'internal', token: 'internal-test-token', password: 'fake' })).status, 401);
+  assert.equal((await f.call('getInstagramSessionStatus', { slug: 'internal', token: 'internal-test-token' })).status, 401);
+  const created = await requestConnection(f);
+  assert.equal(created.status, 200);
+  assert.doesNotMatch(JSON.stringify(created.data), /FICTIONAL_PASSWORD/);
+  const stored = f.sqlite.prepare('SELECT encrypted_password FROM instagram_connection_requests').get();
+  assert.ok(stored.encrypted_password);
+  assert.doesNotMatch(stored.encrypted_password, /FICTIONAL_PASSWORD/);
+  assert.equal((await claimConnection(f, secondToken)).status, 401);
+  const results = await Promise.all([claimConnection(f), claimConnection(f)]);
+  const claims = results.map(r => r.data.connection).filter(Boolean);
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].password, 'FICTIONAL_PASSWORD_123');
+  assert.equal(f.sqlite.prepare('SELECT encrypted_password FROM instagram_connection_requests').get().encrypted_password, null);
+  assert.equal((await claimConnection(f)).data.connection, null);
+  const status = await f.call('getInstagramSessionStatus', { slug: 'internal' }, { token: ownerKey });
+  assert.equal(status.data.session.request_status, 'processing');
+  assert.equal(status.headers.get('cache-control'), 'no-store');
+  assert.doesNotMatch(JSON.stringify(status.data), /password|claim_token|encrypted|FICTIONAL/);
+  assert.equal(f.sqlite.prepare('SELECT enabled FROM instagram_account_bindings').get().enabled, 0);
+});
+test('connection expiration erases credentials and rate limiting includes a retry delay', async t => {
+  const f = fixture(t);
+  await f.setupAccount();
+  await requestConnection(f);
+  const again = await requestConnection(f);
+  assert.equal(again.status, 429);
+  assert.ok(Number(again.headers.get('retry-after')) > 0);
+  f.sqlite.prepare("UPDATE instagram_connection_requests SET expires_at='2000-01-01'").run();
+  assert.equal((await claimConnection(f)).data.connection, null);
+  assert.deepEqual({ ...f.sqlite.prepare('SELECT status,encrypted_password FROM instagram_connection_requests').get() }, { status: 'expired', encrypted_password: null });
+});
+test('connection results and local reports are bound to the publisher and immutable account', async t => {
+  const f = fixture(t);
+  await f.setupAccount();
+  await requestConnection(f);
+  const connection = (await claimConnection(f)).data.connection;
+  const data = { publisher_id: 'test-windows', id: connection.id, claim_token: connection.claim_token, state: 'connected' };
+  assert.equal((await f.call('completeInstagramConnection', { ...data, claim_token: 'wrong' }, { token: publisherToken })).status, 409);
+  assert.equal((await f.call('completeInstagramConnection', data, { token: publisherToken })).status, 200);
+  assert.equal((await f.call('completeInstagramConnection', data, { token: publisherToken })).status, 200);
+  const status = () => f.call('getInstagramSessionStatus', { slug: 'internal' }, { token: ownerKey });
+  assert.equal((await status()).data.session.state, 'connected');
+  await f.call('reportInstagramSessions', { publisher_id: 'test-windows', sessions: [{ restaurant_slug: 'internal', instagram_username: 'internal_test', instagram_user_id: '999', state: 'suspended' }] }, { token: publisherToken });
+  assert.equal((await status()).data.session.state, 'connected');
+  await f.call('reportInstagramSessions', { publisher_id: 'test-windows', sessions: [{ restaurant_slug: 'internal', instagram_username: 'internal_test', instagram_user_id: '12345', state: 'verification_required' }] }, { token: publisherToken });
+  assert.equal((await status()).data.session.state, 'verification_required');
+  f.sqlite.prepare("UPDATE instagram_publishers SET last_seen_at='2000-01-01'").run();
+  assert.equal((await status()).data.session.publisher_online, false);
+});
+test('changed binding cancels pending credential delivery and hides stale status', async t => {
+  const f = fixture(t);
+  await f.setupAccount();
+  await requestConnection(f);
+  await f.setupAccount({ username: 'different', userId: '56789' });
+  assert.equal((await claimConnection(f)).data.connection, null);
+  const status = (await f.call('getInstagramSessionStatus', { slug: 'internal' }, { token: ownerKey })).data.session;
+  assert.equal(status.request_status, null);
+  assert.equal(status.state, 'unknown');
+  assert.equal(f.sqlite.prepare('SELECT encrypted_password FROM instagram_connection_requests').get().encrypted_password, null);
+});
+test('expired in-flight connection can acknowledge once without replaying credentials', async t => {
+  const f = fixture(t);
+  await f.setupAccount();
+  await requestConnection(f);
+  const connection = (await claimConnection(f)).data.connection;
+  f.sqlite.prepare("UPDATE instagram_connection_requests SET expires_at='2000-01-01'").run();
+  const result = await f.call('completeInstagramConnection', { publisher_id: 'test-windows', id: connection.id, claim_token: connection.claim_token, state: 'review_required' }, { token: publisherToken });
+  assert.equal(result.status, 200);
+  assert.equal(f.sqlite.prepare('SELECT status FROM instagram_connection_requests').get().status, 'completed');
+});
 
 test('migration is retry-safe, disables Android and never imports its queue', async t => {
   const f = fixture(t);
