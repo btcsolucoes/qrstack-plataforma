@@ -113,13 +113,37 @@ Salvar o formulário atualiza apenas o cardápio. Na tela Stories, o usuário es
 - `instagram_account_bindings`: restaurante, publicador e identidade Instagram exclusivos.
 - `instagram_story_jobs` e `instagram_story_job_events`: fila e histórico transacional.
 - `cloudflare/migrations/0010_instagram_python_publisher.sql`: tabelas novas e desativação dos agentes antigos, sem apagar histórico.
-- Arte temporária no KV por 48 horas; sessão Instagram e senha não passam pelo navegador ou D1.
+- Arte temporária no KV por 48 horas; a sessão Instagram permanece criptografada no Windows. A senha digitada na gestão tem entrega única, temporariamente criptografada no D1, sem consulta posterior pelo navegador.
 
-O publicador roda em `qrstack-instagram` neste Windows e consome a fila por HTTPS. Precisa de uma sessão conectada explicitamente e do mapa local restaurante/conta. Não há login nem repetição de publicação automáticos. Um resultado incerto bloqueia a conta para conferência; uma confirmação perdida pode ser recuperada sem republicar.
+O publicador roda em `qrstack-instagram` neste Windows e consome a fila por HTTPS. Precisa de uma sessão conectada explicitamente. O mapa local recebe as contas aprovadas pela gestão após conferir usuário e ID imutável. Não há reconexão nem repetição de publicação automáticas. Um resultado incerto bloqueia a conta para conferência; uma confirmação perdida pode ser recuperada sem republicar.
 
 As rotas Android retornam HTTP 410. A fila Android não é copiada para a fila nova. No aparelho antigo, usar **Parar agente** e desativar a acessibilidade: um trabalho já salvo offline no telefone não pode ser interrompido apenas pelo servidor.
 
 Operação e implantação: [STORIES_WINDOWS.md](STORIES_WINDOWS.md). A validação real desta integração continua restrita à conta interna; clientes não são habilitados automaticamente.
+
+### Senha e sessão pela gestão
+
+Em **Stories → Configurar conta de publicação**, salve o publicador, o usuário e
+o ID imutável da conta. Digite a senha no campo protegido e clique em **Conectar
+sessão**. Mostrar/ocultar afeta apenas o valor que está sendo digitado; senhas
+anteriores nunca são retornadas. O campo é limpo ao enviar. Esta ação não habilita
+publicação, não altera o plano e não publica um Story.
+
+A migração `0012_instagram_sessions.sql` acrescenta pedidos de conexão e status.
+O Worker exige o secret `INSTAGRAM_CREDENTIAL_KEY` (32 bytes aleatórios em hex).
+Somente a gestão autenticada solicita conexão; apenas o publicador vinculado
+recebe a senha por HTTPS, uma única vez. AES-GCM protege o valor temporário no
+D1. O pedido expira em cinco minutos e o ciphertext é apagado ao ser retirado;
+a limpeza de expirados também roda no cron. A chave fica fora do código/D1.
+Há limite de três solicitações por IP em 15 minutos e intervalo mínimo de dois
+minutos por restaurante. Cookies e tokens Instagram nunca retornam ao frontend.
+
+O Windows mantém a sessão e o registro de processamento criptografados, sem
+guardar a senha. Um login interrompido exige revisão: não é repetido. O painel
+consulta o status a cada 15 segundos e distingue a última confirmação da sessão
+do sinal de disponibilidade do Windows. Essa consulta não acessa o Instagram.
+Challenge, 2FA e restrições exigem ação no aplicativo oficial; não são resolvidos
+automaticamente. O processo Windows precisa permanecer ligado.
 
 ## Analytics
 

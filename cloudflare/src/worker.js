@@ -1,4 +1,5 @@
 import { handleInstagramStories, MAX_STORY_REQUEST_BYTES } from "./instagram-stories.js";
+import { expireInstagramConnections } from "./instagram-sessions.js";
 import { handlePlans, authorizeInsights } from "./plans.js";
 import { verifyOwner, handleOwnerPassword, enforceRateLimit } from "./owner-auth.js";
 import { authorizeTenant, getTenant, equalTenantToken, publicRestaurant, publicRestaurantResult, publicCatalogResult, publicMenuResult } from "./tenant-auth.js";
@@ -280,6 +281,7 @@ export default {
   },
 
   async scheduled(controller, env, ctx) {
+    ctx.waitUntil(expireInstagramConnections(env));
     ctx.waitUntil(runScheduledMaintenance(controller, env));
   },
 

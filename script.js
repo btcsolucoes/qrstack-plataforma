@@ -1513,8 +1513,15 @@ function renderHqStories() {
                     <div class="field"><label>Usuário do Instagram<input name="instagram_username" required maxlength="30" placeholder="restaurante" autocomplete="off" /></label></div>
                     <div class="field"><label>ID da conta Instagram<input name="instagram_user_id" required inputmode="numeric" pattern="[0-9]+" autocomplete="off" /></label></div>
                     <label class="story-checkbox field--full"><input type="checkbox" name="enabled" /> Habilitar publicação nesta conta</label>
-                    <p class="muted field--full">Use os dados da conta já conectada no publicador. Credenciais de login são configuradas no servidor.</p>
+                    <p class="muted field--full">Salve o vínculo da conta antes de conectar a sessão abaixo. A publicação depende também do plano PERFORMANCE.</p>
                     <div class="actions field--full"><button type="submit" disabled>Salvar vínculo</button></div>
+                  </form>
+                  <form class="form-grid instagram-session-form" data-instagram-session-form="${escapeAttr(restaurant.slug)}">
+                    <div class="field field--full">${renderPasswordInput(`instagram-password-${escapeAttr(restaurant.slug)}`, "password", "Senha do Instagram", { autocomplete: "off", describedBy: `instagram-help-${escapeAttr(restaurant.slug)}` })}</div>
+                    <p class="muted field--full" id="instagram-help-${escapeAttr(restaurant.slug)}">Senha usada somente para esta conexão. Ela não ficará disponível para consulta. A sessão será guardada criptografada no publicador Windows.</p>
+                    <div class="actions field--full"><button type="submit" disabled>Conectar sessão</button><button type="button" class="secondary" data-refresh-instagram-session>Atualizar status</button></div>
+                    <p class="field--full instagram-session-status" data-instagram-session-status role="status" aria-live="polite">Consultando a sessão...</p>
+                    <p class="muted field--full" data-instagram-session-message role="status"></p>
                   </form>
                 </details>
               </article>
@@ -1838,6 +1845,7 @@ async function publishPreparedStory(draft) {
 }
 
 function attachStoryAccountHandlers() {
+  attachInstagramSessionHandlers();
   document.querySelectorAll("[data-story-account-form]").forEach(async (form) => {
     const restaurant = getRestaurant(form.dataset.storyAccountForm);
     const summary = form.closest("[data-story-account-card]").querySelector("[data-story-account-summary]");
@@ -1862,10 +1870,87 @@ function attachStoryAccountHandlers() {
           publisher_id: form.elements.publisher_id.value.trim(), instagram_username: form.elements.instagram_username.value.trim().replace(/^@/, ""),
           instagram_user_id: form.elements.instagram_user_id.value.trim(), enabled: form.elements.enabled.checked });
         if (form.isConnected) summary.textContent = storyPublishingDescription(response.publishing);
+        if (form.isConnected) form.closest("[data-story-account-card]").querySelector("[data-refresh-instagram-session]")?.click();
       } catch (error) {
         if (form.isConnected) summary.textContent = `Vínculo não alterado. ${storyQueueErrorMessage(error)}`;
       } finally { delete form.dataset.submitting; if (form.isConnected) button.disabled = false; }
     });
+  });
+}
+
+function instagramSessionDescription(session = {}) {
+  if (!session.configured) return "Conta ainda não vinculada. Preencha os dados acima e salve o vínculo.";
+  const states = { connected: "Sessão conectada na última confirmação", disconnected: "Sessão desconectada",
+    verification_required: "Verificação necessária no aplicativo oficial do Instagram. Resolva a verificação antes de reconectar.",
+    cooldown: "Conta em pausa solicitada pelo Instagram. Aguarde antes de reconectar.", suspended: "Conta suspensa. Revise no Instagram.",
+    identity_mismatch: "A identidade da conta não corresponde ao vínculo. Revise o usuário e o ID.",
+    review_required: "Sessão pausada para revisão", connection_failed: "A conexão não foi confirmada", unknown: "Sessão ainda não verificada" };
+  let text = states[session.state] || states.unknown;
+  if (session.request_status === "pending") text = "Conexão solicitada, aguardando o publicador Windows (prazo de 5 minutos).";
+  if (session.request_status === "processing") text = "Conectando a conta. Aguarde o resultado; não há repetição automática de login.";
+  if (session.request_status === "expired") text += " O pedido anterior expirou sem confirmação. Confira o Instagram antes de tentar novamente.";
+  text += session.publisher_online ? " Publicador Windows online." : " Publicador Windows offline. Inicie-o neste computador para processar a conexão.";
+  if (session.verified_at && Number.isFinite(Date.parse(session.verified_at))) text += ` Última confirmação: ${new Date(session.verified_at).toLocaleString("pt-BR")}.`;
+  return text;
+}
+
+function attachInstagramSessionHandlers() {
+  document.querySelectorAll("[data-instagram-session-form]").forEach((form) => {
+    const status = form.querySelector("[data-instagram-session-status]");
+    const message = form.querySelector("[data-instagram-session-message]");
+    const submit = form.querySelector('button[type="submit"]');
+    const refresh = form.querySelector("[data-refresh-instagram-session]");
+    let timer, loading = false, session = null;
+    const reload = async () => {
+      clearTimeout(timer);
+      if (!form.isConnected || loading || !ownerVerified) return;
+      loading = true;
+      refresh.disabled = true;
+      try {
+        const result = await apiGet("getInstagramSessionStatus", { slug: form.dataset.instagramSessionForm, owner_key: OWNER_SESSION_TOKEN, fresh: Date.now() });
+        if (!form.isConnected) return;
+        session = result.session;
+        status.textContent = instagramSessionDescription(session);
+      } catch {
+        session = null;
+        if (form.isConnected) status.textContent = "Não foi possível consultar a sessão. Atualize o status para tentar novamente.";
+      } finally {
+        loading = false;
+        if (form.isConnected) {
+          refresh.disabled = false;
+          submit.disabled = form.dataset.submitting === "true" || !session?.configured || ["pending", "processing"].includes(session?.request_status);
+          timer = setTimeout(reload, 15000);
+        }
+      }
+    };
+    refresh.addEventListener("click", reload);
+    form.closest("details")?.addEventListener("toggle", (event) => { if (!event.currentTarget.open) hidePasswords(form); });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (submit.disabled || form.dataset.submitting === "true") return;
+      form.dataset.submitting = "true";
+      submit.disabled = true;
+      let password = form.elements.password.value;
+      form.elements.password.value = "";
+      hidePasswords(form);
+      message.textContent = "Enviando pedido de conexão...";
+      try {
+        await apiPost({ action: "requestInstagramConnection", owner_key: OWNER_SESSION_TOKEN, slug: form.dataset.instagramSessionForm, password });
+        if (form.isConnected) message.textContent = "Pedido enviado. A conexão não altera a opção de habilitar publicação.";
+      } catch (error) {
+        const messages = { instagram_binding_required: "Salve um vínculo com um publicador ativo antes de conectar.",
+          instagram_connection_pending: "Já existe uma conexão aguardando processamento.",
+          account_has_unresolved_jobs: "Revise a publicação em andamento antes de reconectar.",
+          too_many_attempts: "Limite de tentativas atingido. Aguarde alguns minutos antes de reenviar.",
+          instagram_connection_unavailable: "O serviço de conexão está indisponível no momento." };
+        if (form.isConnected) message.textContent = messages[error.message] || "Não foi possível confirmar o envio. Consulte o status antes de tentar de novo.";
+      } finally {
+        password = null;
+        delete form.dataset.submitting;
+        await reload();
+      }
+    });
+    reload();
   });
 }
 

@@ -1,4 +1,5 @@
-// Private API publisher protocol. Instagram sessions and passwords stay on the runner.
+// Private API publisher protocol. Sessions stay on the runner; passwords use one-time encrypted delivery.
+import { SESSION_ACTIONS, handleSessionAction } from './instagram-sessions.js';
 import { entitlement, isOwner } from './plans.js';
 import { authorizeTenant } from './tenant-auth.js';
 const MAX_MEDIA_BYTES = 6 * 1024 * 1024;
@@ -299,8 +300,9 @@ async function update(env, request, params, payload) {
 
 export async function handleInstagramStories(request, env, payload, action) {
   if (RETIRED_ACTIONS.has(action)) return response({ ok: false, error: "android_story_agent_retired", provider: "private_api" }, 410);
-  if (!ACTIONS.has(action)) return null;
+  if (!ACTIONS.has(action) && !SESSION_ACTIONS.has(action)) return null;
   try {
+    if (SESSION_ACTIONS.has(action)) return response({ ok: true, ...await handleSessionAction(request, env, payload, action, { owner, publisher, bindingFor }) });
     const write = ["registerInstagramPublisher", "bindInstagramAccount", "createStoryJob", "updateInstagramStoryJob"].includes(action);
     if (request.method !== (write ? "POST" : "GET")) fail("method_not_allowed", 405);
     const params = new URL(request.url).searchParams;

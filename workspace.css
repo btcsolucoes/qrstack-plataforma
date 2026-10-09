@@ -543,3 +543,18 @@ body:not(.public-mode) .password-feedback { font-size: 12px; line-height: 1.5; c
 body:not(.public-mode) .password-feedback[data-state="valid"] { color: #246747; }
 body:not(.public-mode) .password-feedback[data-state="invalid"] { color: #a72f2f; }
 body:not(.public-mode) .password-input input[aria-invalid="true"] { border-color: #ba5555; }
+
+
+.instagram-session-form {
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--line);
+}
+.instagram-session-status {
+  padding: .85rem 1rem;
+  border-radius: .75rem;
+  background: var(--surface-soft, #f3f5f4);
+  color: var(--ink);
+  line-height: 1.6;
+}
+.instagram-session-form [data-instagram-session-message]:empty { display: none; }
