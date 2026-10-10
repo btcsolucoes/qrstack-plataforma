@@ -123,7 +123,7 @@ Operação e implantação: [STORIES_WINDOWS.md](STORIES_WINDOWS.md). A validaç
 
 ### Senha e sessão pela gestão
 
-Em **Stories → Configurar conta de publicação**, salve o publicador, o usuário e
+Em **Restaurantes → Conta do Instagram** (ou **Stories e Instagram**), na seção visível **Configurar conta de publicação**, salve o publicador, o usuário e
 o ID imutável da conta. Digite a senha no campo protegido e clique em **Conectar
 sessão**. Mostrar/ocultar afeta apenas o valor que está sendo digitado; senhas
 anteriores nunca são retornadas. O campo é limpo ao enviar. Esta ação não habilita

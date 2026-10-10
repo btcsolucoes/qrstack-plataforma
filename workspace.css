@@ -76,7 +76,7 @@ body:not(.public-mode) .story-source-options input, body:not(.public-mode) .stor
 .story-brand-card .brand-swatch > span { width: 24px; height: 24px; border-radius: 50%; }
 .story-brand-card .brand-swatch img { max-width: 140px; height: 55px; object-fit: contain; margin-left: auto; }
 .story-account-settings { border-top: 1px solid var(--line); padding-top: 12px; }
-.story-account-settings summary { cursor: pointer; font-size: 13px; font-weight: 800; }
+.story-account-settings h4 { margin: 0; font-size: 15px; font-weight: 800; }
 .story-account-settings form { margin-top: 20px; }
 .story-account-settings label:not(.story-checkbox) { display: grid; gap: 8px; }
 @media (max-width: 700px) { .story-workbench { grid-template-columns: 1fr; gap: 24px; } .story-preview { width: min(100%, 280px); margin-inline: auto; } .story-brand-card { padding: 18px; } }
@@ -440,7 +440,7 @@ body:not(.public-mode) .insight-bar { display: block; width: 100%; min-height: 0
   .overview-lower { gap: 8px; }
   .restaurant-row { padding: 19px; gap: 15px; flex-wrap: wrap; }
   .restaurant-logo { flex-basis: 75px; width: 75px; height: 64px; }
-  .restaurant-row__actions { width: 100%; display: flex; justify-content: space-between; border-top: 1px solid var(--line); padding-top: 13px; }
+  .restaurant-row__actions { width: 100%; display: flex; flex-wrap: wrap; gap: 10px 16px; justify-content: space-between; border-top: 1px solid var(--line); padding-top: 13px; }
   .restaurant-row__copy h3 { font-size: 14px !important; }
   .quick-actions strong { font-size: 12px; }
   .insights-filter { display: grid; grid-template-columns: 1fr; gap: 14px; }

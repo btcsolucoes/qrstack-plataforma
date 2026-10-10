@@ -1213,7 +1213,7 @@ function renderClientGate(restaurant) {
 
 function renderHq(tab = "overview") {
   setSystemTheme();
-  const titles = { overview: "Visão geral", clientes: "Restaurantes", respostas: "Respostas", banco: "Pratos e marca", cardapios: "Cardápios e links", insights: "Insights", stories: "Stories", senha: "Minha senha" };
+  const titles = { overview: "Visão geral", clientes: "Restaurantes", respostas: "Respostas", banco: "Pratos e marca", cardapios: "Cardápios e links", insights: "Insights", stories: "Stories e Instagram", senha: "Minha senha" };
   if (!titles[tab] || (tab === "stories" && !STORY_AUTOMATION_ENABLED)) tab = "overview";
   const restaurant = state.restaurants[0];
   const content = {
@@ -1471,6 +1471,8 @@ async function hydrateMenuResponses() {
 }
 
 function renderHqStories() {
+  const selectedSlug = new URLSearchParams(location.hash.split("?")[1] || "").get("restaurante");
+  const restaurants = [...state.restaurants].sort((a, b) => Number(b.slug === selectedSlug) - Number(a.slug === selectedSlug));
   const stories = state.storyAssets
     .slice()
     .reverse()
@@ -1487,12 +1489,11 @@ function renderHqStories() {
   return `
     <section class="section">
       <div class="section__head">
-        <p class="eyebrow">Stories</p>
-        <h2>Stories dos restaurantes</h2>
-        <p>Prepare uma imagem enviada ou gere uma arte com a identidade do restaurante. A publicação é feita pelo publicador QrStack na conta vinculada.</p>
+        <h2>Contas de publicação</h2>
+        <p>Configure a conta do Instagram, informe a senha e acompanhe a sessão de cada restaurante. Para criar a imagem, use Preparar Story.</p>
       </div>
       <div class="grid">
-        ${state.restaurants
+        ${restaurants
           .map(
             (restaurant) => `
               <article class="card story-brand-card" data-story-account-card="${escapeAttr(restaurant.slug)}">
@@ -1507,7 +1508,7 @@ function renderHqStories() {
                   <a class="button" href="${clientPortalLink(restaurant)}&view=story-panel">Preparar Story</a>
                 </div>
                 <p class="story-account-summary" data-story-account-summary role="status">Consultando a conta vinculada...</p>
-                <details class="story-account-settings"><summary>Configurar conta de publicação</summary>
+                <section class="story-account-settings" aria-labelledby="instagram-settings-${escapeAttr(restaurant.slug)}"><h4 id="instagram-settings-${escapeAttr(restaurant.slug)}">Configurar conta de publicação</h4>
                   <form class="form-grid" data-story-account-form="${escapeAttr(restaurant.slug)}">
                     <div class="field field--full"><label>Identificador do publicador<input name="publisher_id" required maxlength="160" autocomplete="off" /></label></div>
                     <div class="field"><label>Usuário do Instagram<input name="instagram_username" required maxlength="30" placeholder="restaurante" autocomplete="off" /></label></div>
@@ -1523,7 +1524,7 @@ function renderHqStories() {
                     <p class="field--full instagram-session-status" data-instagram-session-status role="status" aria-live="polite">Consultando a sessão...</p>
                     <p class="muted field--full" data-instagram-session-message role="status"></p>
                   </form>
-                </details>
+                </section>
               </article>
             `
           )
@@ -1924,7 +1925,6 @@ function attachInstagramSessionHandlers() {
       }
     };
     refresh.addEventListener("click", reload);
-    form.closest("details")?.addEventListener("toggle", (event) => { if (!event.currentTarget.open) hidePasswords(form); });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (submit.disabled || form.dataset.submitting === "true") return;
