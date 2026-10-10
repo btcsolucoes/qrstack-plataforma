@@ -25,7 +25,7 @@ function renderWorkspace({ active = "overview", title, subtitle = "", content, r
     ["banco", "Pratos e marca", "utensils", ownerLink("banco")],
     ["respostas", "Respostas", "inbox", ownerLink("respostas")],
     ["cardapios", "Cardápios e links", "link", ownerLink("cardapios")],
-    ...(STORY_AUTOMATION_ENABLED ? [["stories", "Stories", "layers", ownerLink("stories")]] : []),
+    ...(STORY_AUTOMATION_ENABLED ? [["stories", "Stories e Instagram", "layers", ownerLink("stories")]] : []),
     ["senha", "Minha senha", "layers", ownerLink("senha")],
   ];
   const navItem = ([id, label, icon, href], mobile = false) => {
@@ -104,7 +104,7 @@ function workspaceKpi(label, value, detail, icon = "activity", accent = false) {
 }
 
 function renderRestaurantRow(restaurant) {
-  return `<article class="restaurant-row"><div class="restaurant-logo"><img src="${restaurant.originalLogoUrl || restaurant.logoUrl}" alt="${escapeAttr(restaurant.name)}" /></div><div class="restaurant-row__copy"><span class="eyebrow">Restaurante</span><h3>${escapeHtml(restaurant.name)}</h3><p>${escapeHtml(restaurant.address || "")}</p></div><div class="restaurant-row__actions"><a class="button secondary" href="${clientPortalLink(restaurant)}">Gerenciar ${uiIcon("arrow-up-right")}</a><a class="text-link" href="${publicMenuHash(restaurant, "hq")}">Ver cardápio ${uiIcon("external-link")}</a></div></article>`;
+  return `<article class="restaurant-row"><div class="restaurant-logo"><img src="${restaurant.originalLogoUrl || restaurant.logoUrl}" alt="${escapeAttr(restaurant.name)}" /></div><div class="restaurant-row__copy"><span class="eyebrow">Restaurante</span><h3>${escapeHtml(restaurant.name)}</h3><p>${escapeHtml(restaurant.address || "")}</p></div><div class="restaurant-row__actions">${STORY_AUTOMATION_ENABLED ? `<a class="button secondary" href="${ownerLink("stories")}?restaurante=${encodeURIComponent(restaurant.slug)}">Conta do Instagram ${uiIcon("arrow-right")}</a>` : ""}<a class="text-link" href="${clientPortalLink(restaurant)}">Abrir portal do cliente ${uiIcon("arrow-up-right")}</a><a class="text-link" href="${publicMenuHash(restaurant, "hq")}">Ver cardápio ${uiIcon("external-link")}</a></div></article>`;
 }
 
 function renderWorkspaceCatalog() {

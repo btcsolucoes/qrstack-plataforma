@@ -190,7 +190,21 @@ test('owner account configuration includes a masked one-time password and sessio
   assert.match(html, /data-instagram-session-status/);
   assert.match(html, /data-password-toggle/);
   assert.match(html, /Conectar sessão/);
+  assert.match(html, /<section class="story-account-settings"/);
+  assert.doesNotMatch(html, /<details|<summary/);
   assert.doesNotMatch(html, /name="service_token"|APK|Android/);
+});
+
+test('restaurant management links directly to Instagram configuration, separate from the client portal', () => {
+  const run = runtime();
+  const row = run('renderRestaurantRow(getRestaurant("amaro"))');
+  assert.match(row, /href="#\/hq\/stories\?restaurante=amaro">Conta do Instagram/);
+  assert.match(row, /Abrir portal do cliente/);
+  const client = run('renderWorkspace({client:true,title:"Restaurante",content:""})');
+  assert.doesNotMatch(client, /Conta do Instagram|Stories e Instagram/);
+  run('state.restaurants.push({...state.restaurants[0],id:"test-other",slug:"other"}); location.hash="#/hq/stories?restaurante=other"');
+  const stories = run('renderHqStories()');
+  assert.ok(stories.indexOf('data-story-account-card="other"') < stories.indexOf('data-story-account-card="amaro"'));
 });
 
 test('session presentation separates cached verification, pending login and runner availability', () => {
