@@ -1507,19 +1507,11 @@ function renderHqStories() {
                 <div class="actions">
                   <a class="button" href="${clientPortalLink(restaurant)}&view=story-panel">Preparar Story</a>
                 </div>
-                <p class="story-account-summary" data-story-account-summary role="status">Consultando a conta vinculada...</p>
                 <section class="story-account-settings" aria-labelledby="instagram-settings-${escapeAttr(restaurant.slug)}"><h4 id="instagram-settings-${escapeAttr(restaurant.slug)}">Configurar conta de publicação</h4>
-                  <form class="form-grid" data-story-account-form="${escapeAttr(restaurant.slug)}">
-                    <div class="field field--full"><label>Identificador do publicador<input name="publisher_id" required maxlength="160" autocomplete="off" /></label></div>
-                    <div class="field"><label>Usuário do Instagram<input name="instagram_username" required maxlength="30" placeholder="restaurante" autocomplete="off" /></label></div>
-                    <div class="field"><label>ID da conta Instagram<input name="instagram_user_id" required inputmode="numeric" pattern="[0-9]+" autocomplete="off" /></label></div>
-                    <label class="story-checkbox field--full"><input type="checkbox" name="enabled" /> Habilitar publicação nesta conta</label>
-                    <p class="muted field--full">Salve o vínculo da conta antes de conectar a sessão abaixo. A publicação depende também do plano PERFORMANCE.</p>
-                    <div class="actions field--full"><button type="submit" disabled>Salvar vínculo</button></div>
-                  </form>
                   <form class="form-grid instagram-session-form" data-instagram-session-form="${escapeAttr(restaurant.slug)}">
+                    <div class="field field--full"><label>Instagram do restaurante<input name="instagram_username" required maxlength="31" placeholder="@restaurante" autocomplete="off" autocapitalize="none" spellcheck="false" /></label></div>
                     <div class="field field--full">${renderPasswordInput(`instagram-password-${escapeAttr(restaurant.slug)}`, "password", "Senha do Instagram", { autocomplete: "off", describedBy: `instagram-help-${escapeAttr(restaurant.slug)}` })}</div>
-                    <p class="muted field--full" id="instagram-help-${escapeAttr(restaurant.slug)}">Senha usada somente para esta conexão. Ela não ficará disponível para consulta. A sessão será guardada criptografada no publicador Windows.</p>
+                    <p class="muted field--full" id="instagram-help-${escapeAttr(restaurant.slug)}">Informe apenas o @ e a senha. A plataforma identifica a conta automaticamente. A senha é usada nesta conexão e não fica disponível para consulta; a sessão é guardada criptografada no Windows.</p>
                     <div class="actions field--full"><button type="submit" disabled>Conectar sessão</button><button type="button" class="secondary" data-refresh-instagram-session>Atualizar status</button></div>
                     <p class="field--full instagram-session-status" data-instagram-session-status role="status" aria-live="polite">Consultando a sessão...</p>
                     <p class="muted field--full" data-instagram-session-message role="status"></p>
@@ -1632,8 +1624,11 @@ function renderStoryComposer(restaurant, storyLink) {
         </fieldset>
         <div class="field" id="story-upload-field" hidden><label for="story-image-file">Imagem</label><input id="story-image-file" type="file" name="storyImageFile" accept="image/jpeg,image/png,image/webp" /><small class="muted">JPG, PNG ou WebP, até 15 MB. A imagem inteira será ajustada a 1080 × 1920, com fundo da marca quando necessário.</small></div>
         <div class="field"><label for="storyLink">Link do sticker</label><input id="storyLink" name="storyLink" type="url" value="${escapeAttr(storyLink)}" placeholder="https://seu-cardapio.com" required /><small class="muted">${clientFeature(restaurant, "autopublish") ? "O publicador adiciona o sticker clicável com este endereço HTTPS." : "Copie este endereço e cole no sticker de link ao criar seu Story no Instagram."}</small></div>
+        ${clientFeature(restaurant, "autopublish") ? `<div class="field"><label for="story-publish-mode">Quando publicar</label><select id="story-publish-mode" name="storyPublishMode"><option value="now">Publicar agora</option><option value="scheduled">Agendar publicação</option></select></div>
+        <div class="field" id="story-schedule-field" hidden><label for="story-scheduled-at">Data e horário · Brasília</label><input id="story-scheduled-at" name="storyScheduledAt" type="datetime-local" /><small class="muted">Agende com até 7 dias de antecedência. O Windows precisa estar ligado. Se a publicação não começar em até 15 minutos, o agendamento expira sem publicar.</small></div>` : ""}
         <p id="story-image-status" class="story-image-status" role="status">Preparando a imagem...</p>
         <div class="actions"><button type="button" id="publish-story" ${clientFeature(restaurant, "autopublish") ? "" : "hidden"} disabled>Publicar Story</button><button type="button" class="secondary" id="download-story" disabled>Baixar imagem</button><button type="button" class="secondary" data-copy-input="storyLink">Copiar link para Instagram</button><button type="button" class="ghost" id="refresh-story-publishing" ${clientFeature(restaurant, "autopublish") ? "" : "hidden"}>Atualizar conta</button></div>
+        <button type="button" class="secondary" id="cancel-story-schedule" hidden>Cancelar agendamento</button>
         <p id="story-publish-hint" class="muted">Aguarde a imagem e a verificação da conta.</p>
         <div class="story-automation-status" id="story-automation-status" aria-live="polite"><span class="status-pill">Prévia</span><p>Seu Story será enviado quando você clicar em Publicar Story.</p></div>
       </div>
@@ -1676,8 +1671,26 @@ function storyContainRect(width, height) {
   return { x: (1080 - width * scale) / 2, y: (1920 - height * scale) / 2, width: width * scale, height: height * scale };
 }
 
-async function storyPublicationKey(slug, menuId, dataUrl, storyLink) {
-  const value = JSON.stringify([String(slug), String(menuId), String(dataUrl), validateStoryLink(storyLink)]);
+function storyScheduleAt(draft) {
+  if (draft.panel.querySelector('[name="storyPublishMode"]')?.value !== "scheduled") return "";
+  const value = draft.panel.querySelector('[name="storyScheduledAt"]')?.value || "";
+  return parseStorySchedule(value);
+}
+
+function parseStorySchedule(value) {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) throw new Error("invalid_story_schedule");
+  const date = new Date(value + ":00-03:00");
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(date).map(p => [p.type, p.value]));
+  if (`${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}` !== value || date.getTime() < Date.now() + 60000 || date.getTime() > Date.now() + 7 * 86400000) throw new Error("invalid_story_schedule");
+  return date.toISOString();
+}
+
+function storyReadyForSchedule(publishing, scheduledAt) {
+  return storyPublishingReady(publishing) || Boolean(scheduledAt && publishing?.provider === "private_api" && publishing.state === "cooldown" && publishing.publisher_id && publishing.instagram_user_id && publishing.instagram_username && Date.parse(scheduledAt) >= Date.now() + publishing.retry_after_seconds * 1000);
+}
+
+async function storyPublicationKey(slug, menuId, dataUrl, storyLink, scheduledAt = "") {
+  const value = JSON.stringify([String(slug), String(menuId), String(dataUrl), validateStoryLink(storyLink), ...(scheduledAt ? [scheduledAt] : [])]);
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return `story:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
@@ -1686,18 +1699,25 @@ function updateStoryControls(draft) {
   if (!storyComposerIsCurrent(draft)) return;
   let linkValid = true;
   try { validateStoryLink(draft.panel.querySelector('[name="storyLink"]').value); } catch { linkValid = false; }
-  const ready = clientFeature(draft.restaurant, "autopublish") && storyPublishingReady(draft.publishing);
-  const canPublish = ready && draft.media && linkValid && !draft.busy && !draft.locked && !draft.rendering;
+  let scheduledAt = "", scheduleValid = true;
+  try { scheduledAt = storyScheduleAt(draft); } catch { scheduleValid = false; }
+  const ready = clientFeature(draft.restaurant, "autopublish") && storyReadyForSchedule(draft.publishing, scheduledAt);
+  const canPublish = ready && scheduleValid && draft.media && linkValid && !draft.busy && !draft.locked && !draft.rendering;
   draft.panel.querySelector("#publish-story").disabled = !canPublish;
+  draft.panel.querySelector("#publish-story").textContent = draft.panel.querySelector('[name="storyPublishMode"]')?.value === "scheduled" ? "Agendar Story" : "Publicar Story";
+  const cancel = draft.panel.querySelector("#cancel-story-schedule");
+  if (cancel) { cancel.hidden = !(draft.latestJob?.status === "pending" && draft.latestJob.scheduled_at); cancel.disabled = draft.busy; }
   draft.panel.querySelector("#download-story").disabled = !draft.media || draft.rendering;
   draft.panel.querySelector("#refresh-story-publishing").disabled = draft.busy;
-  draft.panel.querySelectorAll('[name="storyImageSource"], #story-image-file, [name="storyLink"]').forEach((input) => { input.disabled = draft.busy; });
+  draft.panel.querySelectorAll('[name="storyImageSource"], #story-image-file, [name="storyLink"], [name="storyPublishMode"], [name="storyScheduledAt"]').forEach((input) => { input.disabled = draft.busy; });
   draft.panel.querySelector("#story-publish-hint").textContent = draft.busy ? "Enviando esta publicação..."
     : draft.locked ? "Aguarde a conclusão ou resolva a publicação anterior antes de enviar outra."
     : !clientFeature(draft.restaurant, "autopublish") ? "Seu plano inclui baixar a imagem e copiar o link. A postagem automática está disponível no QRSTACK PERFORMANCE."
+    : !scheduleValid ? "Escolha uma data e horário entre 1 minuto e 7 dias a partir de agora, no horário de Brasília."
     : !ready ? "Você pode preparar e baixar a imagem. A publicação aguarda uma conta habilitada na central QrStack."
     : !linkValid ? "Informe um link HTTPS válido para o sticker."
     : !draft.media || draft.rendering ? "Prepare uma imagem antes de publicar."
+    : scheduledAt ? `O Story será agendado para @${draft.publishing.instagram_username}. Mantenha o publicador Windows ligado no horário escolhido.`
     : `Ao publicar, este Story será enviado para @${draft.publishing.instagram_username}.`;
 }
 
@@ -1724,6 +1744,20 @@ function initializeStoryComposer(restaurant, menu) {
     link.download = `story-${restaurant.slug}-${todayIso()}.jpg`;
     link.click();
     trackEvent(restaurant, "story_downloaded", "admin", draft.menu.id);
+  });
+  panel.querySelector('[name="storyPublishMode"]')?.addEventListener("change", (event) => {
+    panel.querySelector("#story-schedule-field").hidden = event.target.value !== "scheduled";
+    updateStoryControls(draft);
+  });
+  panel.querySelector('[name="storyScheduledAt"]')?.addEventListener("input", () => updateStoryControls(draft));
+  panel.querySelector("#cancel-story-schedule")?.addEventListener("click", async () => {
+    if (draft.busy || !draft.latestJob?.scheduled_at) return;
+    draft.busy = true; updateStoryControls(draft);
+    try {
+      await apiPost({ action: "cancelInstagramStoryJob", slug: restaurant.slug, token: clientToken(restaurant), job_id: draft.latestJob.id });
+      await refreshStoryPublishing(draft);
+    } catch { if (storyComposerIsCurrent(draft)) setStoryAutomationStatus("failed_attention", "Não foi possível cancelar. Atualize a conta para consultar se a publicação já começou."); }
+    finally { draft.busy = false; updateStoryControls(draft); }
   });
   panel.querySelector("#publish-story").addEventListener("click", () => publishPreparedStory(draft));
   prepareStoryImage(draft);
@@ -1803,6 +1837,7 @@ async function refreshStoryPublishing(draft) {
     const [config, latest] = await Promise.all([apiGet("getStoryPublishingConfig", params), apiGet("getStoryJob", params)]);
     if (!storyComposerIsCurrent(draft) || draft.configVersion !== version) return;
     draft.publishing = config.publishing;
+    draft.latestJob = latest.job;
     draft.locked = config.publishing?.state === "outcome_unknown" || Boolean(latest.job && ["pending", "claimed", "preparing", "publishing", "outcome_unknown"].includes(latest.job.status));
     draft.panel.querySelector("#story-publishing-account").textContent = storyPublishingDescription(draft.publishing);
     if (latest.job) {
@@ -1819,24 +1854,26 @@ async function refreshStoryPublishing(draft) {
 
 async function publishPreparedStory(draft) {
   if (!clientFeature(draft.restaurant, "autopublish")) return;
-  if (!storyComposerIsCurrent(draft) || draft.busy || draft.locked || draft.rendering || !draft.media || !storyPublishingReady(draft.publishing)) return;
+  if (!storyComposerIsCurrent(draft) || draft.busy || draft.locked || draft.rendering || !draft.media) return;
   const media = draft.media;
   const menu = { ...draft.menu };
   draft.busy = true;
   updateStoryControls(draft);
   try {
+    menu.scheduledAt = storyScheduleAt(draft);
     menu.storyLink = validateStoryLink(draft.panel.querySelector('[name="storyLink"]').value);
     await refreshStoryPublishing(draft);
     if (!storyComposerIsCurrent(draft)) return;
-    if (!storyPublishingReady(draft.publishing) || draft.locked) throw new Error("story_account_unavailable");
-    const requestId = await storyPublicationKey(draft.restaurant.slug, menu.id, media.dataUrl, menu.storyLink);
+    if (!storyReadyForSchedule(draft.publishing, menu.scheduledAt) || draft.locked) throw new Error("story_account_unavailable");
+    const requestId = await storyPublicationKey(draft.restaurant.slug, menu.id, media.dataUrl, menu.storyLink, menu.scheduledAt);
     if (!storyComposerIsCurrent(draft) || draft.media !== media) return;
     const job = await queueStoryPublication(draft.restaurant, menu, requestId, media, draft);
     if (!storyComposerIsCurrent(draft)) return;
+    draft.latestJob = job;
     draft.locked = ["pending", "claimed", "preparing", "publishing", "outcome_unknown"].includes(job.status);
     saveStoryPreview(draft.restaurant, menu, media.source);
     trackEvent(draft.restaurant, "story_queued", "admin", menu.id);
-    toast(job.duplicate ? "Esta publicação já foi registrada." : "Story enviado ao publicador QrStack.");
+    toast(job.duplicate ? "Esta publicação já foi registrada." : menu.scheduledAt ? "Story agendado." : "Story enviado ao publicador QrStack.");
   } catch (error) {
     if (storyComposerIsCurrent(draft)) setStoryAutomationStatus("failed_attention", `${storyQueueErrorMessage(error)} A imagem foi mantida. Atualize a conta para consultar a publicação.`);
   } finally {
@@ -1847,46 +1884,16 @@ async function publishPreparedStory(draft) {
 
 function attachStoryAccountHandlers() {
   attachInstagramSessionHandlers();
-  document.querySelectorAll("[data-story-account-form]").forEach(async (form) => {
-    const restaurant = getRestaurant(form.dataset.storyAccountForm);
-    const summary = form.closest("[data-story-account-card]").querySelector("[data-story-account-summary]");
-    const button = form.querySelector('button[type="submit"]');
-    try {
-      const response = await apiGet("getStoryPublishingConfig", { slug: restaurant.slug, token: clientToken(restaurant), fresh: Date.now() });
-      if (!form.isConnected) return;
-      const publishing = response.publishing || {};
-      for (const field of ["publisher_id", "instagram_username", "instagram_user_id"]) form.elements[field].value = publishing[field] || "";
-      form.elements.enabled.checked = publishing.enabled === true;
-      summary.textContent = storyPublishingDescription(publishing);
-    } catch { if (form.isConnected) summary.textContent = "Não foi possível consultar o vínculo. Informe os dados do publicador para configurar."; }
-    if (!form.isConnected) return;
-    button.disabled = false;
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      if (form.dataset.submitting === "true") return;
-      form.dataset.submitting = "true";
-      button.disabled = true;
-      try {
-        const response = await apiPost({ action: "bindInstagramAccount", owner_key: OWNER_SESSION_TOKEN, slug: restaurant.slug,
-          publisher_id: form.elements.publisher_id.value.trim(), instagram_username: form.elements.instagram_username.value.trim().replace(/^@/, ""),
-          instagram_user_id: form.elements.instagram_user_id.value.trim(), enabled: form.elements.enabled.checked });
-        if (form.isConnected) summary.textContent = storyPublishingDescription(response.publishing);
-        if (form.isConnected) form.closest("[data-story-account-card]").querySelector("[data-refresh-instagram-session]")?.click();
-      } catch (error) {
-        if (form.isConnected) summary.textContent = `Vínculo não alterado. ${storyQueueErrorMessage(error)}`;
-      } finally { delete form.dataset.submitting; if (form.isConnected) button.disabled = false; }
-    });
-  });
 }
 
 function instagramSessionDescription(session = {}) {
-  if (!session.configured) return "Conta ainda não vinculada. Preencha os dados acima e salve o vínculo.";
+
   const states = { connected: "Sessão conectada na última confirmação", disconnected: "Sessão desconectada",
     verification_required: "Verificação necessária no aplicativo oficial do Instagram. Resolva a verificação antes de reconectar.",
     cooldown: "Conta em pausa solicitada pelo Instagram. Aguarde antes de reconectar.", suspended: "Conta suspensa. Revise no Instagram.",
-    identity_mismatch: "A identidade da conta não corresponde ao vínculo. Revise o usuário e o ID.",
+    identity_mismatch: "A identidade da conta não corresponde ao vínculo. Confira o @ do restaurante.",
     review_required: "Sessão pausada para revisão", connection_failed: "A conexão não foi confirmada", unknown: "Sessão ainda não verificada" };
-  let text = states[session.state] || states.unknown;
+  let text = !session.configured && (!session.state || session.state === "unknown") ? "Conta ainda não vinculada. Informe o @ e a senha para conectar." : states[session.state] || states.unknown;
   if (session.request_status === "pending") text = "Conexão solicitada, aguardando o publicador Windows (prazo de 5 minutos).";
   if (session.request_status === "processing") text = "Conectando a conta. Aguarde o resultado; não há repetição automática de login.";
   if (session.request_status === "expired") text += " O pedido anterior expirou sem confirmação. Confira o Instagram antes de tentar novamente.";
@@ -1901,7 +1908,8 @@ function attachInstagramSessionHandlers() {
     const message = form.querySelector("[data-instagram-session-message]");
     const submit = form.querySelector('button[type="submit"]');
     const refresh = form.querySelector("[data-refresh-instagram-session]");
-    let timer, loading = false, session = null;
+    let timer, loading = false, session = null, usernameEdited = false;
+    form.elements.instagram_username.addEventListener("input", () => { usernameEdited = true; });
     const reload = async () => {
       clearTimeout(timer);
       if (!form.isConnected || loading || !ownerVerified) return;
@@ -1911,6 +1919,7 @@ function attachInstagramSessionHandlers() {
         const result = await apiGet("getInstagramSessionStatus", { slug: form.dataset.instagramSessionForm, owner_key: OWNER_SESSION_TOKEN, fresh: Date.now() });
         if (!form.isConnected) return;
         session = result.session;
+        if (!usernameEdited && session?.instagram_username) form.elements.instagram_username.value = "@" + session.instagram_username;
         status.textContent = instagramSessionDescription(session);
       } catch {
         session = null;
@@ -1919,7 +1928,7 @@ function attachInstagramSessionHandlers() {
         loading = false;
         if (form.isConnected) {
           refresh.disabled = false;
-          submit.disabled = form.dataset.submitting === "true" || !session?.configured || ["pending", "processing"].includes(session?.request_status);
+          submit.disabled = form.dataset.submitting === "true" || !session?.can_connect || ["pending", "processing"].includes(session?.request_status);
           timer = setTimeout(reload, 15000);
         }
       }
@@ -1935,8 +1944,8 @@ function attachInstagramSessionHandlers() {
       hidePasswords(form);
       message.textContent = "Enviando pedido de conexão...";
       try {
-        await apiPost({ action: "requestInstagramConnection", owner_key: OWNER_SESSION_TOKEN, slug: form.dataset.instagramSessionForm, password });
-        if (form.isConnected) message.textContent = "Pedido enviado. A conexão não altera a opção de habilitar publicação.";
+        await apiPost({ action: "requestInstagramConnection", owner_key: OWNER_SESSION_TOKEN, slug: form.dataset.instagramSessionForm, instagram_username: form.elements.instagram_username.value.trim(), password });
+        if (form.isConnected) message.textContent = "Pedido enviado. A conta será identificada e vinculada após a confirmação do login. A postagem depende do plano PERFORMANCE.";
       } catch (error) {
         const messages = { instagram_binding_required: "Salve um vínculo com um publicador ativo antes de conectar.",
           instagram_connection_pending: "Já existe uma conexão aguardando processamento.",
@@ -2369,6 +2378,8 @@ function attachCatalogManagerHandlers(restaurant) {
 }
 
 function storyQueueErrorMessage(error) {
+  const scheduleErrors = { invalid_story_schedule: "Escolha uma data válida entre 1 minuto e 7 dias, no horário de Brasília.", story_schedule_conflict: "Mantenha pelo menos 24 horas entre publicações desta conta.", instagram_publisher_unavailable: "O publicador Windows precisa estar configurado e atualizado para conectar a conta." };
+  if (scheduleErrors[error?.message]) return scheduleErrors[error.message];
   const code = String(error?.message || "").trim();
   const messages = {
     story_canvas_not_ready: "a arte ainda não terminou de carregar",
@@ -2485,6 +2496,7 @@ async function queueStoryPublication(restaurant, menu, requestId, media, draft) 
     image_base64: imageBase64,
     client_request_id: requestId,
     image_source: media.source,
+    scheduled_at: menu.scheduledAt || undefined,
   });
   const job = response.job;
   if (!job?.id) throw new Error("story_job_missing");
@@ -2513,6 +2525,7 @@ function pollStoryPublication(restaurant, jobId, attempt = 0, draft = storyCompo
       if (!job) throw new Error("story_job_not_found");
       if (!storyComposerIsCurrent(draft) || draft.pollVersion !== pollVersion) return;
       setStoryAutomationStatus(job.status, storyJobMessage(job));
+      draft.latestJob = job;
       draft.locked = !["completed", "failed_attention", "cancelled"].includes(job.status);
       updateStoryControls(draft);
       if (job.status === "completed") {
@@ -2528,7 +2541,7 @@ function pollStoryPublication(restaurant, jobId, attempt = 0, draft = storyCompo
       setStoryAutomationStatus("syncing", nextAttempt < 20 ? "Reconectando ao acompanhamento da publicação..." : "Acompanhamento indisponível. Use Atualizar conta para consultar o resultado antes de enviar novamente.");
       if (nextAttempt < 20) pollStoryPublication(restaurant, jobId, nextAttempt, draft, pollVersion);
     }
-  }, attempt ? Math.min(15000, 2500 + attempt * 800) : 2500);
+  }, attempt ? Math.min(15000, 2500 + attempt * 800) : draft?.latestJob?.status === "pending" && Date.parse(draft.latestJob.scheduled_at) > Date.now() ? 30000 : 2500);
 }
 
 function setStoryAutomationStatus(status, message) {
@@ -2554,6 +2567,8 @@ function setStoryAutomationStatus(status, message) {
 }
 
 function storyJobMessage(job) {
+  if (job?.status === "pending" && job.scheduled_at) return `Agendado para ${new Date(job.scheduled_at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", dateStyle: "short", timeStyle: "short" })} (Brasília). Mantenha o publicador Windows ligado. Você pode cancelar antes do início.`;
+  if (job?.error_code === "schedule_missed") return "O horário expirou sem iniciar a publicação. Confira se o Windows está ligado e faça um novo agendamento.";
   const checkpoint = String(job?.checkpoint || "").replaceAll("_", " ");
   const updatedAt = job?.updated_at ? new Date(job.updated_at) : null;
   const historySuffix = updatedAt && !Number.isNaN(updatedAt.getTime())
