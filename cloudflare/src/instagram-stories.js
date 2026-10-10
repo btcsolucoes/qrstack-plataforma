@@ -366,6 +366,19 @@ export async function handleInstagramStories(request, env, payload, action) {
     return response({ ok: true, ...result }, action === "createStoryJob" && !result.duplicate ? 201 : 200);
   } catch (error) {
     // Do not return SQL, credentials, or arbitrary backend errors to callers.
+    if (!error.status && /(?:free tier )?daily row (?:read|write) limit/i.test(String(error.message || ''))) {
+      const current = new Date();
+      const reset = Date.UTC(current.getUTCFullYear(),current.getUTCMonth(),current.getUTCDate()+1,0,1);
+      const retry = Math.max(60,Math.ceil((reset-Date.now())/1000));
+      return response({ok:false,error:'instagram_storage_temporarily_unavailable',retry_after_seconds:retry},503,{'retry-after':String(retry)});
+    }
+    if (!error.status) {
+      const message = String(error.message || '');
+      const category = /exceeded|quota|limit/i.test(message) ? 'resource_limit'
+        : /no such table|no such column/i.test(message) ? 'schema_missing'
+        : /D1|SQLITE/i.test(message) ? 'database_error' : 'runtime_error';
+      console.error('instagram_protocol_failure', JSON.stringify({ action, category, type: error.name }));
+    }
     return response({ ok: false, error: error.status ? error.message : "instagram_story_internal_error",
       ...(error.retryAfter ? { retry_after_seconds: error.retryAfter } : {}) }, error.status || 500,
       error.retryAfter ? { "retry-after": String(error.retryAfter) } : {});
