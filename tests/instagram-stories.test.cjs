@@ -37,6 +37,7 @@ function fixture(t) {
   sqlite.exec(migration); // Retry-safe migration, preserving old records.
   sqlite.exec(fs.readFileSync(path.join(root, 'cloudflare/migrations/0011_restaurant_plans.sql'), 'utf8'));
   for (let i = 0; i < 2; i++) sqlite.exec(fs.readFileSync(path.join(root, 'cloudflare/migrations/0012_instagram_sessions.sql'), 'utf8'));
+  sqlite.exec(fs.readFileSync(path.join(root, "cloudflare/migrations/0013_instagram_onboarding_schedule.sql"), "utf8"));
   sqlite.exec("INSERT INTO restaurant_plans SELECT id, 'performance', '2026-10-06' FROM restaurants");
   const kv = new Map();
   const env = {
@@ -74,7 +75,7 @@ function fixture(t) {
   };
   async function call(action, bodyOrQuery = {}, options = {}) {
     const { handleInstagramStories } = await modulePromise;
-    const method = options.method || (['registerInstagramPublisher', 'bindInstagramAccount', 'createStoryJob', 'updateInstagramStoryJob', 'requestInstagramConnection', 'claimInstagramConnection', 'reportInstagramSessions', 'completeInstagramConnection'].includes(action) ? 'POST' : 'GET');
+    const method = options.method || (['cancelInstagramStoryJob', 'registerInstagramPublisher', 'bindInstagramAccount', 'createStoryJob', 'updateInstagramStoryJob', 'requestInstagramConnection', 'claimInstagramConnection', 'reportInstagramSessions', 'completeInstagramConnection'].includes(action) ? 'POST' : 'GET');
     const url = new URL('https://worker.example.test/');
     url.searchParams.set('action', action);
     if (method === 'GET') for (const [name, value] of Object.entries(bodyOrQuery)) url.searchParams.set(name, value);
@@ -700,4 +701,85 @@ test('plans remain editable through KV during D1 quota exhaustion and sync the l
   f.env.DB.prepare = originalPrepare;
   await planCall(f, 'getRestaurantPlan', { slug: 'internal', token: 'internal-test-token' }, 'GET');
   assert.equal(f.sqlite.prepare("SELECT plan FROM restaurant_plans WHERE restaurant_id='r-internal'").get().plan, 'cardapio');
+});
+
+async function autoConnection(f, slug = 'internal', username = '@New_Restaurant') {
+  await f.call('registerInstagramPublisher', {owner_key:ownerKey,publisher_id:'test-windows',publisher_token:publisherToken,version:'0.2.0'});
+  const result = await f.call('requestInstagramConnection', {owner_key:ownerKey,slug,instagram_username:username,password:'FICTIONAL_PASSWORD'});
+  assert.equal(result.status,200,JSON.stringify(result.data));
+  return (await claimConnection(f)).data.connection;
+}
+function finishConnection(f, c, instagram_user_id = '45678') {
+  return f.call('completeInstagramConnection',{publisher_id:'test-windows',id:c.id,claim_token:c.claim_token,state:'connected',instagram_user_id,verified_at:new Date().toISOString()},{token:publisherToken});
+}
+test('owner supplies only username and password; verified login creates the enabled binding atomically', async t => {
+  const f=fixture(t), c=await autoConnection(f);
+  assert.equal(c.instagram_username,'new_restaurant');
+  assert.equal(c.instagram_user_id,'');
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM instagram_account_bindings').get().n,0);
+  const done=await finishConnection(f,c);
+  assert.equal(done.status,200,JSON.stringify(done.data)); assert.equal(done.data.accepted,true);
+  const b=f.sqlite.prepare('SELECT * FROM instagram_account_bindings').get();
+  assert.equal(b.instagram_user_id,'45678'); assert.equal(b.enabled,1);
+  assert.equal((await finishConnection(f,c)).data.accepted,true);
+  const status=(await f.call('getInstagramSessionStatus',{slug:'internal'},{token:ownerKey})).data.session;
+  assert.equal(status.instagram_username,'new_restaurant'); assert.equal(status.state,'connected'); assert.equal(status.can_connect,true);
+  assert.doesNotMatch(JSON.stringify(status),/password|claim_token|45678/);
+});
+test('automatic binding refuses an identity already assigned to another restaurant',async t=>{
+  const f=fixture(t); await f.setupAccount({slug:'other',userId:'45678'});
+  const c=await autoConnection(f), done=await finishConnection(f,c);
+  assert.equal(done.data.accepted,false); assert.equal(done.data.state,'review_required');
+  assert.equal(f.sqlite.prepare("SELECT count(*) n FROM instagram_account_bindings WHERE restaurant_slug='internal'").get().n,0);
+});
+test('automatic reconnect pins the known identity and rejects changes during login',async t=>{
+  const f=fixture(t); await f.setupAccount({username:'new_restaurant',userId:'12345'});
+  const c=await autoConnection(f);
+  assert.equal(c.instagram_user_id,'12345');
+  assert.equal((await finishConnection(f,c,'99999')).data.state,'identity_mismatch');
+  assert.equal(f.sqlite.prepare('SELECT instagram_user_id FROM instagram_account_bindings').get().instagram_user_id,'12345');
+});
+test('automatic binding and acknowledgement roll back together on storage failure',async t=>{
+  const f=fixture(t), c=await autoConnection(f);
+  f.sqlite.exec("CREATE TRIGGER fail_session BEFORE INSERT ON instagram_session_status BEGIN SELECT RAISE(ABORT,'storage failure'); END");
+  assert.equal((await finishConnection(f,c)).status,500);
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM instagram_account_bindings').get().n,0);
+  assert.equal(f.sqlite.prepare('SELECT status FROM instagram_connection_requests').get().status,'processing');
+  f.sqlite.exec('DROP TRIGGER fail_session');
+  assert.equal((await finishConnection(f,c)).data.accepted,true);
+});
+test('scheduled job is unavailable early, claimed when due, and cannot receive a permit after its deadline',async t=>{
+  const f=fixture(t); await f.setupAccount();
+  const scheduled_at=new Date(Date.now()+3600000).toISOString();
+  const created=await f.enqueue({scheduled_at}); assert.equal(created.status,201,JSON.stringify(created.data));
+  assert.equal(created.data.job.scheduled_at,scheduled_at);
+  assert.equal((await f.claim()).data.job,null);
+  assert.equal((await f.enqueue({scheduled_at})).data.duplicate,true);
+  assert.equal((await f.enqueue({scheduled_at:new Date(Date.now()+7200000).toISOString()})).status,409);
+  f.sqlite.prepare('UPDATE instagram_story_jobs SET scheduled_at=?,expires_at=?').run(new Date(Date.now()-1000).toISOString(),new Date(Date.now()+60000).toISOString());
+  const claimed=(await f.claim()).data.job; assert.ok(claimed);
+  f.sqlite.exec("UPDATE instagram_story_jobs SET expires_at='2000-01-01'");
+  assert.equal((await f.update(claimed,'publishing')).status,409);
+  const inspection=await f.call('getInstagramPublisherJob',{publisher_id:'test-windows',job_id:claimed.id},{token:publisherToken,claimToken:claimed.claim_token});
+  assert.equal(inspection.data.can_publish,false);
+});
+test('missed schedules expire without dispatch; cancellation is tenant scoped and pending only',async t=>{
+  const f=fixture(t); await f.setupAccount();
+  const scheduled_at=new Date(Date.now()+3600000).toISOString();
+  const created=await f.enqueue({scheduled_at}), job=created.data.job;
+  assert.equal((await f.call('cancelInstagramStoryJob',{slug:'other',token:'other-test-token',job_id:job.id})).status,409);
+  assert.equal((await f.call('cancelInstagramStoryJob',{slug:'internal',token:'internal-test-token',job_id:job.id})).data.job.status,'cancelled');
+  const second=await f.enqueue({scheduled_at,client_request_id:'second'}); assert.equal(second.status,201);
+  f.sqlite.exec("UPDATE instagram_story_jobs SET expires_at='2000-01-01' WHERE status='pending'");
+  assert.equal((await f.claim()).data.job,null);
+  assert.equal(f.sqlite.prepare("SELECT error_code FROM instagram_story_jobs WHERE id=?").get(second.data.job.id).error_code,'schedule_missed');
+});
+test('scheduling validates horizon, prevents overlapping daily windows and keeps plan authorization',async t=>{
+  const f=fixture(t); await f.setupAccount();
+  for(const scheduled_at of ['garbage',new Date(Date.now()-1000).toISOString(),new Date(Date.now()+8*86400000).toISOString()]) assert.equal((await f.enqueue({scheduled_at})).status,400);
+  assert.equal((await f.enqueue({scheduled_at:new Date(Date.now()+3600000).toISOString()})).status,201);
+  const conflict=await f.enqueue({client_request_id:'conflict',scheduled_at:new Date(Date.now()+7200000).toISOString()});
+  assert.equal(conflict.data.error,'story_schedule_conflict');
+  f.sqlite.exec("UPDATE restaurant_plans SET plan='divulgacao'");
+  assert.equal((await f.enqueue({client_request_id:'blocked',scheduled_at:new Date(Date.now()+3*86400000).toISOString()})).status,409);
 });

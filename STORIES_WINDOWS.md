@@ -7,7 +7,7 @@ da marca em canvas, sem serviço de IA ou cobrança por imagem.
 O clique em **Publicar Story** cria um pedido idempotente. Cloudflare mantém
 metadados e eventos no D1 e a imagem no KV por 48 horas. Python roda neste Windows,
 baixa a arte autenticada e publica apenas na conta vinculada ao restaurante.
-Senhas e sessões Instagram ficam no vault local, fora da plataforma.
+A senha passa por entrega criptografada de uso único; a sessão fica no vault local.
 
 ## Implantação
 
@@ -20,8 +20,13 @@ Senhas e sessões Instagram ficam no vault local, fora da plataforma.
 3. Publicar `cloudflare/src/worker.js`, incluindo `instagram-stories.js`.
 4. Publicar `index.html`, `script.js`, `workspace.js` e `workspace.css` no site.
 5. Registrar o serviço Windows e conectar explicitamente as contas locais.
-6. Em **Central → Stories → Configurar conta de publicação**, conferir o
-   publicador, o @ e o ID imutável da conta antes de habilitar o vínculo.
+6. Aplicar 0011, 0012 e depois 0013 (esta última uma única vez). Atualizar o runner para 0.2.0.
+7. Em **Stories e Instagram → Configurar conta de publicação**, informar somente
+   o @ e a senha. O login confirma a identidade e salva o vínculo automaticamente.
+8. Em **Preparar Story**, escolher publicação imediata ou data e horário de Brasília.
+   Agendamentos têm horizonte de 7 dias, tolerância de 15 minutos e cancelamento
+   antes de serem recebidos pelo publicador. A imagem fica no KV até 48 horas após
+   o horário escolhido; a janela de 24 horas por conta continua valendo.
 
 O publicador está no repositório irmão `qrstack-instagram`; o roteiro de operação
 é `PLATFORM_WINDOWS.md`. Um cadastro interno separado deve ser usado para testes.

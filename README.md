@@ -123,11 +123,20 @@ Operação e implantação: [STORIES_WINDOWS.md](STORIES_WINDOWS.md). A validaç
 
 ### Senha e sessão pela gestão
 
-Em **Restaurantes → Conta do Instagram** (ou **Stories e Instagram**), na seção visível **Configurar conta de publicação**, salve o publicador, o usuário e
-o ID imutável da conta. Digite a senha no campo protegido e clique em **Conectar
-sessão**. Mostrar/ocultar afeta apenas o valor que está sendo digitado; senhas
-anteriores nunca são retornadas. O campo é limpo ao enviar. Esta ação não habilita
-publicação, não altera o plano e não publica um Story.
+Em **Restaurantes → Conta do Instagram** (ou **Stories e Instagram**), informe
+somente o **@ e a senha**, depois clique em **Conectar sessão**. O Windows 0.2.0
+identifica o ID numérico após confirmar o login e o servidor salva o vínculo.
+Mostrar/ocultar afeta apenas a senha digitada, que é limpa ao enviar. Conectar
+não publica um Story nem altera o plano. A postagem exige PERFORMANCE.
+
+Em **Preparar Story**, escolha **Publicar agora** ou **Agendar publicação**.
+O agendamento usa data e hora de Brasília, entre 1 minuto e 7 dias no futuro.
+A imagem é congelada no envio; mudanças no cardápio não alteram a arte agendada.
+É possível cancelar enquanto estiver pendente. O Windows precisa estar ligado:
+sem início em até 15 minutos, o pedido expira sem postagem tardia automática.
+A janela conservadora de 24 horas entre publicações permanece em vigor.
+Aplicar `0013_instagram_onboarding_schedule.sql` uma única vez após 0012.
+A mídia agendada permanece no KV até 48 horas após o horário escolhido.
 
 A migração `0012_instagram_sessions.sql` acrescenta pedidos de conexão e status.
 O Worker exige o secret `INSTAGRAM_CREDENTIAL_KEY` (32 bytes aleatórios em hex).

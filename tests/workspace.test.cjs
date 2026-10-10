@@ -182,9 +182,9 @@ test('Story composer offers branded generation or upload and starts with publish
 
 test('owner account configuration includes a masked one-time password and session status', () => {
   const html = runtime()('renderHqStories()');
-  assert.match(html, /name="publisher_id"/);
+  assert.doesNotMatch(html, /name="publisher_id"/);
   assert.match(html, /name="instagram_username"/);
-  assert.match(html, /name="instagram_user_id"/);
+  assert.doesNotMatch(html, /name="instagram_user_id"/);
   assert.match(html, /view=story-panel/);
   assert.match(html, /name="password" type="password"/);
   assert.match(html, /data-instagram-session-status/);
@@ -406,4 +406,19 @@ test('reset and access secrets are removed from both query and fragment without 
   run('removeAccessFromUrl("token")');
   assert.equal(replacement, '/app/?v=1#/redefinir?view=reset');
   assert.doesNotMatch(replacement, /secret|token=/);
+});
+
+test('schedule input converts Brasilia time explicitly and rejects past and invalid dates', () => {
+  const run=runtime();
+  const future=new Date(Date.now()+2*86400000);
+  const local=new Date(future.getTime()-3*3600000).toISOString().slice(0,16);
+  assert.equal(run(`parseStorySchedule(${JSON.stringify(local)})`),new Date(local+':00-03:00').toISOString());
+  for(const value of ['','2020-01-01T10:00','2026-02-30T10:00','2099-01-01T10:00']) assert.throws(()=>run(`parseStorySchedule(${JSON.stringify(value)})`));
+});
+test('changing the schedule changes publication idempotency without changing its media',async()=>{
+  const run=runtime();
+  const a=await run('storyPublicationKey("demo","menu","image","https://example.test", "2026-10-11T15:00:00Z")');
+  const b=await run('storyPublicationKey("demo","menu","image","https://example.test", "2026-10-12T15:00:00Z")');
+  assert.notEqual(a,b);
+  assert.match(run('storyJobMessage({status:"pending",scheduled_at:"2026-10-11T15:00:00Z"})'),/12:00.*Brasília/);
 });

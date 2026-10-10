@@ -7,9 +7,13 @@ export const MAX_STORY_REQUEST_BYTES = Math.ceil(MAX_MEDIA_BYTES / 3) * 4 + 32 *
 const MEDIA_TTL_SECONDS = 48 * 60 * 60;
 // Conservative QrStack private-publisher policy, not an official Instagram quota.
 const PUBLICATION_WINDOW_MS = 24 * 60 * 60 * 1000;
+const SCHEDULE_HORIZON_MS = 7 * 24 * 60 * 60 * 1000;
+export async function expireScheduledStories(env) {
+  await env.DB.prepare("UPDATE instagram_story_jobs SET status='failed_attention',checkpoint='schedule_missed',error_code='schedule_missed',updated_at=? WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?").bind(now(),now()).run();
+}
 const ACTIVE = ["claimed", "preparing", "publishing"];
 const RETIRED_ACTIONS = new Set(["registerStoryAgent", "getAgentRelease", "getNextStoryJob", "updateStoryJob", "getStoryMedia"]);
-const ACTIONS = new Set(["registerInstagramPublisher", "bindInstagramAccount", "getStoryPublishingConfig", "createStoryJob", "getStoryJob", "getNextInstagramStoryJob", "updateInstagramStoryJob", "getInstagramStoryMedia", "getInstagramPublisherJob"]);
+const ACTIONS = new Set(["registerInstagramPublisher", "bindInstagramAccount", "getStoryPublishingConfig", "createStoryJob", "getStoryJob", "getNextInstagramStoryJob", "updateInstagramStoryJob", "getInstagramStoryMedia", "getInstagramPublisherJob", "cancelInstagramStoryJob"]);
 const HEADERS = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "access-control-allow-origin": "*" };
 
 function response(value, status = 200, extraHeaders = {}) { return new Response(JSON.stringify(value), { status, headers: { ...HEADERS, ...extraHeaders } }); }
@@ -99,7 +103,8 @@ async function privateJobResult(env, request, job) {
   mediaUrl.searchParams.set("publisher_id", job.publisher_id);
   mediaUrl.searchParams.set("job_id", job.id);
   return { job: { ...publicJob(job), claim_token: job.claim_token, media_url: mediaUrl.toString() }, publishing,
-    can_publish: publishing.enabled && matchesBinding(job, publishing) && ACTIVE.includes(job.status) };
+    can_publish: publishing.enabled && matchesBinding(job, publishing) && ACTIVE.includes(job.status)
+      && (!job.scheduled_at || Date.parse(job.scheduled_at) <= Date.now()) && (!job.expires_at || Date.parse(job.expires_at) > Date.now()) };
 }
 async function register(env, request, payload) {
   await owner(env, request, payload);
@@ -175,36 +180,48 @@ async function enqueue(env, request, payload) {
   const { bytes, type } = decodeImage(payload);
   const mediaHash = await sha256(bytes);
   const menuDayId = String(payload.menu_day_id || "").slice(0, 160);
-  const requestHash = await sha256(JSON.stringify([menuDayId, link.href, mediaHash, type]));
+  let scheduled = null;
+  if (payload.scheduled_at) {
+    if (typeof payload.scheduled_at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/.test(payload.scheduled_at) || !Number.isFinite(Date.parse(payload.scheduled_at))) fail('invalid_story_schedule');
+    scheduled = new Date(payload.scheduled_at).toISOString();
+    if (scheduled.slice(0,19) !== payload.scheduled_at.slice(0,19)) fail('invalid_story_schedule');
+  }
+  const requestHash = await sha256(JSON.stringify([menuDayId, link.href, mediaHash, type, ...(scheduled ? [scheduled] : [])]));
   const existing = await env.DB.prepare("SELECT * FROM instagram_story_jobs WHERE restaurant_id = ? AND client_request_id = ? LIMIT 1").bind(tenant.id, clientId).first();
   if (existing) {
     if (existing.request_sha256 !== requestHash) fail("idempotency_key_conflict", 409);
     return { job: publicJob(existing), duplicate: true };
   }
-  if (config.state === "cooldown") fail("instagram_publication_cooldown", 429, config.retry_after_seconds);
-  if (!config.enabled) fail(config.state === "outcome_unknown" ? "instagram_outcome_unknown" : "instagram_account_not_ready", 409);
+  if (scheduled && (Date.parse(scheduled) < Date.now() + 60000 || Date.parse(scheduled) > Date.now() + SCHEDULE_HORIZON_MS)) fail('invalid_story_schedule');
+  const plannedTime = scheduled ? Date.parse(scheduled) : Date.now();
+  const cooldownReady = config.state === 'cooldown' && plannedTime >= Date.now() + config.retry_after_seconds * 1000;
+  if (config.state === "cooldown" && !cooldownReady) fail("instagram_publication_cooldown", 429, config.retry_after_seconds);
+  if (!config.enabled && !cooldownReady) fail(config.state === "outcome_unknown" ? "instagram_outcome_unknown" : "instagram_account_not_ready", 409);
+  const conflicting = await env.DB.prepare("SELECT id FROM instagram_story_jobs WHERE instagram_user_id=? AND status IN ('pending','claimed','preparing','publishing') AND (? IS NOT NULL OR scheduled_at IS NOT NULL) AND ABS(julianday(COALESCE(scheduled_at,queued_at))-julianday(?)) < 1 LIMIT 1").bind(config.instagram_user_id,scheduled,new Date(plannedTime).toISOString()).first();
+  if (conflicting) fail('story_schedule_conflict', 409);
   const jobId = `ig_story_${crypto.randomUUID()}`;
   const mediaKey = `instagram-stories/${tenant.slug}/${jobId}`;
   const timestamp = now();
   const imageSource = ["upload", "auto", "generated"].includes(payload.image_source) ? payload.image_source : null;
-  await env.INSIGHTS_CACHE.put(mediaKey, bytes, { expirationTtl: MEDIA_TTL_SECONDS, metadata: { contentType: type, sha256: mediaHash } });
+  await env.INSIGHTS_CACHE.put(mediaKey, bytes, { expirationTtl: MEDIA_TTL_SECONDS + Math.max(0,Math.ceil((plannedTime-Date.now())/1000)), metadata: { contentType: type, sha256: mediaHash } });
   try {
     // Recheck binding in INSERT to close the enqueue/configuration race.
     const statements = [env.DB.prepare(`INSERT INTO instagram_story_jobs(
       id, restaurant_id, restaurant_slug, publisher_id, instagram_username, instagram_user_id, menu_day_id,
       story_link, media_key, media_sha256, content_type, media_bytes, image_source, client_request_id, request_sha256,
-      status, checkpoint, queued_at, created_at, updated_at)
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'queued', ?, ?, ?
+      status, checkpoint, queued_at, created_at, updated_at, scheduled_at, expires_at)
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'queued', ?, ?, ?, ?, ?
       WHERE EXISTS(SELECT 1 FROM instagram_account_bindings b JOIN instagram_publishers p ON p.publisher_id = b.publisher_id
         WHERE b.restaurant_id = ? AND b.publisher_id = ? AND b.instagram_username = ? AND b.instagram_user_id = ? AND b.enabled = 1 AND p.is_active = 1)
       AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs WHERE restaurant_id = ? AND status = 'outcome_unknown')
       AND EXISTS(SELECT 1 FROM restaurant_plans WHERE restaurant_id = ? AND plan = 'performance')
       AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs recent WHERE recent.instagram_user_id = ? AND COALESCE(recent.completed_at, recent.started_at) > ?)
+      AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs other WHERE (? IS NOT NULL OR other.scheduled_at IS NOT NULL) AND other.instagram_user_id=? AND other.status IN ('pending','claimed','preparing','publishing') AND ABS(julianday(COALESCE(other.scheduled_at,other.queued_at))-julianday(?)) < 1)
       ON CONFLICT(restaurant_id, client_request_id) DO NOTHING`)
       .bind(jobId, tenant.id, tenant.slug, config.publisher_id, config.instagram_username, config.instagram_user_id, menuDayId || null,
-        link.href, mediaKey, mediaHash, type, bytes.length, imageSource, clientId, requestHash, timestamp, timestamp, timestamp,
+        link.href, mediaKey, mediaHash, type, bytes.length, imageSource, clientId, requestHash, timestamp, timestamp, timestamp, scheduled, scheduled ? new Date(plannedTime+15*60000).toISOString() : null,
         tenant.id, config.publisher_id, config.instagram_username, config.instagram_user_id, tenant.id, tenant.id,
-        config.instagram_user_id, new Date(Date.now() - PUBLICATION_WINDOW_MS).toISOString()),
+        config.instagram_user_id, new Date(plannedTime - PUBLICATION_WINDOW_MS).toISOString(),scheduled,config.instagram_user_id,new Date(plannedTime).toISOString()),
       env.DB.prepare(`INSERT INTO instagram_story_job_events(id, job_id, publisher_id, status, checkpoint, created_at)
         SELECT ?, ?, ?, 'pending', 'queued', ? WHERE changes() > 0`)
         .bind(`ig_event_${crypto.randomUUID()}`, jobId, config.publisher_id, timestamp)];
@@ -222,6 +239,7 @@ async function enqueue(env, request, payload) {
 }
 async function claim(env, request, params) {
   const agent = await publisher(env, request, params.get("publisher_id"));
+  await expireScheduledStories(env);
   const timestamp = now();
   await env.DB.prepare("UPDATE instagram_publishers SET last_seen_at = ?, updated_at = ? WHERE publisher_id = ?").bind(timestamp, timestamp, agent.publisher_id).run();
   let job = await env.DB.prepare("SELECT * FROM instagram_story_jobs WHERE publisher_id = ? AND status IN ('claimed','preparing','publishing') ORDER BY claimed_at LIMIT 1").bind(agent.publisher_id).first();
@@ -230,6 +248,7 @@ async function claim(env, request, params) {
     const statements = [env.DB.prepare(`UPDATE instagram_story_jobs SET status = 'claimed', checkpoint = 'claimed', claim_token = ?, claimed_at = ?, updated_at = ?
       WHERE id = (SELECT j.id FROM instagram_story_jobs j JOIN instagram_account_bindings b ON b.restaurant_id = j.restaurant_id
         WHERE j.publisher_id = ? AND j.status = 'pending' AND b.enabled = 1 AND b.publisher_id = j.publisher_id
+          AND (j.scheduled_at IS NULL OR j.scheduled_at<=?) AND (j.expires_at IS NULL OR j.expires_at>?)
           AND b.instagram_user_id = j.instagram_user_id AND b.instagram_username = j.instagram_username
           AND EXISTS(SELECT 1 FROM restaurant_plans WHERE restaurant_id = j.restaurant_id AND plan = 'performance')
           AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs uncertain WHERE uncertain.restaurant_id = j.restaurant_id AND uncertain.status = 'outcome_unknown')
@@ -237,7 +256,7 @@ async function claim(env, request, params) {
         ORDER BY j.queued_at, j.id LIMIT 1)
       AND status = 'pending'
       AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs active WHERE active.publisher_id = ? AND active.status IN ('claimed','preparing','publishing'))`)
-      .bind(token, timestamp, timestamp, agent.publisher_id, new Date(Date.now() - PUBLICATION_WINDOW_MS).toISOString(), agent.publisher_id),
+      .bind(token, timestamp, timestamp, agent.publisher_id, timestamp, timestamp, new Date(Date.now() - PUBLICATION_WINDOW_MS).toISOString(), agent.publisher_id),
       env.DB.prepare(`INSERT INTO instagram_story_job_events(id, job_id, publisher_id, status, checkpoint, created_at)
         SELECT ?, id, publisher_id, 'claimed', 'claimed', ? FROM instagram_story_jobs WHERE claim_token = ? AND changes() > 0`)
         .bind(`ig_event_${crypto.randomUUID()}`, timestamp, token)];
@@ -280,11 +299,12 @@ async function update(env, request, params, payload) {
     ${guarded ? `AND EXISTS(SELECT 1 FROM instagram_account_bindings b JOIN instagram_publishers p ON p.publisher_id = b.publisher_id
       WHERE b.restaurant_id = instagram_story_jobs.restaurant_id AND b.publisher_id = instagram_story_jobs.publisher_id
       AND b.instagram_username = instagram_story_jobs.instagram_username AND b.instagram_user_id = instagram_story_jobs.instagram_user_id AND b.enabled = 1 AND p.is_active = 1)
+      AND (scheduled_at IS NULL OR scheduled_at <= ?) AND (expires_at IS NULL OR expires_at > ?)
       AND EXISTS(SELECT 1 FROM restaurant_plans WHERE restaurant_id = instagram_story_jobs.restaurant_id AND plan = 'performance')
       AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs uncertain WHERE uncertain.restaurant_id = instagram_story_jobs.restaurant_id AND uncertain.status = 'outcome_unknown')
       AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs recent WHERE recent.instagram_user_id = instagram_story_jobs.instagram_user_id AND recent.id <> instagram_story_jobs.id AND COALESCE(recent.completed_at, recent.started_at) > ?)` : ""}`)
     .bind(status, checkpoint, errorCode, mediaId, status, timestamp, status, timestamp, timestamp, job.id, job.publisher_id, job.claim_token, ...transitions[status],
-      ...(guarded ? [new Date(Date.now() - PUBLICATION_WINDOW_MS).toISOString()] : [])),
+      ...(guarded ? [timestamp, timestamp, new Date(Date.now() - PUBLICATION_WINDOW_MS).toISOString()] : [])),
     env.DB.prepare(`INSERT INTO instagram_story_job_events(id, job_id, publisher_id, status, checkpoint, error_code, created_at)
       SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() > 0`)
       .bind(`ig_event_${crypto.randomUUID()}`, job.id, job.publisher_id, status, checkpoint, errorCode, timestamp)];
@@ -303,17 +323,28 @@ export async function handleInstagramStories(request, env, payload, action) {
   if (!ACTIONS.has(action) && !SESSION_ACTIONS.has(action)) return null;
   try {
     if (SESSION_ACTIONS.has(action)) return response({ ok: true, ...await handleSessionAction(request, env, payload, action, { owner, publisher, bindingFor }) });
-    const write = ["registerInstagramPublisher", "bindInstagramAccount", "createStoryJob", "updateInstagramStoryJob"].includes(action);
+    const write = ["registerInstagramPublisher", "bindInstagramAccount", "createStoryJob", "updateInstagramStoryJob", "cancelInstagramStoryJob"].includes(action);
     if (request.method !== (write ? "POST" : "GET")) fail("method_not_allowed", 405);
     const params = new URL(request.url).searchParams;
     let result;
     if (action === "registerInstagramPublisher") result = await register(env, request, payload);
     if (action === "bindInstagramAccount") result = await bindAccount(env, request, payload);
     if (action === "createStoryJob") result = await enqueue(env, request, payload);
+    if (action === 'cancelInstagramStoryJob') {
+      const tenant = await restaurant(env,request,payload.slug,payload.token);
+      const jobId = id(payload.job_id), timestamp = now();
+      const results = await env.DB.batch([
+        env.DB.prepare("UPDATE instagram_story_jobs SET status='cancelled',checkpoint='cancelled_by_user',updated_at=? WHERE id=? AND restaurant_id=? AND status='pending' AND scheduled_at IS NOT NULL").bind(timestamp,jobId,tenant.id),
+        env.DB.prepare("INSERT INTO instagram_story_job_events(id,job_id,publisher_id,status,checkpoint,created_at) SELECT ?,id,publisher_id,'cancelled','cancelled_by_user',? FROM instagram_story_jobs WHERE id=? AND changes()>0").bind(`ig_event_${crypto.randomUUID()}`,timestamp,jobId)
+      ]);
+      if (!Number(results[0]?.meta?.changes)) fail('story_schedule_not_cancellable',409);
+      result = {job:publicJob(await jobById(env,jobId))};
+    }
     if (action === "getStoryPublishingConfig" || action === "getStoryJob") {
       const tenant = await restaurant(env, request, params.get("slug"), params.get("token") || bearer(request));
       if (action === "getStoryPublishingConfig") result = { publishing: await configuration(env, tenant.id) };
       else {
+        await expireScheduledStories(env);
         const jobId = params.get("job") || params.get("job_id");
         const row = jobId
           ? await env.DB.prepare("SELECT * FROM instagram_story_jobs WHERE restaurant_id = ? AND id = ? LIMIT 1").bind(tenant.id, id(jobId)).first()

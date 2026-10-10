@@ -1,4 +1,4 @@
-import { handleInstagramStories, MAX_STORY_REQUEST_BYTES } from "./instagram-stories.js";
+import { handleInstagramStories, MAX_STORY_REQUEST_BYTES, expireScheduledStories } from "./instagram-stories.js";
 import { expireInstagramConnections } from "./instagram-sessions.js";
 import { handlePlans, authorizeInsights } from "./plans.js";
 import { verifyOwner, handleOwnerPassword, enforceRateLimit } from "./owner-auth.js";
@@ -83,7 +83,7 @@ export default {
         ? payload.action || url.searchParams.get("action") || "trackEvent"
         : url.searchParams.get("action") || "health";
 
-      if (['saveCatalogItem', 'saveMenuDay', 'createStoryJob'].includes(action)) await enforceRateLimit(env, request, 'tenant_write');
+      if (['saveCatalogItem', 'saveMenuDay', 'createStoryJob', 'cancelInstagramStoryJob'].includes(action)) await enforceRateLimit(env, request, 'tenant_write');
       if (['getRestaurant', 'getCatalog', 'getMenu', 'getInsights', 'getRestaurantPlan', 'getStoryPublishingConfig', 'getStoryJob', 'verifyClientAccess'].includes(action)) await enforceRateLimit(env, request, 'tenant_read');
       if (action === 'trackEvent') await enforceRateLimit(env, request, 'public_write');
       const passwordResponse = await handleOwnerPassword(request, env, payload, action, ctx);
@@ -282,6 +282,7 @@ export default {
 
   async scheduled(controller, env, ctx) {
     ctx.waitUntil(expireInstagramConnections(env));
+    ctx.waitUntil(expireScheduledStories(env));
     ctx.waitUntil(runScheduledMaintenance(controller, env));
   },
 
