@@ -783,3 +783,13 @@ test('scheduling validates horizon, prevents overlapping daily windows and keeps
   f.sqlite.exec("UPDATE restaurant_plans SET plan='divulgacao'");
   assert.equal((await f.enqueue({client_request_id:'blocked',scheduled_at:new Date(Date.now()+3*86400000).toISOString()})).status,409);
 });
+
+test('D1 daily quota returns a safe temporary error and backoff without exposing database details', async t=>{
+  const f=fixture(t);
+  f.env.DB.prepare=()=>{throw new Error("D1_ERROR: Your account has exceeded D1's free tier daily row read limit. SECRET_SQL");};
+  const result=await f.call('reportInstagramSessions',{publisher_id:'test-windows',version:'0.2.0',sessions:[]},{token:publisherToken});
+  assert.equal(result.status,503);
+  assert.equal(result.data.error,'instagram_storage_temporarily_unavailable');
+  assert.ok(Number(result.headers.get('retry-after'))>=60);
+  assert.doesNotMatch(JSON.stringify(result.data),/SECRET_SQL|D1_ERROR/);
+});

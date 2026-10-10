@@ -1921,9 +1921,9 @@ function attachInstagramSessionHandlers() {
         session = result.session;
         if (!usernameEdited && session?.instagram_username) form.elements.instagram_username.value = "@" + session.instagram_username;
         status.textContent = instagramSessionDescription(session);
-      } catch {
+      } catch (error) {
         session = null;
-        if (form.isConnected) status.textContent = "Não foi possível consultar a sessão. Atualize o status para tentar novamente.";
+        if (form.isConnected) status.textContent = error.message === "instagram_storage_temporarily_unavailable" ? storyQueueErrorMessage(error) : "Não foi possível consultar a sessão. Atualize o status para tentar novamente.";
       } finally {
         loading = false;
         if (form.isConnected) {
@@ -2378,6 +2378,7 @@ function attachCatalogManagerHandlers(restaurant) {
 }
 
 function storyQueueErrorMessage(error) {
+  if (error?.message === "instagram_storage_temporarily_unavailable") return "Conexão e postagem temporariamente indisponíveis: o banco da Cloudflare atingiu o limite diário. A cota é renovada às 21h (Brasília). Aguarde a renovação da cota antes de tentar novamente.";
   const scheduleErrors = { invalid_story_schedule: "Escolha uma data válida entre 1 minuto e 7 dias, no horário de Brasília.", story_schedule_conflict: "Mantenha pelo menos 24 horas entre publicações desta conta.", instagram_publisher_unavailable: "O publicador Windows precisa estar configurado e atualizado para conectar a conta." };
   if (scheduleErrors[error?.message]) return scheduleErrors[error.message];
   const code = String(error?.message || "").trim();
