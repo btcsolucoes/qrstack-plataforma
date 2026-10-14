@@ -2379,7 +2379,7 @@ function attachCatalogManagerHandlers(restaurant) {
 
 function storyQueueErrorMessage(error) {
   if (error?.message === "instagram_storage_temporarily_unavailable") return "Conexão e postagem temporariamente indisponíveis: o banco da Cloudflare atingiu o limite diário. A cota é renovada às 21h (Brasília). Aguarde a renovação da cota antes de tentar novamente.";
-  const scheduleErrors = { invalid_story_schedule: "Escolha uma data válida entre 1 minuto e 7 dias, no horário de Brasília.", story_schedule_conflict: "Mantenha pelo menos 24 horas entre publicações desta conta.", instagram_publisher_unavailable: "O publicador Windows precisa estar configurado e atualizado para conectar a conta." };
+  const scheduleErrors = { invalid_story_schedule: "Escolha uma data válida entre 1 minuto e 7 dias, no horário de Brasília.", story_schedule_conflict: "Mantenha pelo menos 3 horas entre publicações desta conta. Pausas por erro podem ser maiores.", instagram_publisher_unavailable: "O publicador Windows precisa estar configurado e atualizado para conectar a conta." };
   if (scheduleErrors[error?.message]) return scheduleErrors[error.message];
   const code = String(error?.message || "").trim();
   const messages = {
