@@ -427,7 +427,7 @@ test('uncertain publication blocks the account and is only cleared by a confirme
   assert.equal((await f.claim()).data.job.status, 'claimed');
 });
 
-test('daily account buffer blocks new submissions and queued jobs but preserves idempotent completion', async t => {
+test('three-hour account buffer blocks new submissions and queued jobs but preserves idempotent completion', async t => {
   const f = fixture(t);
   await f.setupAccount(); await f.enqueue();
   await f.enqueue({ client_request_id: 'already-queued' });
@@ -439,7 +439,7 @@ test('daily account buffer blocks new submissions and queued jobs but preserves 
   const config = (await f.call('getStoryPublishingConfig', { slug: 'internal', token: 'internal-test-token' })).data.publishing;
   assert.equal(config.enabled, false);
   assert.equal(config.state, 'cooldown');
-  assert.ok(config.retry_after_seconds > 86390 && config.retry_after_seconds <= 86400);
+  assert.ok(config.retry_after_seconds > 10790 && config.retry_after_seconds <= 10800);
   const blocked = await f.enqueue({ client_request_id: 'too-soon' });
   assert.equal(blocked.status, 429);
   assert.equal(blocked.data.error, 'instagram_publication_cooldown');
@@ -454,7 +454,7 @@ test('daily account buffer blocks new submissions and queued jobs but preserves 
   assert.equal((await f.update(next, 'publishing')).status, 200);
 });
 
-test('atomic permission rejects a publication entering the daily window after preflight', async t => {
+test('atomic permission rejects a publication entering the three-hour window after preflight', async t => {
   const f = fixture(t);
   await f.setupAccount(); await f.enqueue();
   await f.enqueue({ client_request_id: 'already-queued' });
@@ -774,7 +774,26 @@ test('missed schedules expire without dispatch; cancellation is tenant scoped an
   assert.equal((await f.claim()).data.job,null);
   assert.equal(f.sqlite.prepare("SELECT error_code FROM instagram_story_jobs WHERE id=?").get(second.data.job.id).error_code,'schedule_missed');
 });
-test('scheduling validates horizon, prevents overlapping daily windows and keeps plan authorization',async t=>{
+test('three successful meal publications fit the same day and retain duplicate protection',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  const f=fixture(t); await f.setupAccount();
+  for (const meal of ['breakfast','lunch','dinner']) {
+    assert.equal((await f.enqueue({client_request_id:meal})).status,201);
+    const job=(await f.claim()).data.job;
+    assert.equal((await f.update(job,'publishing')).status,200);
+    assert.equal((await f.update(job,'completed',{media_id:'confirmed-'+meal})).status,200);
+    assert.equal((await f.update(job,'completed',{media_id:'confirmed-'+meal})).data.duplicate,true);
+    assert.equal((await f.enqueue({client_request_id:meal+'-too-soon'})).status,429);
+    t.mock.timers.tick(3*3600000+2000);
+  }
+});
+
+test('three meal schedules are accepted with three-hour separation',async t=>{
+  const f=fixture(t); await f.setupAccount(); const base=Date.now()+3600000;
+  for (let i=0;i<3;i++) assert.equal((await f.enqueue({client_request_id:'meal-'+i,scheduled_at:new Date(base+i*(3*3600000+2000)).toISOString()})).status,201);
+});
+
+test('scheduling validates horizon, prevents overlapping three-hour windows and keeps plan authorization',async t=>{
   const f=fixture(t); await f.setupAccount();
   for(const scheduled_at of ['garbage',new Date(Date.now()-1000).toISOString(),new Date(Date.now()+8*86400000).toISOString()]) assert.equal((await f.enqueue({scheduled_at})).status,400);
   assert.equal((await f.enqueue({scheduled_at:new Date(Date.now()+3600000).toISOString()})).status,201);

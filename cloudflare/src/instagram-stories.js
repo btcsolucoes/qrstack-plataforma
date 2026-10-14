@@ -6,7 +6,7 @@ const MAX_MEDIA_BYTES = 6 * 1024 * 1024;
 export const MAX_STORY_REQUEST_BYTES = Math.ceil(MAX_MEDIA_BYTES / 3) * 4 + 32 * 1024;
 const MEDIA_TTL_SECONDS = 48 * 60 * 60;
 // Conservative QrStack private-publisher policy, not an official Instagram quota.
-const PUBLICATION_WINDOW_MS = 24 * 60 * 60 * 1000;
+const PUBLICATION_WINDOW_MS = 3 * 60 * 60 * 1000;
 const SCHEDULE_HORIZON_MS = 7 * 24 * 60 * 60 * 1000;
 export async function expireScheduledStories(env) {
   await env.DB.prepare("UPDATE instagram_story_jobs SET status='failed_attention',checkpoint='schedule_missed',error_code='schedule_missed',updated_at=? WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?").bind(now(),now()).run();
@@ -197,7 +197,7 @@ async function enqueue(env, request, payload) {
   const cooldownReady = config.state === 'cooldown' && plannedTime >= Date.now() + config.retry_after_seconds * 1000;
   if (config.state === "cooldown" && !cooldownReady) fail("instagram_publication_cooldown", 429, config.retry_after_seconds);
   if (!config.enabled && !cooldownReady) fail(config.state === "outcome_unknown" ? "instagram_outcome_unknown" : "instagram_account_not_ready", 409);
-  const conflicting = await env.DB.prepare("SELECT id FROM instagram_story_jobs WHERE instagram_user_id=? AND status IN ('pending','claimed','preparing','publishing') AND (? IS NOT NULL OR scheduled_at IS NOT NULL) AND ABS(julianday(COALESCE(scheduled_at,queued_at))-julianday(?)) < 1 LIMIT 1").bind(config.instagram_user_id,scheduled,new Date(plannedTime).toISOString()).first();
+  const conflicting = await env.DB.prepare("SELECT id FROM instagram_story_jobs WHERE instagram_user_id=? AND status IN ('pending','claimed','preparing','publishing') AND (? IS NOT NULL OR scheduled_at IS NOT NULL) AND ABS(julianday(COALESCE(scheduled_at,queued_at))-julianday(?)) < 0.125 LIMIT 1").bind(config.instagram_user_id,scheduled,new Date(plannedTime).toISOString()).first();
   if (conflicting) fail('story_schedule_conflict', 409);
   const jobId = `ig_story_${crypto.randomUUID()}`;
   const mediaKey = `instagram-stories/${tenant.slug}/${jobId}`;
@@ -216,7 +216,7 @@ async function enqueue(env, request, payload) {
       AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs WHERE restaurant_id = ? AND status = 'outcome_unknown')
       AND EXISTS(SELECT 1 FROM restaurant_plans WHERE restaurant_id = ? AND plan = 'performance')
       AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs recent WHERE recent.instagram_user_id = ? AND COALESCE(recent.completed_at, recent.started_at) > ?)
-      AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs other WHERE (? IS NOT NULL OR other.scheduled_at IS NOT NULL) AND other.instagram_user_id=? AND other.status IN ('pending','claimed','preparing','publishing') AND ABS(julianday(COALESCE(other.scheduled_at,other.queued_at))-julianday(?)) < 1)
+      AND NOT EXISTS(SELECT 1 FROM instagram_story_jobs other WHERE (? IS NOT NULL OR other.scheduled_at IS NOT NULL) AND other.instagram_user_id=? AND other.status IN ('pending','claimed','preparing','publishing') AND ABS(julianday(COALESCE(other.scheduled_at,other.queued_at))-julianday(?)) < 0.125)
       ON CONFLICT(restaurant_id, client_request_id) DO NOTHING`)
       .bind(jobId, tenant.id, tenant.slug, config.publisher_id, config.instagram_username, config.instagram_user_id, menuDayId || null,
         link.href, mediaKey, mediaHash, type, bytes.length, imageSource, clientId, requestHash, timestamp, timestamp, timestamp, scheduled, scheduled ? new Date(plannedTime+15*60000).toISOString() : null,
