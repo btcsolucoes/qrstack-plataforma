@@ -1241,7 +1241,7 @@ function renderHq(tab = "overview") {
   if (tab === "respostas") hydrateMenuResponses();
   if (tab === "banco") hydrateWorkspaceCatalog();
   if (tab === "stories") attachStoryAccountHandlers();
-  if (tab === "clientes") hydrateClientPlans();
+  if (tab === "clientes") { hydrateClientPlans(); attachRestaurantRegistration(); }
   if (tab === "senha") attachOwnerPasswordHandler();
 }
 
@@ -1344,7 +1344,7 @@ function renderHqOverview() {
 }
 
 function renderHqClients(restaurants) {
-  return `<section class="workspace-restaurants"><div class="section-title-row"><h2>Restaurantes cadastrados</h2><span>${restaurants.length} ${restaurants.length === 1 ? "restaurante" : "restaurantes"}</span></div><div id="client-plans">Carregando planos...</div></section>`;
+  return `<section class="workspace-restaurants"><div class="section-title-row"><h2>Restaurantes cadastrados</h2><span data-restaurant-count>${restaurants.length} ${restaurants.length === 1 ? "restaurante" : "restaurantes"}</span><button type="button" data-new-restaurant aria-expanded="false" aria-controls="restaurant-registration">${uiIcon("plus")}Novo restaurante</button></div>${renderRestaurantRegistration()}<div data-registration-result role="status"></div><div id="client-plans">Carregando planos...</div></section>`;
 }
 
 const CLIENT_PLANS = {
@@ -1372,7 +1372,7 @@ async function hydrateClientPlans() {
   try {
     const data = await apiGet("listRestaurantPlans", { key: OWNER_SESSION_TOKEN });
     if (!target.isConnected) return;
-    const count = target.parentElement.querySelector(".section-title-row span");
+    const count = target.parentElement.querySelector("[data-restaurant-count]");
     if (count) count.textContent = `${data.restaurants.length} ${data.restaurants.length === 1 ? "restaurante" : "restaurantes"}`;
     target.innerHTML = data.restaurants.map(row => {
       const restaurant = fromSheetRestaurant(row);
@@ -1964,7 +1964,7 @@ function attachInstagramSessionHandlers() {
 }
 
 async function renderClientPortal(slug, version, { skipCatalogSync = false } = {}) {
-  const localRestaurant = getRestaurant(slug);
+  const localRestaurant = state.restaurants.find(item => item.slug === slug) || await syncRestaurantFromApi(slug);
   const [remote] = await Promise.all([
     syncMenuFromApi(slug),
     skipCatalogSync ? Promise.resolve(getCatalogForRestaurant(localRestaurant)) : syncCatalogForRestaurant(localRestaurant),
@@ -3084,7 +3084,7 @@ function catalogImageUrl(imageUrl, restaurant = null) {
 
 async function renderPublicMenu(slug, source = "direct", version = routeVersion) {
   const localRestaurant = getRestaurant(slug);
-  if (localRestaurant?.slug === "amaro") {
+  if (localRestaurant?.slug === slug && slug === "amaro") {
     if (!window.location.hash.replace(/^#\/?/, "").startsWith(`r/${slug}`)) return;
     setTheme(localRestaurant);
     trackEvent(localRestaurant, "page_view", source, getLatestMenu(localRestaurant.id)?.id);
@@ -3095,6 +3095,17 @@ async function renderPublicMenu(slug, source = "direct", version = routeVersion)
   if (!isCurrentRoute(version)) return;
   if (!window.location.hash.replace(/^#\/?/, "").startsWith(`r/${slug}`)) return;
   const restaurant = remote.restaurant;
+  if (restaurant.slug !== slug) {
+    app.innerHTML = '<section class="empty-state">Não foi possível carregar este restaurante. Atualize a página para tentar novamente.</section>';
+    return;
+  }
+  if (restaurant.githubPagesUrl) {
+    setTheme(restaurant);
+    app.innerHTML = renderOriginalPublicMenu(restaurant, source);
+    return;
+  }
+  await syncCatalogForRestaurant(restaurant);
+  if (!isCurrentRoute(version)) return;
   const menu = remote.menu;
   const menuItems = remote.items;
   const groups = groupBy(menuItems, "category");
@@ -3111,9 +3122,9 @@ async function renderPublicMenu(slug, source = "direct", version = routeVersion)
       <div class="hero__inner">
         <img class="hero__logo" src="${restaurant.logoUrl}" alt="${restaurant.name}" />
         <p class="eyebrow">Cardápio digital</p>
-        <h1>${restaurant.name}</h1>
+        <h1>${escapeHtml(restaurant.name)}</h1>
         <div class="hero__meta">
-          <span class="pill">${restaurant.address || ""}</span>
+          <span class="pill">${escapeHtml(restaurant.address || "")}</span>
           <span class="pill">${menu?.serviceHours || "Horário do dia"}</span>
         </div>
       </div>
@@ -3168,7 +3179,7 @@ async function renderPublicMenu(slug, source = "direct", version = routeVersion)
           <h2>Fale com o restaurante</h2>
         </div>
         <div class="actions">
-          <a class="button" data-track="whatsapp_click" href="https://wa.me/55${restaurant.whatsappNumber}" target="_blank" rel="noreferrer">WhatsApp</a>
+          <a class="button" data-track="whatsapp_click" href="https://wa.me/${restaurant.whatsappNumber.startsWith("55") ? restaurant.whatsappNumber : `55${restaurant.whatsappNumber}`}" target="_blank" rel="noreferrer">WhatsApp</a>
           <a class="button secondary" data-track="maps_click" href="${restaurant.mapsUrl}" target="_blank" rel="noreferrer">Como chegar</a>
           <a class="button ghost" data-track="instagram_click" href="${restaurant.instagramUrl}" target="_blank" rel="noreferrer">Instagram</a>
         </div>

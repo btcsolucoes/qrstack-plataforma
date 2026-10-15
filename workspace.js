@@ -2,6 +2,57 @@ let workspaceInsightView = "overview";
 let workspaceClientView = "formulario";
 let workspacePortalRestaurant = null;
 
+function renderRestaurantRegistration() {
+  return `<form id="restaurant-registration" class="restaurant-registration" hidden>
+    <h3>Novo restaurante</h3><div class="registration-fields">
+    <label>Nome do restaurante<input name="name" required minlength="2" maxlength="120" autocomplete="organization" /></label>
+    <label>Identificador do link<input name="slug" required maxlength="80" pattern="[a-z0-9]+(-[a-z0-9]+)*" autocapitalize="none" spellcheck="false" aria-describedby="restaurant-link-preview" /><small id="restaurant-link-preview"></small></label>
+    <label>Plano<select name="plan">${Object.entries(CLIENT_PLANS).map(([key, plan]) => `<option value="${key}">${plan.name}</option>`).join("")}</select></label>
+    <label>WhatsApp (opcional)<input name="whatsapp_number" type="tel" maxlength="30" autocomplete="tel" placeholder="5581999999999" /></label>
+    <label>Endereço (opcional)<input name="address" maxlength="300" autocomplete="street-address" /></label>
+    <label>Instagram (opcional)<input name="instagram_url" type="url" placeholder="https://www.instagram.com/restaurante/" /></label>
+    <label class="registration-wide">Cardápio externo (opcional)<input name="github_pages_url" type="url" placeholder="https://..." /></label>
+    </div><div class="actions"><button type="submit">Cadastrar restaurante</button><button class="secondary" type="button" data-cancel-registration>Cancelar</button></div>
+    <p data-registration-status role="status" aria-live="polite"></p></form>`;
+}
+
+function attachRestaurantRegistration() {
+  const form = document.getElementById("restaurant-registration");
+  if (!form) return;
+  const toggle = document.querySelector("[data-new-restaurant]");
+  const result = document.querySelector("[data-registration-result]");
+  const show = visible => { form.hidden = !visible; toggle.setAttribute("aria-expanded", String(visible)); if (visible) form.elements.name.focus(); else toggle.focus(); };
+  toggle.addEventListener("click", () => show(form.hidden));
+  form.querySelector("[data-cancel-registration]").addEventListener("click", () => show(false));
+  let customSlug = false;
+  const preview = () => { document.getElementById("restaurant-link-preview").textContent = `#/r/${form.elements.slug.value || "seu-restaurante"}`; };
+  form.elements.slug.addEventListener("input", () => { customSlug = true; preview(); });
+  form.elements.name.addEventListener("input", () => {
+    if (!customSlug) form.elements.slug.value = form.elements.name.value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 80).replace(/^-|-$/g, "");
+    preview();
+  });
+  preview();
+  let saving = false;
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (saving || !form.reportValidity()) return;
+    saving = true;
+    const button = form.querySelector('[type="submit"]');
+    const status = form.querySelector("[data-registration-status]");
+    button.disabled = true; button.textContent = "Cadastrando..."; status.textContent = "";
+    try {
+      const data = await apiPost({ action: "createRestaurant", owner_key: OWNER_SESSION_TOKEN, ...Object.fromEntries(new FormData(form)) });
+      const restaurant = fromSheetRestaurant(data.restaurant);
+      upsertById(state.restaurants, restaurant);
+      result.innerHTML = `<p><strong>${escapeHtml(restaurant.name)}</strong> cadastrado.</p><div class="actions"><a class="button" href="${clientPortalLink(restaurant)}&view=catalog-manager">Adicionar pratos ${uiIcon("arrow-right")}</a><button type="button" class="secondary" data-copy-client-access="${escapeAttr(restaurant.slug)}">Copiar acesso do restaurante</button><a class="text-link" href="${publicMenuHash(restaurant, "hq")}">Ver cardápio público</a></div>`;
+      form.reset(); customSlug = false; preview(); show(false);
+      await hydrateClientPlans();
+    } catch (error) {
+      status.textContent = error.message === "restaurant_slug_exists" ? "Este identificador já está cadastrado. Confira a lista ou escolha outro link." : error.message.startsWith("invalid_") ? "Confira os campos: use links https:// e um WhatsApp com DDD." : "Não foi possível confirmar o cadastro. Seus campos foram mantidos. Confira a lista antes de tentar novamente.";
+    } finally { saving = false; button.disabled = false; button.textContent = "Cadastrar restaurante"; }
+  });
+}
+
 function uiIcon(name, className = "") {
   return `<img class="ui-icon ${className}" src="assets/icons/${name}.svg" alt="" aria-hidden="true" width="20" height="20" />`;
 }
