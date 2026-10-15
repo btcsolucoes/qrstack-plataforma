@@ -12,6 +12,7 @@ function fixture(t) {
   const sqlite = new DatabaseSync(':memory:');
   t.after(() => sqlite.close());
   sqlite.exec(fs.readFileSync(path.join(root, 'cloudflare/migrations/0001_qrstack_core.sql'), 'utf8'));
+  sqlite.exec(fs.readFileSync(path.join(root, 'cloudflare/migrations/0011_restaurant_plans.sql'), 'utf8'));
   sqlite.exec(`INSERT INTO restaurants(id,slug,name,admin_token) VALUES
     ('alpha-id','alpha','Alpha','alpha-private-token'), ('beta-id','beta','Beta','beta-private-token');
     INSERT INTO catalog_items(id,restaurant_id,section_id,section_title,name) VALUES ('beta-item','beta-id','food','Food','Beta original');
@@ -55,6 +56,37 @@ function fixture(t) {
   }
   return { env, sqlite, kv, call };
 }
+
+test('restaurant registration requires owner and creates an isolated client atomically', async t => {
+  const f = fixture(t);
+  const payload = { name: 'Novo Restaurante', slug: 'novo-restaurante', plan: 'divulgacao' };
+  assert.equal((await f.call('createRestaurant', payload, { method: 'POST' })).status, 401);
+  assert.equal((await f.call('createRestaurant', payload, { method: 'POST', headers: { 'x-client-token': 'alpha-private-token' } })).status, 401);
+  const options = { method: 'POST', headers: { 'x-owner-session': 'owner-session' } };
+  const response = await f.call('createRestaurant', payload, options);
+  assert.equal(response.status, 200);
+  assert.equal(response.data.restaurant.slug, payload.slug);
+  assert.equal(response.data.restaurant.admin_token, undefined);
+  const row = f.sqlite.prepare('SELECT * FROM restaurants WHERE slug = ?').get(payload.slug);
+  assert.ok(row.admin_token.length >= 64);
+  assert.equal(f.sqlite.prepare('SELECT plan FROM restaurant_plans WHERE restaurant_id = ?').get(row.id).plan, 'divulgacao');
+  assert.equal((await f.call('createRestaurant', payload, options)).status, 409);
+  assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS n FROM restaurants WHERE slug = ?').get(payload.slug).n, 1);
+  assert.equal((await f.call('getRestaurant', { slug: payload.slug })).data.restaurant.name, payload.name);
+  assert.equal((await f.call('verifyClientAccess', { slug: payload.slug, token: row.admin_token }, { method: 'POST' })).status, 200);
+  assert.equal(f.sqlite.prepare("SELECT name FROM restaurants WHERE slug='beta'").get().name, 'Beta');
+});
+
+test('registration validates fields and rolls back a partial write', async t => {
+  const f = fixture(t);
+  const options = { method: 'POST', headers: { 'x-owner-session': 'owner-session' } };
+  for (const fields of [{ name: '' }, { slug: '../bad' }, { plan: 'free' }, { instagram_url: 'javascript:alert(1)' }]) {
+    assert.equal((await f.call('createRestaurant', { name: 'Valid', slug: 'valid', ...fields }, options)).status, 400);
+  }
+  f.sqlite.exec("CREATE TRIGGER fail_registration BEFORE INSERT ON restaurant_plan_events BEGIN SELECT RAISE(ABORT, 'test failure'); END;");
+  assert.equal((await f.call('createRestaurant', { name: 'Valid', slug: 'valid' }, options)).status, 500);
+  assert.equal(f.sqlite.prepare("SELECT COUNT(*) AS n FROM restaurants WHERE slug='valid'").get().n, 0);
+});
 
 test('public restaurant/catalog/menu responses never return credentials or internal source fields', async t => {
   const f = fixture(t);

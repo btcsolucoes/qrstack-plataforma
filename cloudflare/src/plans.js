@@ -1,4 +1,5 @@
 import { verifyOwner } from './owner-auth.js';
+import { createRestaurant } from './restaurant-registration.js';
 import { authorizeTenant, getTenant, publicRestaurant } from './tenant-auth.js';
 export const PLANS = Object.freeze({
   cardapio: { name: 'RSTACK CARDÁPIO', features: { menu: true, story: false, autopublish: false, analytics: false } },
@@ -40,16 +41,18 @@ export async function authorizeInsights(env, request, params) {
   if (!(await entitlement(env, tenant.id)).features.analytics) deny('plan_performance_required');
 }
 export async function handlePlans(request, env, payload, action) {
-  if (!['verifyOwnerAccess', 'listRestaurantPlans', 'getRestaurantPlan', 'setRestaurantPlan'].includes(action)) return null;
+  if (!['verifyOwnerAccess', 'listRestaurantPlans', 'getRestaurantPlan', 'setRestaurantPlan', 'createRestaurant'].includes(action)) return null;
   const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*' };
   try {
     const params = new URL(request.url).searchParams;
-    const write = ['verifyOwnerAccess', 'setRestaurantPlan'].includes(action);
+    const write = ['verifyOwnerAccess', 'setRestaurantPlan', 'createRestaurant'].includes(action);
     if (request.method !== (write ? 'POST' : 'GET')) deny('method_not_allowed', 405);
     const owner = await isOwner(env, request, payload.owner_key || params.get('key'));
     if (action !== 'getRestaurantPlan' && !owner) deny('unauthorized', 401);
     let result = {};
-    if (action === 'listRestaurantPlans') {
+    if (action === 'createRestaurant') {
+      result.restaurant = await createRestaurant(env, payload);
+    } else if (action === 'listRestaurantPlans') {
       let rows;
       try {
         rows = (await env.DB.prepare('SELECT r.*, p.plan FROM restaurants r LEFT JOIN restaurant_plans p ON p.restaurant_id = r.id ORDER BY r.name').all()).results || [];

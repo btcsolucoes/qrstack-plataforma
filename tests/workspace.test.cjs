@@ -34,6 +34,19 @@ test('central has persistent navigation and an explicit Stories workspace', () =
   assert.match(html, /href="[^\"]*stories/);
 });
 
+test('manager restaurant list includes a blank registration form with plans and accessible controls', () => {
+  const html = runtime()('renderHqClients([])');
+  assert.match(html, /data-new-restaurant/);
+  assert.match(html, /id="restaurant-registration"[^>]*hidden/);
+  assert.match(html, /name="name" required/);
+  assert.match(html, /name="slug" required/);
+  assert.match(html, /value="cardapio"/);
+  assert.match(html, /value="divulgacao"/);
+  assert.match(html, /value="performance"/);
+  assert.match(html, /data-cancel-registration/);
+  assert.doesNotMatch(html, /admin_token/);
+});
+
 test('owner password screen is private and keeps passwords masked', () => {
   const run = runtime();
   const owner = run('renderWorkspace({title:"Minha senha",active:"senha",content:renderOwnerPassword()})');
