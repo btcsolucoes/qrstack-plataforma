@@ -570,3 +570,11 @@ body:not(.public-mode) .password-input input[aria-invalid="true"] { border-color
 .workspace-restaurants .section-title-row { flex-wrap: wrap; gap: 16px; }
 [data-registration-result]:not(:empty) { padding-bottom: 24px; }
 @media (max-width: 640px) { .registration-fields { grid-template-columns: 1fr; } .restaurant-registration .actions { flex-wrap: wrap; } }
+
+/* Separate restaurant access controls inherit workspace colors and spacing. */
+.manager-access-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0 24px; }
+.manager-access-controls details { flex-basis: 100%; }
+.manager-access-controls summary { cursor: pointer; padding: 12px 0; font-weight: 700; }
+.manager-access-controls p { max-width: 68ch; }
+[data-manager-access-result] { display: grid; gap: 12px; margin-top: 16px; }
+[data-manager-access-result] input { width: 100%; min-width: 0; }

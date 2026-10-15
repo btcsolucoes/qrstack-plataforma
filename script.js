@@ -514,7 +514,7 @@ async function router() {
   ownerResetToken = "";
   if (!hash || parts[0] === "home") return renderHome();
   if (parts[0] === "hq" || parts[0] === "central") return renderOwnerRoute(parts[1] || "overview", params);
-  if (parts[0] === "cliente" || parts[0] === "admin") return renderClientRoute(parts[1] || ACTIVE_CLIENT_SLUG, params, currentRouteVersion);
+  if (parts[0] === "cliente" || parts[0] === "admin" || parts[0] === "gestor") return renderClientRoute(parts[1] || ACTIVE_CLIENT_SLUG, params, currentRouteVersion);
   if (parts[0] === "r") return renderPublicMenu(parts[1] || ACTIVE_CLIENT_SLUG, source, currentRouteVersion);
   renderHome();
 }
@@ -534,6 +534,7 @@ async function renderClientRoute(slug, params, version) {
   const restaurant = await syncRestaurantFromApi(slug);
   if (!isCurrentRoute(version)) return;
   workspaceClientView = params.get("view") || "formulario";
+  if (!isManagerWorkspace() && !["formulario", "catalog-manager"].includes(workspaceClientView)) workspaceClientView = "formulario";
   if (!await hasClientAccess(restaurant, params)) { if (isCurrentRoute(version)) renderClientGate(restaurant); return; }
   if (!isCurrentRoute(version)) return;
   return renderClientPortal(slug, version);
@@ -580,28 +581,29 @@ async function hasOwnerAccess(params = new URLSearchParams()) {
 }
 
 function clientToken(restaurant) {
-  const slug = restaurant?.slug;
+  const slug = restaurant?.slug ? (isManagerWorkspace() ? "manager:" : "") + restaurant.slug : "";
   if (!slug) return "";
   if (clientTokens.has(slug)) return clientTokens.get(slug);
   try { return sessionStorage.getItem("qrstack:client-token:" + slug) || ""; } catch { return ""; }
 }
 
 async function hasClientAccess(restaurant, params = new URLSearchParams()) {
+  const storageSlug = (isManagerWorkspace() ? "manager:" : "") + restaurant.slug;
   const token = params.get("token") || clientToken(restaurant);
   if (params.get("token")) removeAccessFromUrl("token");
   if (!token && !OWNER_SESSION_TOKEN) return false;
   try {
-    await apiPost({ action: "verifyClientAccess", slug: restaurant.slug, token, ...(!token && OWNER_SESSION_TOKEN ? {owner_key: OWNER_SESSION_TOKEN} : {}) });
+    await apiPost({ action: "verifyClientAccess", slug: restaurant.slug, token, role: isManagerWorkspace() ? "manager" : "kitchen", ...(!token && OWNER_SESSION_TOKEN ? {owner_key: OWNER_SESSION_TOKEN} : {}) });
     if (!token && OWNER_SESSION_TOKEN) ownerVerified = true;
     if (token) {
-      clientTokens.set(restaurant.slug, token);
-      try { sessionStorage.setItem("qrstack:client-token:" + restaurant.slug, token); } catch {}
+      clientTokens.set(storageSlug, token);
+      try { sessionStorage.setItem("qrstack:client-token:" + storageSlug, token); } catch {}
     }
     rememberAccess(clientSessionKey(restaurant));
     return true;
   } catch {
-    clientTokens.delete(restaurant.slug);
-    try { sessionStorage.removeItem("qrstack:client-token:" + restaurant.slug); sessionStorage.removeItem(clientSessionKey(restaurant)); } catch {}
+    clientTokens.delete(storageSlug);
+    try { sessionStorage.removeItem("qrstack:client-token:" + storageSlug); sessionStorage.removeItem(clientSessionKey(restaurant)); } catch {}
     return false;
   }
 }
@@ -631,7 +633,7 @@ function ownerLink(tab = "overview") {
 }
 
 function clientPortalLink(restaurant) {
-  return `#/cliente/${encodeURIComponent(restaurant.slug)}?portal=1`;
+  return `#/${isManagerWorkspace() ? "gestor" : "cliente"}/${encodeURIComponent(restaurant.slug)}?portal=1`;
 }
 
 function publicMenuHash(restaurant, source = "qr") {
@@ -1197,12 +1199,12 @@ function renderClientGate(restaurant) {
         <img class="access-panel__logo access-panel__logo--restaurant" src="${restaurant.logoUrl}" alt="${restaurant.name}" />
         <p class="eyebrow">Acesso do restaurante</p>
         <h1>${restaurant.name}</h1>
-        <p>Use o link privado enviado pela QrStack para abrir o formulário.</p>
+        <p>${isManagerWorkspace() ? "Use o link privado da gestão. O link da cozinha não dá acesso a esta área." : "Use o link da cozinha enviado pela QrStack para preencher o cardápio e gerenciar pratos."}</p>
         <form class="access-form" data-client-access data-slug="${restaurant.slug}">
           <label for="client-access-token">Token ou link privado</label>
           <input id="client-access-token" name="clientAccessToken" type="password" autocomplete="off" placeholder="Cole o token ou link do restaurante" />
           <div class="actions">
-            <button type="submit">Abrir formulário</button>
+            <button type="submit">${isManagerWorkspace() ? "Entrar na gestão" : "Abrir formulário"}</button>
             <a class="button secondary" href="${publicMenuHash(restaurant, "platform")}">Ver cardápio público</a>
           </div>
         </form>
@@ -1352,7 +1354,8 @@ const CLIENT_PLANS = {
   divulgacao: { name: "QRSTACK DIVULGAÇÃO", description: "Tudo do Cardápio + Story com a identidade do restaurante para baixar e link para copiar no Instagram." },
   performance: { name: "QRSTACK PERFORMANCE", description: "Tudo do Divulgação + postagem automática de Story e dashboard de acessos do cardápio." },
 };
-function isClientWorkspace() { return /^#\/(cliente|admin)\//.test(location.hash || ""); }
+function isManagerWorkspace() { return /^#\/gestor\//.test(location.hash || ""); }
+function isClientWorkspace() { return /^#\/(cliente|admin|gestor)\//.test(location.hash || ""); }
 function currentWorkspaceRestaurant() { return isClientWorkspace() ? workspacePortalRestaurant : getRestaurant(ACTIVE_CLIENT_SLUG); }
 function clientFeature(restaurant, feature) { return restaurant?.planAccess?.features?.[feature] === true; }
 function renderPlanLock(feature, plan) {
@@ -1378,7 +1381,7 @@ async function hydrateClientPlans() {
       const restaurant = fromSheetRestaurant(row);
       upsertById(state.restaurants, restaurant);
       const plan = Object.hasOwn(CLIENT_PLANS, row.plan) ? row.plan : "cardapio";
-      return `<article class="client-plan-card">${renderRestaurantRow(restaurant)}<form data-client-plan="${escapeAttr(row.slug)}"><label for="plan-${escapeAttr(row.slug)}">Plano do cliente</label><div class="actions"><select id="plan-${escapeAttr(row.slug)}" name="plan">${Object.entries(CLIENT_PLANS).map(([key, value]) => `<option value="${key}" ${key === plan ? "selected" : ""}>${value.name}</option>`).join("")}</select><button type="submit">Salvar plano</button></div><p data-plan-description>${CLIENT_PLANS[plan].description}</p><p data-plan-status role="status">Plano atual: ${CLIENT_PLANS[plan].name}</p></form></article>`;
+      return `<article class="client-plan-card">${renderRestaurantRow(restaurant)}<div class="manager-access-controls"><a class="button secondary" href="#/gestor/${encodeURIComponent(restaurant.slug)}">Abrir gestão do restaurante</a><button type="button" class="secondary" data-copy-client-access="${escapeAttr(restaurant.slug)}">Copiar link da cozinha</button><details><summary>Link privado da gestão</summary><p>Gere um link para compartilhar somente com o gestor. Ao gerar novamente, o link anterior da gestão deixa de funcionar. O link da cozinha permanece igual.</p><button type="button" data-create-manager-access="${escapeAttr(restaurant.slug)}">Gerar novo link da gestão</button><div data-manager-access-result role="status"></div></details></div><form data-client-plan="${escapeAttr(row.slug)}"><label for="plan-${escapeAttr(row.slug)}">Plano do cliente</label><div class="actions"><select id="plan-${escapeAttr(row.slug)}" name="plan">${Object.entries(CLIENT_PLANS).map(([key, value]) => `<option value="${key}" ${key === plan ? "selected" : ""}>${value.name}</option>`).join("")}</select><button type="submit">Salvar plano</button></div><p data-plan-description>${CLIENT_PLANS[plan].description}</p><p data-plan-status role="status">Plano atual: ${CLIENT_PLANS[plan].name}</p></form></article>`;
     }).join("");
     target.querySelectorAll("[data-client-plan]").forEach(form => {
       form.elements.plan.addEventListener("change", () => { form.querySelector("[data-plan-description]").textContent = CLIENT_PLANS[form.elements.plan.value].description; });
@@ -1505,18 +1508,9 @@ function renderHqStories() {
                 <h3>${escapeHtml(restaurant.name)}</h3>
                 <p class="muted">Use logo e cores do restaurante ou envie sua própria imagem.</p>
                 <div class="actions">
-                  <a class="button" href="${clientPortalLink(restaurant)}&view=story-panel">Preparar Story</a>
+                  <a class="button" href="#/gestor/${encodeURIComponent(restaurant.slug)}?view=story-panel">Preparar Story</a>
                 </div>
-                <section class="story-account-settings" aria-labelledby="instagram-settings-${escapeAttr(restaurant.slug)}"><h4 id="instagram-settings-${escapeAttr(restaurant.slug)}">Configurar conta de publicação</h4>
-                  <form class="form-grid instagram-session-form" data-instagram-session-form="${escapeAttr(restaurant.slug)}">
-                    <div class="field field--full"><label>Instagram do restaurante<input name="instagram_username" required maxlength="31" placeholder="@restaurante" autocomplete="off" autocapitalize="none" spellcheck="false" /></label></div>
-                    <div class="field field--full">${renderPasswordInput(`instagram-password-${escapeAttr(restaurant.slug)}`, "password", "Senha do Instagram", { autocomplete: "off", describedBy: `instagram-help-${escapeAttr(restaurant.slug)}` })}</div>
-                    <p class="muted field--full" id="instagram-help-${escapeAttr(restaurant.slug)}">Informe apenas o @ e a senha. A plataforma identifica a conta automaticamente. A senha é usada nesta conexão e não fica disponível para consulta; a sessão é guardada criptografada no Windows.</p>
-                    <div class="actions field--full"><button type="submit" disabled>Conectar sessão</button><button type="button" class="secondary" data-refresh-instagram-session>Atualizar status</button></div>
-                    <p class="field--full instagram-session-status" data-instagram-session-status role="status" aria-live="polite">Consultando a sessão...</p>
-                    <p class="muted field--full" data-instagram-session-message role="status"></p>
-                  </form>
-                </section>
+                ${renderInstagramAccountSettings(restaurant)}
               </article>
             `
           )
@@ -1882,6 +1876,23 @@ async function publishPreparedStory(draft) {
   }
 }
 
+function renderInstagramAccountSettings(restaurant) {
+  return `<section class="story-account-settings" aria-labelledby="instagram-settings-${escapeAttr(restaurant.slug)}"><h4 id="instagram-settings-${escapeAttr(restaurant.slug)}">Configurar conta de publicação</h4>
+                  <form class="form-grid instagram-session-form" data-instagram-session-form="${escapeAttr(restaurant.slug)}">
+                    <div class="field field--full"><label>Instagram do restaurante<input name="instagram_username" required maxlength="31" placeholder="@restaurante" autocomplete="off" autocapitalize="none" spellcheck="false" /></label></div>
+                    <div class="field field--full">${renderPasswordInput(`instagram-password-${escapeAttr(restaurant.slug)}`, "password", "Senha do Instagram", { autocomplete: "off", describedBy: `instagram-help-${escapeAttr(restaurant.slug)}` })}</div>
+                    <p class="muted field--full" id="instagram-help-${escapeAttr(restaurant.slug)}">Informe apenas o @ e a senha. A plataforma identifica a conta automaticamente. A senha é usada nesta conexão e não fica disponível para consulta; a sessão fica protegida no serviço de publicação.</p>
+                    <div class="actions field--full"><button type="submit" disabled>Conectar sessão</button><button type="button" class="secondary" data-refresh-instagram-session>Atualizar status</button></div>
+                    <p class="field--full instagram-session-status" data-instagram-session-status role="status" aria-live="polite">Consultando a sessão...</p>
+                    <p class="muted field--full" data-instagram-session-message role="status"></p>
+                  </form>
+                </section>`;
+}
+
+function instagramSessionCredentials(slug) {
+  return isManagerWorkspace() ? { token: clientToken({slug}) } : { owner_key: OWNER_SESSION_TOKEN };
+}
+
 function attachStoryAccountHandlers() {
   attachInstagramSessionHandlers();
 }
@@ -1897,7 +1908,7 @@ function instagramSessionDescription(session = {}) {
   if (session.request_status === "pending") text = "Conexão solicitada, aguardando o publicador Windows (prazo de 5 minutos).";
   if (session.request_status === "processing") text = "Conectando a conta. Aguarde o resultado; não há repetição automática de login.";
   if (session.request_status === "expired") text += " O pedido anterior expirou sem confirmação. Confira o Instagram antes de tentar novamente.";
-  text += session.publisher_online ? " Publicador Windows online." : " Publicador Windows offline. Inicie-o neste computador para processar a conexão.";
+  text += session.publisher_online ? " Serviço de publicação online." : isManagerWorkspace() ? " Serviço de publicação offline. Entre em contato com a QrStack para ativá-lo." : " Publicador Windows offline. Inicie-o neste computador para processar a conexão.";
   if (session.verified_at && Number.isFinite(Date.parse(session.verified_at))) text += ` Última confirmação: ${new Date(session.verified_at).toLocaleString("pt-BR")}.`;
   return text;
 }
@@ -1912,11 +1923,11 @@ function attachInstagramSessionHandlers() {
     form.elements.instagram_username.addEventListener("input", () => { usernameEdited = true; });
     const reload = async () => {
       clearTimeout(timer);
-      if (!form.isConnected || loading || !ownerVerified) return;
+      if (!form.isConnected || loading || (!ownerVerified && !isManagerWorkspace())) return;
       loading = true;
       refresh.disabled = true;
       try {
-        const result = await apiGet("getInstagramSessionStatus", { slug: form.dataset.instagramSessionForm, owner_key: OWNER_SESSION_TOKEN, fresh: Date.now() });
+        const result = await apiGet("getInstagramSessionStatus", { slug: form.dataset.instagramSessionForm, ...instagramSessionCredentials(form.dataset.instagramSessionForm), fresh: Date.now() });
         if (!form.isConnected) return;
         session = result.session;
         if (!usernameEdited && session?.instagram_username) form.elements.instagram_username.value = "@" + session.instagram_username;
@@ -1944,7 +1955,7 @@ function attachInstagramSessionHandlers() {
       hidePasswords(form);
       message.textContent = "Enviando pedido de conexão...";
       try {
-        await apiPost({ action: "requestInstagramConnection", owner_key: OWNER_SESSION_TOKEN, slug: form.dataset.instagramSessionForm, instagram_username: form.elements.instagram_username.value.trim(), password });
+        await apiPost({ action: "requestInstagramConnection", ...instagramSessionCredentials(form.dataset.instagramSessionForm), slug: form.dataset.instagramSessionForm, instagram_username: form.elements.instagram_username.value.trim(), password });
         if (form.isConnected) message.textContent = "Pedido enviado. A conta será identificada e vinculada após a confirmação do login. A postagem depende do plano PERFORMANCE.";
       } catch (error) {
         const messages = { instagram_binding_required: "Salve um vínculo com um publicador ativo antes de conectar.",
@@ -1971,7 +1982,7 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
   ]);
   if (!isCurrentRoute(version)) return;
   const currentHash = window.location.hash.replace(/^#\/?/, "");
-  if (!currentHash.startsWith(`cliente/${slug}`) && !currentHash.startsWith(`admin/${slug}`)) return;
+  if (!currentHash.startsWith(`cliente/${slug}`) && !currentHash.startsWith(`admin/${slug}`) && !currentHash.startsWith(`gestor/${slug}`)) return;
   const restaurant = remote.restaurant || (await syncRestaurantFromApi(slug));
   await syncClientPlan(restaurant);
   if (!isCurrentRoute(version)) return;
@@ -2014,8 +2025,8 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
           ${renderCatalogManager(restaurant)}
         </section>
 
-        ${STORY_AUTOMATION_ENABLED ? renderStoryComposer(restaurant, storyLink) : ""}
-        <section class="section client-step" id="client-insights">${clientFeature(restaurant, "analytics") ? renderHqInsights() : renderPlanLock("Dashboard de acessos do cardápio", "performance")}</section>
+        ${isManagerWorkspace() && STORY_AUTOMATION_ENABLED ? renderStoryComposer(restaurant, storyLink) : ""}
+        ${isManagerWorkspace() ? `<section class="section client-step" id="client-insights">${clientFeature(restaurant, "analytics") ? renderHqInsights() : renderPlanLock("Dashboard de acessos do cardápio", "performance")}</section><section class="section client-step" id="instagram-account">${clientFeature(restaurant, "autopublish") ? renderInstagramAccountSettings(restaurant) : renderPlanLock("Conta do Instagram e publicação automática", "performance")}</section>` : ""}
     </div>
   `;
   app.innerHTML = renderWorkspace({ client: true, active: workspaceClientView, title: "Cardápio do dia", restaurant, content, actions: `<a class="button secondary" href="${publicMenuHash(restaurant, "cliente")}">${uiIcon("external-link")}Ver cardápio</a>` });
@@ -2028,7 +2039,8 @@ async function renderClientPortal(slug, version, { skipCatalogSync = false } = {
     routeParams.delete("dish");
     history.replaceState(null, "", location.hash.split("?")[0] + "?" + routeParams);
   }
-  if (STORY_AUTOMATION_ENABLED) initializeStoryComposer(restaurant, menu);
+  if (isManagerWorkspace() && STORY_AUTOMATION_ENABLED) initializeStoryComposer(restaurant, menu);
+  if (isManagerWorkspace()) attachInstagramSessionHandlers();
 }
 
 function renderClientTopbar(restaurant) {
@@ -4189,6 +4201,22 @@ document.addEventListener("click", async (event) => {
     clearOwnerSession();
     window.location.hash = "#/hq";
     renderOwnerGate();
+    return;
+  }
+  const managerAccess = event.target.closest("[data-create-manager-access]");
+  if (managerAccess) {
+    event.preventDefault();
+    if (managerAccess.disabled) return;
+    managerAccess.disabled = true;
+    const output = managerAccess.parentElement.querySelector("[data-manager-access-result]");
+    try {
+      const slug = managerAccess.dataset.createManagerAccess;
+      const data = await apiPost({action: "rotateRestaurantManagerAccess", slug, owner_key: OWNER_SESSION_TOKEN});
+      const link = absoluteAppUrl(`#/gestor/${encodeURIComponent(slug)}?token=${encodeURIComponent(data.token)}`);
+      output.innerHTML = `<label>Link privado da gestão<input type="text" readonly value="${escapeAttr(link)}" /></label><button type="button" class="secondary" data-copy="${escapeAttr(link)}">Copiar link da gestão</button>`;
+      toast("Link da gestão gerado. Guarde-o: o link anterior da gestão foi revogado. O acesso da cozinha foi mantido.");
+    } catch { toast("Não foi possível confirmar a geração do link. Entre novamente na central e tente gerar outro."); }
+    finally { managerAccess.disabled = false; }
     return;
   }
   const accessCopy = event.target.closest("[data-copy-client-access]");
