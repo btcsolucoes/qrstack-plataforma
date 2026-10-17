@@ -435,3 +435,21 @@ test('changing the schedule changes publication idempotency without changing its
   assert.notEqual(a,b);
   assert.match(run('storyJobMessage({status:"pending",scheduled_at:"2026-10-11T15:00:00Z"})'),/12:00.*Brasília/);
 });
+
+
+test('kitchen navigation excludes management and manager uses separate stored credentials', () => {
+  const kitchen = runtime({ location: {hash:'#/cliente/amaro'} });
+  const kitchenHtml = kitchen('renderWorkspace({client:true,title:"Cozinha",content:""})');
+  assert.doesNotMatch(kitchenHtml,/data-client-view="(?:client-insights|story-panel|instagram-account)"/);
+  assert.match(kitchenHtml,/data-client-view="catalog-manager"/);
+  const manager = runtime({ location: {hash:'#/gestor/amaro'} });
+  const html = manager('renderWorkspace({client:true,title:"Gestão",content:""})');
+  for (const view of ['client-insights','story-panel','instagram-account']) assert.ok(html.includes('data-client-view="'+view+'"'));
+  manager('sessionStorage.setItem("qrstack:client-token:amaro","kitchen");sessionStorage.setItem("qrstack:client-token:manager:amaro","manager")');
+  assert.equal(manager('clientToken({slug:"amaro"})'),'manager');
+  const settings = manager('renderInstagramAccountSettings(getRestaurant("amaro"))');
+  assert.match(settings,/name="instagram_username"/);
+  assert.match(settings,/name="password"/);
+  assert.match(settings,/data-password-toggle/);
+  assert.doesNotMatch(settings,/name="(?:publisher_id|instagram_user_id)"/);
+});

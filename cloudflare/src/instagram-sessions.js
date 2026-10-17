@@ -1,3 +1,5 @@
+import { authorizeTenant } from './tenant-auth.js';
+import { entitlement, isOwner } from './plans.js';
 import { enforceRateLimit } from './owner-auth.js';
 export const SESSION_ACTIONS = new Set(['getInstagramSessionStatus', 'requestInstagramConnection', 'claimInstagramConnection', 'reportInstagramSessions', 'completeInstagramConnection']);
 const STATES = new Set(['connected', 'disconnected', 'verification_required', 'cooldown', 'suspended', 'identity_mismatch', 'review_required', 'connection_failed']);
@@ -41,12 +43,17 @@ export async function handleSessionAction(request, env, payload, action, helpers
   const origin = request.headers.get('origin');
   if (ownerAction && origin && origin !== 'https://btcsolucoes.github.io'
       && !(new URL(request.url).hostname === '127.0.0.1' && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin))) fail('origin_not_allowed', 403);
-  if (ownerAction) await helpers.owner(env, request, payload);
+  const owner = ownerAction && await isOwner(env, request, payload.owner_key || params.get('owner_key') || request.headers.get('authorization')?.replace(/^Bearer\s+/i, ''));
+  const slug = payload.slug || params.get('slug');
+  const authorized = !ownerAction ? null : owner
+    ? { ...await env.DB.prepare('SELECT id, slug FROM restaurants WHERE slug = ?').bind(String(slug || '')).first(), role: 'owner' }
+    : await authorizeTenant(env, request, slug, payload.token || params.get('token'), 'manager');
+  if (authorized?.role !== 'owner' && authorized && !(await entitlement(env, authorized.id)).features.autopublish) fail('plan_performance_required', 403);
   const agent = ownerAction ? null : await helpers.publisher(env, request, payload.publisher_id);
   await expireInstagramConnections(env);
   if (ownerAction) {
-    const tenant = await env.DB.prepare('SELECT id, slug FROM restaurants WHERE slug = ?').bind(String(payload.slug || params.get('slug') || '')).first();
-    if (!tenant) fail('restaurant_not_found', 404);
+    const tenant = authorized;
+    if (!tenant?.id) fail('restaurant_not_found', 404);
     const binding = await helpers.bindingFor(env, tenant.id);
     if (action === 'getInstagramSessionStatus') {
       const current = await env.DB.prepare('SELECT * FROM instagram_session_status WHERE restaurant_id = ?').bind(tenant.id).first();

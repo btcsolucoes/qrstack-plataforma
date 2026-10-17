@@ -66,8 +66,7 @@ function renderWorkspace({ active = "overview", title, subtitle = "", content, r
   const links = client ? [
     ["formulario", "Cardápio do dia", "utensils", ""],
     ["catalog-manager", "Meus pratos", "layers", ""],
-    ...(STORY_AUTOMATION_ENABLED ? [["story-panel", "Stories", "layers", ""]] : []),
-    ["client-insights", "Analytics", "chart-no-axes-combined", ""],
+    ...(isManagerWorkspace() ? [...(STORY_AUTOMATION_ENABLED ? [["story-panel", "Stories", "layers", ""]] : []), ["client-insights", "Analytics", "chart-no-axes-combined", ""], ["instagram-account", "Conta do Instagram", "layers", ""]] : []),
     ["public", "Cardápio público", "external-link", publicMenuHash(restaurant, "cliente")],
   ] : [
     ["overview", "Visão geral", "house", ownerLink("overview")],
@@ -93,7 +92,7 @@ function renderWorkspace({ active = "overview", title, subtitle = "", content, r
       <button class="nav-scrim" data-close-nav aria-label="Fechar navegação" tabindex="-1"></button>
       <aside class="workspace-sidebar" id="workspace-navigation" aria-label="Navegação principal">
         <div class="sidebar-brand-row">${workspaceBrand(client ? clientPortalLink(restaurant) : ownerLink())}<button type="button" class="icon-button sidebar-close" data-close-nav aria-label="Fechar navegação">${uiIcon("x")}</button></div>
-        <div class="workspace-context"><span class="context-avatar">${client ? "A" : "Q"}</span><div><strong>${client ? restaurant.name : "Central QrStack"}</strong><small>${client ? "Portal do restaurante" : "Seu espaço de gestão"}</small></div></div>
+        <div class="workspace-context"><span class="context-avatar">${client ? "A" : "Q"}</span><div><strong>${client ? restaurant.name : "Central QrStack"}</strong><small>${client ? (isManagerWorkspace() ? "Gestão do restaurante" : "Cozinha · Cardápio e pratos") : "Seu espaço de gestão"}</small></div></div>
         <p class="sidebar-label">${client ? "Restaurante" : "Workspace"}</p>
         <nav class="workspace-nav">${links.map((link) => navItem(link)).join("")}</nav>
         <div class="sidebar-bottom">
@@ -214,8 +213,10 @@ function setWorkspaceInsightsView(view = workspaceInsightView) {
 }
 
 function setWorkspaceClientView(view) {
-  const target = document.getElementById(view);
-  if (!target?.classList.contains("client-step")) return;
+  if (!isManagerWorkspace() && !["formulario", "catalog-manager"].includes(view)) view = "formulario";
+  let target = document.getElementById(view);
+  if (!target?.classList.contains("client-step")) { view = "formulario"; target = document.getElementById(view); }
+  if (!target) return;
   workspaceClientView = view;
   document.querySelectorAll(".client-step").forEach((panel) => { panel.hidden = panel.id !== view; });
   document.querySelectorAll("[data-client-view]").forEach((button) => {
@@ -224,7 +225,7 @@ function setWorkspaceClientView(view) {
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
-  const title = { formulario: "Cardápio do dia", "catalog-manager": "Meus pratos", "story-panel": "Story", "client-insights": "Analytics" }[view];
+  const title = { formulario: "Cardápio do dia", "catalog-manager": "Meus pratos", "story-panel": "Story", "client-insights": "Analytics", "instagram-account": "Conta do Instagram" }[view];
   document.querySelector(".workspace-page-heading h1").textContent = title;
   document.querySelector(".breadcrumb strong").textContent = title;
   closeWorkspaceNav();

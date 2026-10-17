@@ -26,12 +26,32 @@ export async function getTenant(env, slugValue) {
   if (row && env.INSIGHTS_CACHE) await env.INSIGHTS_CACHE.put('plans:tenant:' + slug, JSON.stringify(row));
   return row;
 }
-export async function authorizeTenant(env, request, slug, supplied = '') {
+export async function managerTokenHash(token) {
+  return [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)))].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+export async function issueManagerAccess(env, slug) {
   const tenant = await getTenant(env, slug);
   if (!tenant) unauthorized();
-  if (await verifyOwner(env, request)) return tenant;
-  if (!await equalTenantToken(clientToken(request, supplied), tenant.admin_token)) unauthorized();
-  return tenant;
+  const token = 'mgr_' + [...crypto.getRandomValues(new Uint8Array(32))].map(b => b.toString(16).padStart(2, '0')).join('');
+  await env.DB.prepare('INSERT INTO restaurant_manager_access(restaurant_id,token_hash,updated_at) VALUES (?,?,?) ON CONFLICT(restaurant_id) DO UPDATE SET token_hash=excluded.token_hash,updated_at=excluded.updated_at')
+    .bind(tenant.id, await managerTokenHash(token), new Date().toISOString()).run();
+  return token;
+}
+export async function authorizeTenant(env, request, slug, supplied = '', required = 'kitchen') {
+  const tenant = await getTenant(env, slug);
+  if (!tenant) unauthorized();
+  if (await verifyOwner(env, request)) return { ...tenant, role: 'owner' };
+  const token = clientToken(request, supplied);
+  if (/^mgr_[a-f0-9]{64}$/.test(token)) {
+    let access;
+    try { access = await env.DB.prepare('SELECT token_hash FROM restaurant_manager_access WHERE restaurant_id = ?').bind(tenant.id).first(); }
+    catch { throw Object.assign(new Error('manager_access_unavailable'), {status:503}); }
+    if (access && await equalTenantToken(await managerTokenHash(token), access.token_hash)) return { ...tenant, role: 'manager' };
+    unauthorized();
+  }
+  if (!await equalTenantToken(token, tenant.admin_token)) unauthorized();
+  if (required === 'manager') { const error = new Error('manager_access_required'); error.status = 403; throw error; }
+  return { ...tenant, role: 'kitchen' };
 }
 
 const RESTAURANT_PUBLIC_FIELDS = ['id', 'slug', 'name', 'logo_url', 'symbol_url', 'primary_color', 'secondary_color', 'accent_color', 'whatsapp_number', 'instagram_url', 'maps_url', 'address', 'github_pages_url', 'assets_base_url', 'manifest_url', 'catalog_url', 'sections_url', 'story_link'];

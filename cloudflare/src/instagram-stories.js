@@ -43,7 +43,7 @@ async function owner(env, request, payload) {
 }
 async function restaurant(env, request, slugValue, token) {
   const slug = id(slugValue, 100).toLowerCase();
-  const authorized = await authorizeTenant(env, request, slug, token);
+  const authorized = await authorizeTenant(env, request, slug, token, 'manager');
   const row = await env.DB.prepare("SELECT id, slug, admin_token, story_link FROM restaurants WHERE slug = ? LIMIT 1").bind(slug).first();
   if (!row || row.id !== authorized.id) fail("unauthorized", 401);
   return row;

@@ -18,6 +18,7 @@ function fixture(t) {
     INSERT INTO catalog_items(id,restaurant_id,section_id,section_title,name) VALUES ('beta-item','beta-id','food','Food','Beta original');
     INSERT INTO menu_days(id,restaurant_id,date,title,is_published,notes) VALUES ('beta-menu','beta-id','2026-10-07','Beta original',1,'private internal note');
     INSERT INTO menu_items(id,menu_day_id,name,category) VALUES ('beta-child','beta-menu','Beta dish','Food');`);
+  sqlite.exec(fs.readFileSync(path.join(root, 'cloudflare/migrations/0015_restaurant_manager_access.sql'), 'utf8'));
   const kv = new Map();
   const env = {
     OWNER_AUTH: { getByName() { return {
@@ -241,4 +242,34 @@ test('legacy data provider errors expose no private values', () => {
   context.readObjects = () => { throw new Error('private-sheet-key sensitive-value'); };
   const result = JSON.parse(context.doGet({ parameter: { action: 'getRestaurant', slug: 'amaro' } }).body);
   assert.deepEqual(result, { ok: false, error: 'request_denied' });
+});
+
+
+test('kitchen and manager links are separate, scoped, and revocable', async t => {
+  const f = fixture(t);
+  const owner = { method: 'POST', headers: { 'x-owner-session': 'owner-session' } };
+  const kitchen = { method: 'POST', headers: { 'x-client-token': 'alpha-private-token' } };
+  const link = await f.call('rotateRestaurantManagerAccess', { slug:'alpha' }, owner);
+  assert.equal(link.status,200);
+  assert.match(link.data.token,/^mgr_[a-f0-9]{64}$/);
+  const manager = { method:'POST', headers:{'x-client-token':link.data.token} };
+  assert.equal((await f.call('verifyClientAccess',{slug:'alpha',role:'manager'},manager)).status,200);
+  assert.equal((await f.call('verifyClientAccess',{slug:'alpha',role:'manager'},kitchen)).status,403);
+  assert.equal((await f.call('verifyClientAccess',{slug:'alpha'},kitchen)).status,200);
+  assert.equal((await f.call('verifyClientAccess',{slug:'beta',role:'manager'},manager)).status,401);
+  assert.equal((await f.call('rotateRestaurantManagerAccess',{slug:'alpha'},manager)).status,401);
+  assert.equal((await f.call('rotateRestaurantManagerAccess',{slug:'alpha'},kitchen)).status,401);
+  for (const action of ['getInsights','getStoryPublishingConfig','getStoryJob','getInstagramSessionStatus']) {
+    assert.equal((await f.call(action,{slug:'alpha'}, {headers:kitchen.headers})).status,403,action);
+  }
+  assert.equal((await f.call('requestInstagramConnection',{slug:'alpha',instagram_username:'example',password:'test-only'},kitchen)).status,403);
+  assert.equal((await f.call('createStoryJob',{slug:'alpha'},kitchen)).status,403);
+  assert.equal((await f.call('verifyClientAccess',{slug:'alpha',role:'manager'}, {method:'POST',headers:{'x-client-token':'mgr_'+'f'.repeat(64)}})).status,401);
+  const stored = f.sqlite.prepare('SELECT * FROM restaurant_manager_access').get();
+  assert.ok(!JSON.stringify(stored).includes(link.data.token));
+  await f.call('rotateRestaurantManagerAccess',{slug:'alpha'},owner);
+  assert.equal((await f.call('verifyClientAccess',{slug:'alpha',role:'manager'},manager)).status,401);
+  assert.equal((await f.call('verifyClientAccess',{slug:'alpha'},kitchen)).status,200);
+  const saved = await f.call('saveCatalogItem',{slug:'alpha',name:'Kitchen dish',section_title:'Food'},kitchen);
+  assert.equal(saved.status,200);
 });

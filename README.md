@@ -9,7 +9,8 @@ Plataforma QrStack para gerenciar clientes, formulários, cardápios dinâmicos,
 - `#/hq/respostas` - respostas dos formulários.
 - `#/hq/stories` - Stories gerados.
 - `#/hq/insights` - insights internos.
-- `#/cliente/amaro` - formulário do restaurante; o link privado é obtido em **Restaurantes → Copiar link privado**.
+- `#/gestor/amaro` - gestão do restaurante, com link exclusivo gerado na Central → Restaurantes.
+- `#/cliente/amaro` - cozinha: formulário e cadastro/edição/exclusão de pratos; o link privado é obtido em **Restaurantes → Copiar link privado**.
 - `#/r/amaro?src=qr` - cardápio público com tracking de origem. Para o Amaro, a rota carrega o cardápio original do repositório `carda-pio`.
 
 ## Escopo atual
@@ -200,3 +201,40 @@ Passos para publicar:
 - Migrar analytics e dados gerenciais para D1.
 - Criar autenticação/token por restaurante.
 - Preparar automação WhatsApp para lembretes.
+
+
+## Acessos separados por função (2026-10-15)
+
+O link distribuído à cozinha permanece válido, com o mesmo token, mas agora
+permite apenas formulário, catálogo e fotos dos pratos. Stories, analytics,
+status e conexão do Instagram exigem o acesso separado da gestão (`#/gestor/:slug`).
+A permissão é verificada no Worker antes das consultas/gravações, inclusive
+quando alguém tenta chamar a API sem passar pela interface. O plano continua
+sendo necessário: analytics e conexão/publicação exigem PERFORMANCE.
+
+Em **Central → Restaurantes → Link privado da gestão**, gerar um novo link
+revoga o anterior apenas para aquele restaurante. Copie o resultado exibido;
+o servidor guarda somente SHA-256 do token aleatório de 256 bits. O link da
+cozinha não muda. Tokens da cozinha e da gestão ocupam chaves distintas no
+sessionStorage e são removidos da URL após entrada. O link da gestão é uma
+credencial: compartilhe somente com o gestor. A senha do Instagram é diferente
+desse acesso e serve somente à conexão, com entrega criptografada já existente.
+
+Aplicar somente `0015_restaurant_manager_access.sql` no D1 de produção, então
+publicar o Worker e os arquivos estáticos com versão `20261015-manager-access`.
+A migração oficial experimental 0014 permanece isolada e não é pré-requisito.
+A validação desta mudança passou 131 testes locais, incluindo isolamento entre
+restaurantes, revogação e bloqueio do token da cozinha nos endpoints de gestão.
+A tela foi verificada em 1440 px e 390 px com sessão de teste simulada. Isso não
+representa login ou postagem real no Instagram do Amaro.
+
+
+Verificação online concluída em 2026-10-16: frontend `20261015-manager-access`
+publicado no GitHub Pages (commit `c93f275`), Worker
+`e500301c-3096-4444-b740-dc636b844d9d` e migração 0015 aplicada ao D1 remoto.
+O link original da cozinha autenticou com papel kitchen (200), mas recebeu 403
+em analytics, sessão Instagram, configuração de publicação e entrada como gestor.
+O novo acesso da gestão autenticou como manager (200), consultou analytics (200)
+e status Instagram (200). O vínculo Instagram do Amaro ainda está ausente e o
+publicador reportou offline; isso não impede o acesso à gestão e ao formulário,
+mas impede considerar a postagem automática do Amaro pronta para uso.

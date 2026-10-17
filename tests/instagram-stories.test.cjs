@@ -39,6 +39,8 @@ function fixture(t) {
   for (let i = 0; i < 2; i++) sqlite.exec(fs.readFileSync(path.join(root, 'cloudflare/migrations/0012_instagram_sessions.sql'), 'utf8'));
   sqlite.exec(fs.readFileSync(path.join(root, "cloudflare/migrations/0013_instagram_onboarding_schedule.sql"), "utf8"));
   sqlite.exec("INSERT INTO restaurant_plans SELECT id, 'performance', '2026-10-06' FROM restaurants");
+  sqlite.exec(fs.readFileSync(path.join(root, 'cloudflare/migrations/0015_restaurant_manager_access.sql'), 'utf8'));
+  for (const [id, letter] of [['r-internal','a'],['r-other','b']]) sqlite.prepare('INSERT INTO restaurant_manager_access VALUES (?,?,?)').run(id, require('node:crypto').createHash('sha256').update('mgr_' + letter.repeat(64)).digest('hex'), new Date().toISOString());
   const kv = new Map();
   const env = {
     OWNER_ACCESS_TOKEN: ownerKey,
@@ -92,7 +94,7 @@ function fixture(t) {
     assert.equal((await call('bindInstagramAccount', { owner_key: ownerKey, slug, publisher_id: publisherId, instagram_username: username, instagram_user_id: userId, enabled })).status, 200);
   }
   async function enqueue(overrides = {}) {
-    return call('createStoryJob', { slug: 'internal', token: 'internal-test-token', client_request_id: 'test-request',
+    return call('createStoryJob', { slug: 'internal', token: 'mgr_' + 'a'.repeat(64), client_request_id: 'test-request',
       menu_day_id: 'internal-menu', story_link: 'https://example.test/menu', image_base64: imageBase64, content_type: 'image/png', ...overrides });
   }
   async function claim(publisherId = 'test-windows', token = publisherToken) {
@@ -110,11 +112,11 @@ async function requestConnection(f) {
 async function claimConnection(f, token = publisherToken, publisher_id = 'test-windows') {
   return f.call('claimInstagramConnection', { publisher_id }, { token });
 }
-test('Instagram credentials are owner-only, encrypted and delivered once to the assigned publisher', async t => {
+test('Instagram credentials reject kitchen access, are encrypted and delivered once to the assigned publisher', async t => {
   const f = fixture(t);
   await f.setupAccount({ enabled: false });
-  assert.equal((await f.call('requestInstagramConnection', { slug: 'internal', token: 'internal-test-token', password: 'fake' })).status, 401);
-  assert.equal((await f.call('getInstagramSessionStatus', { slug: 'internal', token: 'internal-test-token' })).status, 401);
+  assert.equal((await f.call('requestInstagramConnection', { slug: 'internal', token: 'internal-test-token', password: 'fake' })).status, 403);
+  assert.equal((await f.call('getInstagramSessionStatus', { slug: 'internal', token: 'internal-test-token' })).status, 403);
   const created = await requestConnection(f);
   assert.equal(created.status, 200);
   assert.doesNotMatch(JSON.stringify(created.data), /FICTIONAL_PASSWORD/);
@@ -225,7 +227,7 @@ test('enqueue requires an enabled restaurant binding and exposes no private clai
   assert.equal('media_key' in result.data.job, false);
   assert.equal('request_sha256' in result.data.job, false);
   assert.equal((await f.enqueue({ token: 'wrong' })).status, 401);
-  const other = await f.call('getStoryJob', { slug: 'other', token: 'other-test-token', job: result.data.job.id });
+  const other = await f.call('getStoryJob', { slug: 'other', token: 'mgr_' + 'b'.repeat(64), job: result.data.job.id });
   assert.equal(other.data.job, null);
 });
 
@@ -261,7 +263,7 @@ test('claims are account scoped and concurrent workers cannot claim multiple job
   await f.setupAccount({ slug: 'other', publisherId: 'second-publisher', username: 'other_test', userId: '67890', token: secondToken });
   await f.enqueue();
   await f.enqueue({ client_request_id: 'second-request' });
-  const otherJob = await f.enqueue({ slug: 'other', token: 'other-test-token', client_request_id: 'other-request' });
+  const otherJob = await f.enqueue({ slug: 'other', token: 'mgr_' + 'b'.repeat(64), client_request_id: 'other-request' });
   const claims = await Promise.all([f.claim(), f.claim(), f.claim()]);
   assert.ok(claims.every(result => result.status === 200));
   assert.equal(new Set(claims.map(result => result.data.job.id)).size, 1);
@@ -290,7 +292,7 @@ test('private job and media require the assigned publisher and claim token', asy
   assert.equal(mediaUrl.origin, 'https://worker.example.test');
   assert.equal(mediaUrl.searchParams.has('token'), false);
   assert.equal(mediaUrl.searchParams.has('claim_token'), false);
-  const publicResult = await f.call('getStoryJob', { slug: 'internal', token: 'internal-test-token', job: job.id });
+  const publicResult = await f.call('getStoryJob', { slug: 'internal', token: 'mgr_' + 'a'.repeat(64), job: job.id });
   assert.equal('claim_token' in publicResult.data.job, false);
 });
 
@@ -414,7 +416,7 @@ test('uncertain publication blocks the account and is only cleared by a confirme
   assert.equal((await f.update(job, 'outcome_unknown', { error_code: 'publish_response_lost' })).status, 200);
   assert.equal((await f.update(job, 'outcome_unknown', { error_code: 'publish_response_lost' })).status, 200);
   assert.equal((await f.claim()).data.job, null);
-  const config = await f.call('getStoryPublishingConfig', { slug: 'internal', token: 'internal-test-token' });
+  const config = await f.call('getStoryPublishingConfig', { slug: 'internal', token: 'mgr_' + 'a'.repeat(64) });
   assert.equal(config.data.publishing.enabled, false);
   assert.equal(config.data.publishing.state, 'outcome_unknown');
   assert.equal((await f.enqueue({ client_request_id: 'another-new-request' })).data.error, 'instagram_outcome_unknown');
@@ -436,7 +438,7 @@ test('three-hour account buffer blocks new submissions and queued jobs but prese
   const active = await f.call('getInstagramPublisherJob', { publisher_id: job.publisher_id, job_id: job.id }, { token: publisherToken, claimToken: job.claim_token });
   assert.equal(active.data.can_publish, true); // Its own permit must not freeze its guard.
   assert.equal((await f.update(job, 'completed', { media_id: 'confirmed-123' })).status, 200);
-  const config = (await f.call('getStoryPublishingConfig', { slug: 'internal', token: 'internal-test-token' })).data.publishing;
+  const config = (await f.call('getStoryPublishingConfig', { slug: 'internal', token: 'mgr_' + 'a'.repeat(64) })).data.publishing;
   assert.equal(config.enabled, false);
   assert.equal(config.state, 'cooldown');
   assert.ok(config.retry_after_seconds > 10790 && config.retry_after_seconds <= 10800);
@@ -481,11 +483,11 @@ test('publication window follows immutable Instagram identity after a restaurant
   await f.update(job, 'publishing');
   await f.update(job, 'completed', { media_id: 'confirmed-123' });
   await f.setupAccount({ slug: 'other', username: 'other_test', userId: '67890' });
-  assert.equal((await f.call('getStoryPublishingConfig', { slug: 'other', token: 'other-test-token' })).data.publishing.state, 'ready');
+  assert.equal((await f.call('getStoryPublishingConfig', { slug: 'other', token: 'mgr_' + 'b'.repeat(64) })).data.publishing.state, 'ready');
   f.sqlite.exec("DELETE FROM instagram_account_bindings WHERE restaurant_id = 'r-internal'");
   await f.setupAccount({ slug: 'other', username: 'internal_test', userId: '12345' });
-  assert.equal((await f.call('getStoryPublishingConfig', { slug: 'other', token: 'other-test-token' })).data.publishing.state, 'cooldown');
-  assert.equal((await f.enqueue({ slug: 'other', token: 'other-test-token', client_request_id: 'rebind-attempt' })).status, 429);
+  assert.equal((await f.call('getStoryPublishingConfig', { slug: 'other', token: 'mgr_' + 'b'.repeat(64) })).data.publishing.state, 'cooldown');
+  assert.equal((await f.enqueue({ slug: 'other', token: 'mgr_' + 'b'.repeat(64), client_request_id: 'rebind-attempt' })).status, 429);
 });
 
 test('ambiguous permission transport failure can conservatively freeze a job before publishing state', async t => {
@@ -546,7 +548,7 @@ test('real Worker dispatch retires Android and bounds bodies with or without Con
   assert.equal((await worker.fetch(declared, f.env, context)).status, 413);
   const chunked = new Request('https://worker.example.test/', { method: 'POST', body: 'x'.repeat(MAX_STORY_REQUEST_BYTES + 1) });
   assert.equal((await worker.fetch(chunked, f.env, context)).status, 413);
-  const realConfig = await worker.fetch(new Request('https://worker.example.test/?action=getStoryPublishingConfig&slug=internal&token=internal-test-token'), f.env, context);
+  const realConfig = await worker.fetch(new Request('https://worker.example.test/?action=getStoryPublishingConfig&slug=internal&token=mgr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), f.env, context);
   assert.equal(realConfig.status, 200);
   assert.equal((await realConfig.json()).publishing.state, 'unconfigured');
 });
@@ -579,7 +581,7 @@ test('owner password rotation invalidates every owner authorization path and pre
   assert.equal((await planCall(f, 'getAnalyticsHealth', { key: next }, 'GET')).status, 200);
   assert.equal((await f.call('registerInstagramPublisher', { owner_key: ownerKey, publisher_id: 'blocked', publisher_token: publisherToken })).status, 401);
   assert.equal((await f.call('registerInstagramPublisher', { owner_key: next, publisher_id: 'allowed', publisher_token: publisherToken })).status, 200);
-  assert.equal((await planCall(f, 'getRestaurantPlan', { slug: 'internal', token: 'internal-test-token' }, 'GET')).status, 200);
+  assert.equal((await planCall(f, 'getRestaurantPlan', { slug: 'internal', token: 'mgr_' + 'a'.repeat(64) }, 'GET')).status, 200);
   assert.equal(f.sqlite.prepare("SELECT admin_token FROM restaurants WHERE slug='internal'").get().admin_token, 'internal-test-token');
 });
 
@@ -625,19 +627,19 @@ test('owner password storage survives recreation without keeping plaintext or re
 test('only the authenticated owner can list or change plans; unknown plans and clients fail closed', async t => {
   const f = fixture(t);
   assert.equal((await planCall(f, 'listRestaurantPlans', {}, 'GET')).status, 401);
-  assert.equal((await planCall(f, 'setRestaurantPlan', { slug: 'internal', plan: 'performance', token: 'internal-test-token' })).status, 401);
+  assert.equal((await planCall(f, 'setRestaurantPlan', { slug: 'internal', plan: 'performance', token: 'mgr_' + 'a'.repeat(64) })).status, 401);
   assert.equal((await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: '__proto__' })).status, 400);
   assert.equal((await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'missing', plan: 'cardapio' })).status, 404);
   assert.equal((await planCall(f, 'verifyOwnerAccess', { owner_key: ownerKey })).status, 200);
   assert.equal((await planCall(f, 'verifyOwnerAccess', { owner_key: 'qrstack-berna-2026' })).status, 401);
   assert.equal((await planCall(f, 'listRestaurantPlans', { key: ownerKey }, 'GET')).data.restaurants.length, 2);
-  assert.equal((await planCall(f, 'getRestaurantPlan', { slug: 'other', token: 'internal-test-token' }, 'GET')).status, 401);
+  assert.equal((await planCall(f, 'getRestaurantPlan', { slug: 'other', token: 'mgr_' + 'a'.repeat(64) }, 'GET')).status, 401);
 });
 
 test('plan defaults and upgrades unlock exactly the requested capabilities and retain an audit trail', async t => {
   const f = fixture(t);
   f.sqlite.exec('DELETE FROM restaurant_plans');
-  const basic = (await planCall(f, 'getRestaurantPlan', { slug: 'internal', token: 'internal-test-token' }, 'GET')).data.entitlement;
+  const basic = (await planCall(f, 'getRestaurantPlan', { slug: 'internal', token: 'mgr_' + 'a'.repeat(64) }, 'GET')).data.entitlement;
   assert.equal(basic.plan, 'cardapio');
   assert.deepEqual(basic.features, { menu: true, story: false, autopublish: false, analytics: false });
   const promotional = (await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'divulgacao' })).data.entitlement;
@@ -653,7 +655,7 @@ test('downgrade cancels pending Stories and rejects direct publication requests 
   assert.equal(f.sqlite.prepare('SELECT status FROM instagram_story_jobs').get().status, 'cancelled');
   assert.equal((await f.enqueue({ client_request_id: 'new-request' })).status, 409);
   assert.equal((await f.claim()).data.job, null);
-  const config = await f.call('getStoryPublishingConfig', { slug: 'internal', token: 'internal-test-token' });
+  const config = await f.call('getStoryPublishingConfig', { slug: 'internal', token: 'mgr_' + 'a'.repeat(64) });
   assert.equal(config.data.publishing.state, 'plan_required');
   await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'performance' });
   assert.equal((await f.claim()).data.job, null);
@@ -676,12 +678,12 @@ test('analytics checks entitlement before serving even cached data and never ret
   const f = fixture(t);
   f.env.INSIGHTS_CACHE.get = async key => key.startsWith('insights:v') ? { ok: true, generated_at: new Date().toISOString(), insights: { total_accesses: 42 } } : null;
   assert.equal((await planCall(f, 'getInsights', { slug: 'internal', token: 'wrong' }, 'GET')).status, 401);
-  const response = await planCall(f, 'getInsights', { slug: 'internal', token: 'internal-test-token' }, 'GET');
+  const response = await planCall(f, 'getInsights', { slug: 'internal', token: 'mgr_' + 'a'.repeat(64) }, 'GET');
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.equal(response.data.insights.total_accesses, 42);
   await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'divulgacao' });
-  assert.equal((await planCall(f, 'getInsights', { slug: 'internal', token: 'internal-test-token' }, 'GET')).status, 403);
+  assert.equal((await planCall(f, 'getInsights', { slug: 'internal', token: 'mgr_' + 'a'.repeat(64) }, 'GET')).status, 403);
   assert.equal((await planCall(f, 'getInsights', { slug: 'internal', key: ownerKey }, 'GET')).status, 200);
 });
 
@@ -696,10 +698,10 @@ test('plans remain editable through KV during D1 quota exhaustion and sync the l
   const listing = await planCall(f, 'listRestaurantPlans', { key: ownerKey }, 'GET');
   assert.equal(listing.status, 200);
   assert.equal(listing.data.restaurants.find(row => row.slug === 'internal').plan, 'divulgacao');
-  assert.equal((await planCall(f, 'getInsights', { slug: 'internal', token: 'internal-test-token' }, 'GET')).status, 403);
+  assert.equal((await planCall(f, 'getInsights', { slug: 'internal', token: 'mgr_' + 'a'.repeat(64) }, 'GET')).status, 503);
   await planCall(f, 'setRestaurantPlan', { owner_key: ownerKey, slug: 'internal', plan: 'cardapio' });
   f.env.DB.prepare = originalPrepare;
-  await planCall(f, 'getRestaurantPlan', { slug: 'internal', token: 'internal-test-token' }, 'GET');
+  await planCall(f, 'getRestaurantPlan', { slug: 'internal', token: 'mgr_' + 'a'.repeat(64) }, 'GET');
   assert.equal(f.sqlite.prepare("SELECT plan FROM restaurant_plans WHERE restaurant_id='r-internal'").get().plan, 'cardapio');
 });
 
@@ -767,8 +769,8 @@ test('missed schedules expire without dispatch; cancellation is tenant scoped an
   const f=fixture(t); await f.setupAccount();
   const scheduled_at=new Date(Date.now()+3600000).toISOString();
   const created=await f.enqueue({scheduled_at}), job=created.data.job;
-  assert.equal((await f.call('cancelInstagramStoryJob',{slug:'other',token:'other-test-token',job_id:job.id})).status,409);
-  assert.equal((await f.call('cancelInstagramStoryJob',{slug:'internal',token:'internal-test-token',job_id:job.id})).data.job.status,'cancelled');
+  assert.equal((await f.call('cancelInstagramStoryJob',{slug:'other',token:'mgr_' + 'b'.repeat(64),job_id:job.id})).status,409);
+  assert.equal((await f.call('cancelInstagramStoryJob',{slug:'internal',token:'mgr_' + 'a'.repeat(64),job_id:job.id})).data.job.status,'cancelled');
   const second=await f.enqueue({scheduled_at,client_request_id:'second'}); assert.equal(second.status,201);
   f.sqlite.exec("UPDATE instagram_story_jobs SET expires_at='2000-01-01' WHERE status='pending'");
   assert.equal((await f.claim()).data.job,null);
@@ -811,4 +813,21 @@ test('D1 daily quota returns a safe temporary error and backoff without exposing
   assert.equal(result.data.error,'instagram_storage_temporarily_unavailable');
   assert.ok(Number(result.headers.get('retry-after'))>=60);
   assert.doesNotMatch(JSON.stringify(result.data),/SECRET_SQL|D1_ERROR/);
+});
+
+
+test('restaurant manager can connect own Instagram and see sanitized status; other tenants and basic plans are denied', async t => {
+  const f = fixture(t);
+  await f.setupAccount();
+  const token = 'mgr_' + 'a'.repeat(64);
+  const created = await f.call('requestInstagramConnection', {slug:'internal',token,password:'FICTIONAL_MANAGER_PASSWORD'});
+  assert.equal(created.status,200);
+  const status = await f.call('getInstagramSessionStatus',{slug:'internal',token});
+  assert.equal(status.status,200);
+  assert.doesNotMatch(JSON.stringify(status.data),/password|encrypted|token_hash|FICTIONAL/);
+  assert.equal((await f.call('getInstagramSessionStatus',{slug:'other',token})).status,401);
+  assert.equal((await f.call('requestInstagramConnection',{slug:'other',token,password:'fake'})).status,401);
+  f.sqlite.prepare("UPDATE restaurant_plans SET plan='cardapio' WHERE restaurant_id='r-internal'").run();
+  assert.equal((await f.call('getInstagramSessionStatus',{slug:'internal',token})).status,403);
+  assert.equal((await f.call('requestInstagramConnection',{slug:'internal',token,password:'fake'})).status,403);
 });

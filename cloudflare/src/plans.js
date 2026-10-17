@@ -37,7 +37,7 @@ export async function entitlement(env, restaurantId) {
 }
 export async function authorizeInsights(env, request, params) {
   if (await isOwner(env, request, params.get('key') || params.get('owner_key'))) return;
-  const tenant = await authorizeTenant(env, request, params.get('slug') || 'amaro', params.get('token'));
+  const tenant = await authorizeTenant(env, request, params.get('slug') || 'amaro', params.get('token'), 'manager');
   if (!(await entitlement(env, tenant.id)).features.analytics) deny('plan_performance_required');
 }
 export async function handlePlans(request, env, payload, action) {

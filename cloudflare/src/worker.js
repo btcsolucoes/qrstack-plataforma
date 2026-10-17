@@ -2,7 +2,7 @@ import { handleInstagramStories, MAX_STORY_REQUEST_BYTES, expireScheduledStories
 import { expireInstagramConnections } from "./instagram-sessions.js";
 import { handlePlans, authorizeInsights } from "./plans.js";
 import { verifyOwner, handleOwnerPassword, enforceRateLimit } from "./owner-auth.js";
-import { authorizeTenant, getTenant, equalTenantToken, publicRestaurant, publicRestaurantResult, publicCatalogResult, publicMenuResult } from "./tenant-auth.js";
+import { authorizeTenant, issueManagerAccess, getTenant, equalTenantToken, publicRestaurant, publicRestaurantResult, publicCatalogResult, publicMenuResult } from "./tenant-auth.js";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -84,14 +84,20 @@ export default {
         : url.searchParams.get("action") || "health";
 
       if (['saveCatalogItem', 'saveMenuDay', 'createStoryJob', 'cancelInstagramStoryJob'].includes(action)) await enforceRateLimit(env, request, 'tenant_write');
-      if (['getRestaurant', 'getCatalog', 'getMenu', 'getInsights', 'getRestaurantPlan', 'getStoryPublishingConfig', 'getStoryJob', 'verifyClientAccess'].includes(action)) await enforceRateLimit(env, request, 'tenant_read');
+      if (['getRestaurant', 'getCatalog', 'getMenu', 'getInsights', 'getRestaurantPlan', 'getStoryPublishingConfig', 'getStoryJob', 'getInstagramSessionStatus', 'verifyClientAccess'].includes(action)) await enforceRateLimit(env, request, 'tenant_read');
       if (action === 'trackEvent') await enforceRateLimit(env, request, 'public_write');
       const passwordResponse = await handleOwnerPassword(request, env, payload, action, ctx);
       if (passwordResponse) return passwordResponse;
       if (action === 'verifyClientAccess') {
         if (request.method !== 'POST') return json({ ok: false, error: 'method_not_allowed' }, 405);
-        await authorizeTenant(env, request, payload.slug, payload.token);
-        return json({ ok: true });
+        const tenant = await authorizeTenant(env, request, payload.slug, payload.token, payload.role === 'manager' ? 'manager' : 'kitchen');
+        return json({ ok: true, role: tenant.role });
+      }
+      if (action === 'rotateRestaurantManagerAccess') {
+        if (request.method !== 'POST') return json({ ok: false, error: 'method_not_allowed' }, 405);
+        await enforceRateLimit(env, request, 'tenant_write');
+        await assertOwner(url.searchParams, request, env, payload.owner_key || '');
+        return json({ ok: true, token: await issueManagerAccess(env, payload.slug) });
       }
       if (action === 'getRestaurantAccess') {
         if (request.method !== 'GET') return json({ ok: false, error: 'method_not_allowed' }, 405);
