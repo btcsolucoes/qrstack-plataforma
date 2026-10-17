@@ -1381,8 +1381,9 @@ async function hydrateClientPlans() {
       const restaurant = fromSheetRestaurant(row);
       upsertById(state.restaurants, restaurant);
       const plan = Object.hasOwn(CLIENT_PLANS, row.plan) ? row.plan : "cardapio";
-      return `<article class="client-plan-card">${renderRestaurantRow(restaurant)}<div class="manager-access-controls"><a class="button secondary" href="#/gestor/${encodeURIComponent(restaurant.slug)}">Abrir gestão do restaurante</a><button type="button" class="secondary" data-copy-client-access="${escapeAttr(restaurant.slug)}">Copiar link da cozinha</button><details><summary>Link privado da gestão</summary><p>Gere um link para compartilhar somente com o gestor. Ao gerar novamente, o link anterior da gestão deixa de funcionar. O link da cozinha permanece igual.</p><button type="button" data-create-manager-access="${escapeAttr(restaurant.slug)}">Gerar novo link da gestão</button><div data-manager-access-result role="status"></div></details></div><form data-client-plan="${escapeAttr(row.slug)}"><label for="plan-${escapeAttr(row.slug)}">Plano do cliente</label><div class="actions"><select id="plan-${escapeAttr(row.slug)}" name="plan">${Object.entries(CLIENT_PLANS).map(([key, value]) => `<option value="${key}" ${key === plan ? "selected" : ""}>${value.name}</option>`).join("")}</select><button type="submit">Salvar plano</button></div><p data-plan-description>${CLIENT_PLANS[plan].description}</p><p data-plan-status role="status">Plano atual: ${CLIENT_PLANS[plan].name}</p></form></article>`;
+      return `<article class="client-plan-card">${renderRestaurantRow(restaurant)}<div data-restaurant-session-health="${escapeAttr(restaurant.slug)}" role="status" aria-live="polite">${renderInstagramHealth(null, {compact:true})}</div><div class="manager-access-controls"><a class="button secondary" href="#/gestor/${encodeURIComponent(restaurant.slug)}">Abrir gestão do restaurante</a><button type="button" class="secondary" data-copy-client-access="${escapeAttr(restaurant.slug)}">Copiar link da cozinha</button><details><summary>Link privado da gestão</summary><p>Gere um link para compartilhar somente com o gestor. Ao gerar novamente, o link anterior da gestão deixa de funcionar. O link da cozinha permanece igual.</p><button type="button" data-create-manager-access="${escapeAttr(restaurant.slug)}">Gerar novo link da gestão</button><div data-manager-access-result role="status"></div></details></div><form data-client-plan="${escapeAttr(row.slug)}"><label for="plan-${escapeAttr(row.slug)}">Plano do cliente</label><div class="actions"><select id="plan-${escapeAttr(row.slug)}" name="plan">${Object.entries(CLIENT_PLANS).map(([key, value]) => `<option value="${key}" ${key === plan ? "selected" : ""}>${value.name}</option>`).join("")}</select><button type="submit">Salvar plano</button></div><p data-plan-description>${CLIENT_PLANS[plan].description}</p><p data-plan-status role="status">Plano atual: ${CLIENT_PLANS[plan].name}</p></form></article>`;
     }).join("");
+    hydrateRestaurantSessionHealth(target);
     target.querySelectorAll("[data-client-plan]").forEach(form => {
       form.elements.plan.addEventListener("change", () => { form.querySelector("[data-plan-description]").textContent = CLIENT_PLANS[form.elements.plan.value].description; });
       form.addEventListener("submit", async event => {
@@ -1883,7 +1884,7 @@ function renderInstagramAccountSettings(restaurant) {
                     <div class="field field--full">${renderPasswordInput(`instagram-password-${escapeAttr(restaurant.slug)}`, "password", "Senha do Instagram", { autocomplete: "off", describedBy: `instagram-help-${escapeAttr(restaurant.slug)}` })}</div>
                     <p class="muted field--full" id="instagram-help-${escapeAttr(restaurant.slug)}">Informe apenas o @ e a senha. A plataforma identifica a conta automaticamente. A senha é usada nesta conexão e não fica disponível para consulta; a sessão fica protegida no serviço de publicação.</p>
                     <div class="actions field--full"><button type="submit" disabled>Conectar sessão</button><button type="button" class="secondary" data-refresh-instagram-session>Atualizar status</button></div>
-                    <p class="field--full instagram-session-status" data-instagram-session-status role="status" aria-live="polite">Consultando a sessão...</p>
+                    <div class="field--full instagram-session-status" data-instagram-session-status role="status" aria-live="polite">${renderInstagramHealth()}</div>
                     <p class="muted field--full" data-instagram-session-message role="status"></p>
                   </form>
                 </section>`;
@@ -1895,6 +1896,66 @@ function instagramSessionCredentials(slug) {
 
 function attachStoryAccountHandlers() {
   attachInstagramSessionHandlers();
+}
+
+function instagramHealth(session, failed = false) {
+  if (!session) return { tone: "neutral", segments: 0, label: failed ? "Status indisponível" : "Consultando sessão", detail: failed ? "Não foi possível atualizar. A conexão anterior não foi confirmada nesta consulta." : "Aguardando a leitura do serviço de publicação." };
+  const states = {
+    verification_required: ["warning", 2, "Verificação necessária", "Conclua a verificação no aplicativo do Instagram antes de reconectar."],
+    cooldown: ["warning", 2, "Em pausa", "Aguarde o prazo solicitado pelo Instagram. Não repita a conexão durante a pausa."],
+    suspended: ["danger", 1, "Conta suspensa", "Revise a situação da conta no aplicativo do Instagram."],
+    identity_mismatch: ["danger", 1, "Conta não corresponde", "Confira o @ informado antes de tentar conectar novamente."],
+    review_required: ["warning", 2, "Revisão necessária", "Confira a conta e o resultado anterior antes de reconectar."],
+    connection_failed: ["danger", 1, "Conexão não confirmada", "Revise a conta no Instagram antes de solicitar outra conexão."],
+    disconnected: ["danger", 1, "Sessão desconectada", "Informe o @ e a senha para solicitar uma nova conexão."]
+  };
+  if (session.request_status === "pending" || session.request_status === "processing") return { tone: "warning", segments: 3, label: session.request_status === "pending" ? "Conexão na fila" : "Conectando conta", detail: session.publisher_online ? "Aguarde a confirmação. Não é necessário reenviar a senha." : "O pedido está aguardando o serviço ficar online. Ele pode expirar sem concluir a conexão." };
+  if (states[session.state]) { const [tone,segments,label,detail] = states[session.state]; return {tone,segments,label,detail}; }
+  if (session.request_status === "expired") return {tone:"warning",segments:2,label:"Pedido expirado",detail:"A conexão não foi confirmada. Confira a conta antes de enviar um novo pedido."};
+  if (session.configured && session.state === "connected") {
+    if (!session.publisher_online) return {tone:"danger",segments:1,label:"Publicador offline",detail:"Há uma sessão salva, mas a postagem depende do serviço de publicação estar online."};
+    const verified = Date.parse(session.verified_at || "");
+    if (!Number.isFinite(verified) || Date.now() - verified > 24 * 60 * 60 * 1000) return {tone:"warning",segments:3,label:"Sessão salva · confirmação antiga",detail:"O serviço está online. A validade da sessão será conferida na próxima operação; esta barra não faz login no Instagram."};
+    return {tone:"healthy",segments:5,label:"Sessão conectada",detail:"Identidade confirmada na última conexão e serviço online. O resultado da próxima publicação ainda depende do Instagram."};
+  }
+  return {tone:"neutral",segments:0,label:session.configured ? "Sessão não verificada" : "Conta não conectada",detail:"Informe o @ e a senha para conectar a conta do restaurante."};
+}
+
+function renderInstagramHealth(session = null, { failed = false, compact = false } = {}) {
+  const health = instagramHealth(session, failed);
+  const verified = session?.verified_at && Number.isFinite(Date.parse(session.verified_at))
+    ? new Date(session.verified_at).toLocaleString("pt-BR", {timeZone:"America/Sao_Paulo"}) : "";
+  return `<div class="session-health session-health--${health.tone}${compact ? " session-health--compact" : ""}">
+    <div class="session-health__heading"><strong>${escapeHtml(health.label)}</strong><span>${session ? session.publisher_online ? "Serviço online" : "Serviço offline" : "Serviço não confirmado"}</span></div>
+    <div class="session-health__bar" role="img" aria-label="Estado da sessão: ${escapeAttr(health.label)}">${Array.from({length:5},(_,index)=>`<span class="${index < health.segments ? "is-filled" : ""}"></span>`).join("")}</div>
+    <p>${escapeHtml(health.detail)}</p>
+    ${session?.instagram_username ? `<span class="session-health__account">@${escapeHtml(session.instagram_username)}</span>` : ""}
+    ${verified ? `<small>Última confirmação: ${escapeHtml(verified)} · Brasília</small>` : ""}
+  </div>`;
+}
+
+function hydrateRestaurantSessionHealth(root) {
+  // Read the platform only. Space requests to avoid a burst for large customer lists.
+  const generation = Symbol("session-health");
+  root.sessionHealthGeneration = generation;
+  const rows = [...root.querySelectorAll("[data-restaurant-session-health]")];
+  let index = 0;
+  async function next() {
+    if (!root.isConnected || root.sessionHealthGeneration !== generation || !ownerVerified || !rows.length) return;
+    if (document.hidden) { setTimeout(next, 15000); return; }
+    const row = rows[index];
+    let pause = 2000;
+    try {
+      const result = await apiGet("getInstagramSessionStatus", {slug:row.dataset.restaurantSessionHealth,owner_key:OWNER_SESSION_TOKEN});
+      if (row.isConnected) row.innerHTML = renderInstagramHealth(result.session, {compact:true});
+    } catch (error) {
+      if (row.isConnected) row.innerHTML = renderInstagramHealth(null, {failed:true,compact:true});
+      pause = Math.max(2000, (error.retryAfter || 60) * 1000);
+    }
+    index = (index + 1) % rows.length;
+    setTimeout(next, index === 0 ? Math.max(60000, pause) : pause);
+  }
+  next();
 }
 
 function instagramSessionDescription(session = {}) {
@@ -1931,10 +1992,10 @@ function attachInstagramSessionHandlers() {
         if (!form.isConnected) return;
         session = result.session;
         if (!usernameEdited && session?.instagram_username) form.elements.instagram_username.value = "@" + session.instagram_username;
-        status.textContent = instagramSessionDescription(session);
+        status.innerHTML = renderInstagramHealth(session);
       } catch (error) {
         session = null;
-        if (form.isConnected) status.textContent = error.message === "instagram_storage_temporarily_unavailable" ? storyQueueErrorMessage(error) : "Não foi possível consultar a sessão. Atualize o status para tentar novamente.";
+        if (form.isConnected) status.innerHTML = renderInstagramHealth(null, { failed: true });
       } finally {
         loading = false;
         if (form.isConnected) {
