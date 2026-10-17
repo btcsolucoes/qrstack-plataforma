@@ -238,3 +238,17 @@ O novo acesso da gestão autenticou como manager (200), consultou analytics (200
 e status Instagram (200). O vínculo Instagram do Amaro ainda está ausente e o
 publicador reportou offline; isso não impede o acesso à gestão e ao formulário,
 mas impede considerar a postagem automática do Amaro pronta para uso.
+
+
+## Saúde das sessões (16/10/2026)
+
+A lista de restaurantes e o formulário de conexão exibem uma barra segmentada
+qualitativa: verde para sessão confirmada recentemente com serviço online;
+âmbar para conexão pendente, revisão, pausa ou confirmação com mais de 24h;
+vermelho para desconexão, suspensão, identidade divergente ou publicador offline;
+cinza para conta não configurada/status indisponível. Não é uma porcentagem nem
+uma garantia de publicação. Texto, @ e última confirmação acompanham a cor.
+A leitura consulta somente o Worker; não faz novos logins no Instagram. Na lista,
+as consultas são espaçadas e respeitam Retry-After; navegação ou renovação da
+lista invalida o ciclo anterior. A cozinha permanece sem acesso a estes dados.
+Verificação: 132 testes locais; prévia desktop e celular sem overflow.

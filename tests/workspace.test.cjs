@@ -453,3 +453,19 @@ test('kitchen navigation excludes management and manager uses separate stored cr
   assert.match(settings,/data-password-toggle/);
   assert.doesNotMatch(settings,/name="(?:publisher_id|instagram_user_id)"/);
 });
+
+
+test('session health never treats offline, uncertain or stale data as healthy', () => {
+  const run = runtime();
+  const fresh = {configured:true,state:'connected',publisher_online:true,verified_at:new Date().toISOString()};
+  for (const [overrides,tone] of [[{},'healthy'],[{publisher_online:false},'danger'],[{request_status:'processing'},'warning'],[{request_status:'expired'},'warning'],[{state:'verification_required'},'warning'],[{state:'cooldown'},'warning'],[{state:'suspended'},'danger'],[{verified_at:'2000-01-01'},'warning'],[{verified_at:null},'warning'],[{configured:false},'neutral']]) {
+    assert.equal(run('instagramHealth('+JSON.stringify({...fresh,...overrides})+').tone'),tone);
+  }
+  const html=run('renderInstagramHealth('+JSON.stringify(fresh)+')');
+  assert.equal((html.match(/class="is-filled"/g)||[]).length,5);
+  assert.match(html,/role="img" aria-label="Estado da sessão:/);
+  assert.match(html,/Última confirmação/);
+  assert.match(run('renderInstagramHealth(null,{failed:true})'),/Status indisponível/);
+  assert.doesNotMatch(run('renderInstagramHealth(null,{failed:true})'),/is-filled/);
+  assert.doesNotMatch(run('renderInstagramHealth({instagram_username:"<script>alert(1)<\/script>"})'),/<script>/);
+});

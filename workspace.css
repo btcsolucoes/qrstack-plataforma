@@ -578,3 +578,19 @@ body:not(.public-mode) .password-input input[aria-invalid="true"] { border-color
 .manager-access-controls p { max-width: 68ch; }
 [data-manager-access-result] { display: grid; gap: 12px; margin-top: 16px; }
 [data-manager-access-result] input { width: 100%; min-width: 0; }
+
+.session-health { --health-color: #69746f; display: grid; gap: 10px; width: 100%; padding: 18px 0; }
+.session-health--healthy { --health-color: #256b5a; }
+.session-health--warning { --health-color: #8a5a12; }
+.session-health--danger { --health-color: #a43736; }
+.session-health__heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 18px; }
+.session-health__heading strong { color: var(--health-color); font-size: 15px; }
+.session-health__heading > span, .session-health small { color: #59665e; font-size: 12px; }
+.session-health__bar { display: flex; gap: 5px; max-width: 420px; height: 12px; }
+.session-health__bar span { flex: 1; border-radius: 3px; background: #e1e7e2; }
+.session-health__bar .is-filled { background: var(--health-color); }
+.session-health p { max-width: 70ch; font-size: 13px; }
+.session-health__account { font-weight: 700; overflow-wrap: anywhere; }
+.session-health--compact { padding: 16px 0; border-top: 1px solid var(--line); }
+.session-health--compact .session-health__bar { max-width: 320px; }
+@media (max-width: 560px) { .session-health__heading { align-items: flex-start; flex-direction: column; } }
