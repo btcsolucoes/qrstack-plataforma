@@ -241,7 +241,7 @@ async function claim(env, request, params) {
   const agent = await publisher(env, request, params.get("publisher_id"));
   await expireScheduledStories(env);
   const timestamp = now();
-  await env.DB.prepare("UPDATE instagram_publishers SET last_seen_at = ?, updated_at = ? WHERE publisher_id = ?").bind(timestamp, timestamp, agent.publisher_id).run();
+  await env.DB.prepare("UPDATE instagram_publishers SET last_seen_at = ?, updated_at = ? WHERE publisher_id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)").bind(timestamp, timestamp, agent.publisher_id, new Date(Date.now() - 60000).toISOString()).run();
   let job = await env.DB.prepare("SELECT * FROM instagram_story_jobs WHERE publisher_id = ? AND status IN ('claimed','preparing','publishing') ORDER BY claimed_at LIMIT 1").bind(agent.publisher_id).first();
   if (!job && env.INSTAGRAM_PUBLISHING_ENABLED !== "false") {
     const token = crypto.randomUUID().replaceAll("-", "") + crypto.randomUUID().replaceAll("-", "");

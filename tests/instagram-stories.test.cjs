@@ -112,6 +112,17 @@ async function requestConnection(f) {
 async function claimConnection(f, token = publisherToken, publisher_id = 'test-windows') {
   return f.call('claimInstagramConnection', { publisher_id }, { token });
 }
+test('review confirmation travels only in the one-use encrypted connection request', async t => {
+  const f = fixture(t);
+  await f.setupAccount();
+  const created = await f.call('requestInstagramConnection', {owner_key:ownerKey,slug:'internal',password:'FICTIONAL_REVIEW_PASSWORD',review_completed:true});
+  assert.equal(created.status,200);
+  assert.doesNotMatch(JSON.stringify(created.data), /password|review_completed/);
+  const connection=(await claimConnection(f)).data.connection;
+  assert.equal(connection.review_completed,true);
+  assert.equal(connection.password,'FICTIONAL_REVIEW_PASSWORD');
+  assert.equal((await claimConnection(f)).data.connection,null);
+});
 test('Instagram credentials reject kitchen access, are encrypted and delivered once to the assigned publisher', async t => {
   const f = fixture(t);
   await f.setupAccount({ enabled: false });

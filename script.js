@@ -1883,6 +1883,7 @@ function renderInstagramAccountSettings(restaurant) {
                     <div class="field field--full"><label>Instagram do restaurante<input name="instagram_username" required maxlength="31" placeholder="@restaurante" autocomplete="off" autocapitalize="none" spellcheck="false" /></label></div>
                     <div class="field field--full">${renderPasswordInput(`instagram-password-${escapeAttr(restaurant.slug)}`, "password", "Senha do Instagram", { autocomplete: "off", describedBy: `instagram-help-${escapeAttr(restaurant.slug)}` })}</div>
                     <p class="muted field--full" id="instagram-help-${escapeAttr(restaurant.slug)}">Informe apenas o @ e a senha. A plataforma identifica a conta automaticamente. A senha é usada nesta conexão e não fica disponível para consulta; a sessão fica protegida no serviço de publicação.</p>
+                    <label class="field--full"><span><input type="checkbox" name="instagram_review_completed" /> Já concluí as verificações no aplicativo oficial do Instagram e autorizo uma nova tentativa de login.</span></label>
                     <div class="actions field--full"><button type="submit" disabled>Conectar sessão</button><button type="button" class="secondary" data-refresh-instagram-session>Atualizar status</button></div>
                     <div class="field--full instagram-session-status" data-instagram-session-status role="status" aria-live="polite">${renderInstagramHealth()}</div>
                     <p class="muted field--full" data-instagram-session-message role="status"></p>
@@ -1980,11 +1981,15 @@ function attachInstagramSessionHandlers() {
     const message = form.querySelector("[data-instagram-session-message]");
     const submit = form.querySelector('button[type="submit"]');
     const refresh = form.querySelector("[data-refresh-instagram-session]");
-    let timer, loading = false, session = null, usernameEdited = false;
+    let timer, loading = false, session = null, usernameEdited = false, retryAt = 0;
     form.elements.instagram_username.addEventListener("input", () => { usernameEdited = true; });
     const reload = async () => {
       clearTimeout(timer);
       if (!form.isConnected || loading || (!ownerVerified && !isManagerWorkspace())) return;
+      if (Date.now() < retryAt) {
+        timer = setTimeout(reload, Math.min(2147483647, retryAt - Date.now()));
+        return;
+      }
       loading = true;
       refresh.disabled = true;
       try {
@@ -1995,13 +2000,17 @@ function attachInstagramSessionHandlers() {
         status.innerHTML = renderInstagramHealth(session);
       } catch (error) {
         session = null;
-        if (form.isConnected) status.innerHTML = renderInstagramHealth(null, { failed: true });
+        retryAt = Date.now() + Math.max(60, Number(error.retryAfter) || 60) * 1000;
+        if (form.isConnected) {
+          status.innerHTML = renderInstagramHealth(null, { failed: true });
+          message.textContent = storyQueueErrorMessage(error);
+        }
       } finally {
         loading = false;
         if (form.isConnected) {
           refresh.disabled = false;
-          submit.disabled = form.dataset.submitting === "true" || !session?.can_connect || ["pending", "processing"].includes(session?.request_status);
-          timer = setTimeout(reload, 15000);
+          submit.disabled = form.dataset.submitting === "true" || !session?.can_connect || !session?.publisher_online || ["pending", "processing"].includes(session?.request_status);
+          timer = setTimeout(reload, Math.min(2147483647, Math.max(15000, retryAt - Date.now())));
         }
       }
     };
@@ -2016,7 +2025,7 @@ function attachInstagramSessionHandlers() {
       hidePasswords(form);
       message.textContent = "Enviando pedido de conexão...";
       try {
-        await apiPost({ action: "requestInstagramConnection", ...instagramSessionCredentials(form.dataset.instagramSessionForm), slug: form.dataset.instagramSessionForm, instagram_username: form.elements.instagram_username.value.trim(), password });
+        await apiPost({ action: "requestInstagramConnection", ...instagramSessionCredentials(form.dataset.instagramSessionForm), slug: form.dataset.instagramSessionForm, instagram_username: form.elements.instagram_username.value.trim(), password, review_completed: form.elements.instagram_review_completed.checked });
         if (form.isConnected) message.textContent = "Pedido enviado. A conta será identificada e vinculada após a confirmação do login. A postagem depende do plano PERFORMANCE.";
       } catch (error) {
         const messages = { instagram_binding_required: "Salve um vínculo com um publicador ativo antes de conectar.",
@@ -2024,7 +2033,8 @@ function attachInstagramSessionHandlers() {
           account_has_unresolved_jobs: "Revise a publicação em andamento antes de reconectar.",
           too_many_attempts: "Limite de tentativas atingido. Aguarde alguns minutos antes de reenviar.",
           instagram_connection_unavailable: "O serviço de conexão está indisponível no momento." };
-        if (form.isConnected) message.textContent = messages[error.message] || "Não foi possível confirmar o envio. Consulte o status antes de tentar de novo.";
+        if (Number(error.retryAfter) > 0) retryAt = Date.now() + Number(error.retryAfter) * 1000;
+        if (form.isConnected) message.textContent = messages[error.message] || storyQueueErrorMessage(error);
       } finally {
         password = null;
         delete form.dataset.submitting;

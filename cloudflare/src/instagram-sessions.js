@@ -83,14 +83,14 @@ export async function handleSessionAction(request, env, payload, action, helpers
     const recent = await env.DB.prepare('SELECT created_at FROM instagram_connection_requests WHERE restaurant_id = ? ORDER BY created_at DESC LIMIT 1').bind(tenant.id).first();
     if (recent && Date.now() - Date.parse(recent.created_at) < 120000) fail('instagram_connection_wait', 429, Math.ceil((120000 - (Date.now() - Date.parse(recent.created_at))) / 1000));
     const id = crypto.randomUUID(), timestamp = stamp();
-    const encrypted = await encrypt(env, password, id);
+    const encrypted = await encrypt(env, JSON.stringify({ password, review_completed: payload.review_completed === true }), id);
     try {
       await env.DB.prepare(`INSERT INTO instagram_connection_requests(id,restaurant_id,restaurant_slug,publisher_id,instagram_username,instagram_user_id,encrypted_password,status,created_at,expires_at,updated_at,auto_bind,binding_snapshot)
         VALUES (?,?,?,?,?,?,?,'pending',?,?,?,?,?)`).bind(id, tenant.id, tenant.slug, publisherId, username, userId, encrypted, timestamp, new Date(Date.now() + 5 * 60000).toISOString(), timestamp, auto ? 1 : 0, snapshot(binding)).run();
     } catch { fail('instagram_connection_pending', 409); }
     return { connection: { id, status: 'pending' } };
   }
-  await env.DB.prepare('UPDATE instagram_publishers SET last_seen_at = ? WHERE publisher_id = ?').bind(stamp(), agent.publisher_id).run();
+  await env.DB.prepare('UPDATE instagram_publishers SET last_seen_at = ? WHERE publisher_id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)').bind(stamp(), agent.publisher_id, new Date(Date.now() - 60000).toISOString()).run();
   if (action === 'claimInstagramConnection') {
     const row = await env.DB.prepare("SELECT * FROM instagram_connection_requests WHERE publisher_id = ? AND status = 'pending' ORDER BY created_at LIMIT 1").bind(agent.publisher_id).first();
     if (!row) return { connection: null };
@@ -105,8 +105,11 @@ export async function handleSessionAction(request, env, payload, action, helpers
       AND (auto_bind=1 OR EXISTS (SELECT 1 FROM instagram_account_bindings b WHERE b.restaurant_id=instagram_connection_requests.restaurant_id AND b.publisher_id=instagram_connection_requests.publisher_id AND b.instagram_username=instagram_connection_requests.instagram_username AND b.instagram_user_id=instagram_connection_requests.instagram_user_id)) RETURNING id`)
       .bind(await digest(claim), stamp(), new Date(Date.now() + 15 * 60000).toISOString(), row.id, stamp()).first();
     if (!changed) return { connection: null };
-    const password = await decrypt(env, row.encrypted_password, row.id);
-    return { connection: { id: row.id, restaurant_slug: row.restaurant_slug, instagram_username: row.instagram_username, instagram_user_id: row.instagram_user_id, password, claim_token: claim } };
+    const decrypted = await decrypt(env, row.encrypted_password, row.id);
+    let credentials;
+    try { credentials = JSON.parse(decrypted); } catch { credentials = null; }
+    const password = credentials && typeof credentials.password === 'string' ? credentials.password : decrypted;
+    return { connection: { id: row.id, restaurant_slug: row.restaurant_slug, instagram_username: row.instagram_username, instagram_user_id: row.instagram_user_id, password, review_completed: credentials?.review_completed === true, claim_token: claim } };
   }
   if (action === 'completeInstagramConnection') {
     const row = await env.DB.prepare('SELECT * FROM instagram_connection_requests WHERE id=? AND publisher_id=?').bind(String(payload.id || ''), agent.publisher_id).first();
@@ -123,7 +126,7 @@ export async function handleSessionAction(request, env, payload, action, helpers
     return { completed: true };
   }
   if (!Array.isArray(payload.sessions) || payload.sessions.length > 100) fail('invalid_sessions');
-  if (payload.version === '0.2.0') await env.DB.prepare('UPDATE instagram_publishers SET version=? WHERE publisher_id=?').bind(payload.version, agent.publisher_id).run();
+  if (payload.version === '0.2.0') await env.DB.prepare('UPDATE instagram_publishers SET version=? WHERE publisher_id=? AND (version IS NULL OR version<>?)').bind(payload.version, agent.publisher_id, payload.version).run();
   for (const session of payload.sessions) {
     if (!STATES.has(session.state)) fail('invalid_session_state');
     const binding = await env.DB.prepare('SELECT * FROM instagram_account_bindings WHERE restaurant_slug=? AND publisher_id=?').bind(String(session.restaurant_slug || ''), agent.publisher_id).first();
