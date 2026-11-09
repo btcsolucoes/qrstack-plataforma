@@ -1980,11 +1980,15 @@ function attachInstagramSessionHandlers() {
     const message = form.querySelector("[data-instagram-session-message]");
     const submit = form.querySelector('button[type="submit"]');
     const refresh = form.querySelector("[data-refresh-instagram-session]");
-    let timer, loading = false, session = null, usernameEdited = false;
+    let timer, loading = false, session = null, usernameEdited = false, retryAt = 0;
     form.elements.instagram_username.addEventListener("input", () => { usernameEdited = true; });
     const reload = async () => {
       clearTimeout(timer);
       if (!form.isConnected || loading || (!ownerVerified && !isManagerWorkspace())) return;
+      if (Date.now() < retryAt) {
+        timer = setTimeout(reload, Math.min(2147483647, retryAt - Date.now()));
+        return;
+      }
       loading = true;
       refresh.disabled = true;
       try {
@@ -1995,13 +1999,17 @@ function attachInstagramSessionHandlers() {
         status.innerHTML = renderInstagramHealth(session);
       } catch (error) {
         session = null;
-        if (form.isConnected) status.innerHTML = renderInstagramHealth(null, { failed: true });
+        retryAt = Date.now() + Math.max(60, Number(error.retryAfter) || 60) * 1000;
+        if (form.isConnected) {
+          status.innerHTML = renderInstagramHealth(null, { failed: true });
+          message.textContent = storyQueueErrorMessage(error);
+        }
       } finally {
         loading = false;
         if (form.isConnected) {
           refresh.disabled = false;
-          submit.disabled = form.dataset.submitting === "true" || !session?.can_connect || ["pending", "processing"].includes(session?.request_status);
-          timer = setTimeout(reload, 15000);
+          submit.disabled = form.dataset.submitting === "true" || !session?.can_connect || !session?.publisher_online || ["pending", "processing"].includes(session?.request_status);
+          timer = setTimeout(reload, Math.min(2147483647, Math.max(15000, retryAt - Date.now())));
         }
       }
     };
@@ -2024,7 +2032,8 @@ function attachInstagramSessionHandlers() {
           account_has_unresolved_jobs: "Revise a publicação em andamento antes de reconectar.",
           too_many_attempts: "Limite de tentativas atingido. Aguarde alguns minutos antes de reenviar.",
           instagram_connection_unavailable: "O serviço de conexão está indisponível no momento." };
-        if (form.isConnected) message.textContent = messages[error.message] || "Não foi possível confirmar o envio. Consulte o status antes de tentar de novo.";
+        if (Number(error.retryAfter) > 0) retryAt = Date.now() + Number(error.retryAfter) * 1000;
+        if (form.isConnected) message.textContent = messages[error.message] || storyQueueErrorMessage(error);
       } finally {
         password = null;
         delete form.dataset.submitting;
