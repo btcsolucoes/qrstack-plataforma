@@ -2314,7 +2314,7 @@ async function fetchGoogleFormRecords(date = "") {
   url.searchParams.set("tqx", "out:csv");
   url.searchParams.set("sheet", AMARO_FORM_SHEET_NAME);
   url.searchParams.set("tq", query);
-  const response = await fetch(url.toString(), { headers: { accept: "text/csv" } });
+  const response = await fetch(url.toString(), { headers: { accept: "text/csv" }, signal: AbortSignal.timeout(date ? 2500 : 15000) });
   if (!response.ok) throw new Error(`google_forms_sync_failed:${response.status}`);
   const rows = parseCsv(await response.text()).slice(1);
   return rows.map((row) => {
@@ -2354,7 +2354,7 @@ async function syncGoogleFormDate(env, date) {
     return records;
   } catch (error) {
     console.warn("QrStack Google Forms daily sync failed", { date, error: error?.message || String(error) });
-    return [];
+    return null;
   }
 }
 
@@ -2417,19 +2417,23 @@ async function getMenu(env, slug, date = "") {
   const normalizedSlug = normalizeSlug(slug);
   let cached = await readCachedMenu(env, normalizedSlug, date);
   if (cached) return cached;
-  if (normalizedSlug === "amaro" && date) {
-    await syncGoogleFormDate(env, date);
-    cached = await readCachedMenu(env, normalizedSlug, date);
-    if (cached) return cached;
-  }
+  let result;
   try {
-    const result = await getMenuD1(env.DB, normalizedSlug, date);
+    result = await getMenuD1(env.DB, normalizedSlug, date);
     if (result.menu) await cacheMenuRecord(env, normalizeCachedMenuRecord({ ...result, response_source: "d1" }, "d1"));
-    return result;
+    if (result.menu) return result;
   } catch (error) {
     if (!isD1CapacityError(error)) throw error;
-    return { restaurant: fallbackRestaurant(normalizedSlug), menu: null, items: [], cache_status: "d1_quota_no_cached_menu" };
+    result = { restaurant: fallbackRestaurant(normalizedSlug), menu: null, items: [], cache_status: "d1_quota_no_cached_menu" };
   }
+  // Published platform data must not wait behind a third-party Sheets request.
+  if (normalizedSlug === "amaro" && date) {
+    const synced = await syncGoogleFormDate(env, date);
+    cached = await readCachedMenu(env, normalizedSlug, date);
+    if (cached) return cached;
+    if (synced === null) throw Object.assign(new Error('menu_update_unavailable'), { status: 503 });
+  }
+  return result;
 }
 
 async function getMenuD1(db, slug, date = "") {

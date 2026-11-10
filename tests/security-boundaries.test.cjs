@@ -58,6 +58,19 @@ function fixture(t) {
   return { env, sqlite, kv, call };
 }
 
+test('published Amaro menu does not wait for or fetch Google Sheets', async t => {
+  const f = fixture(t);
+  f.sqlite.exec("UPDATE menu_days SET restaurant_id=(SELECT id FROM restaurants WHERE slug='amaro') WHERE id='beta-menu'");
+  const original = global.fetch;
+  let calls=0;
+  global.fetch=async()=>{calls++;throw new Error('Sheets unavailable');};
+  t.after(()=>{global.fetch=original;});
+  const result=await f.call('getMenu',{slug:'amaro',date:'2026-10-07'});
+  assert.equal(result.status,200);
+  assert.equal(result.data.items[0].name,'Beta dish');
+  assert.equal(calls,0);
+});
+
 test('restaurant registration requires owner and creates an isolated client atomically', async t => {
   const f = fixture(t);
   const payload = { name: 'Novo Restaurante', slug: 'novo-restaurante', plan: 'divulgacao' };
