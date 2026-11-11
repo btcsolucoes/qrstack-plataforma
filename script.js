@@ -2176,7 +2176,7 @@ function renderGenericItemsTextarea() {
 function renderAmaroOriginalForm(restaurant) {
   const configuredFields = getAmaroFormFields().filter((field) => field.title.toLowerCase().startsWith("prato"));
   const fields = configuredFields.length
-    ? configuredFields
+    ? configuredFields.slice(0, 30)
     : Array.from({ length: 7 }, (_, index) => ({ title: `Prato ${index + 1}:` }));
   const activeExecutives = getCatalogForRestaurant(restaurant)
     .filter((item) => item.section_id === "executivos" && isCatalogItemActive(item))
@@ -2184,19 +2184,19 @@ function renderAmaroOriginalForm(restaurant) {
     .map((item) => item.name);
   return `
     <div class="field field--full">
-      <label>Formulário original Amaro</label>
-      <div class="select-grid">
+      <label>Pratos do dia</label>
+      <div class="select-grid" data-amaro-dishes>
         ${fields
           .map((field, index) => {
             return `
-              <div class="field">
-                <label for="amaro-prato-${index + 1}">${field.title.replace(":", "")}</label>
+              <div class="field" data-amaro-dish>
+                <div class="amaro-dish-heading"><label for="amaro-prato-${index + 1}">Prato ${index + 1}</label><button type="button" class="icon-button" data-remove-amaro-dish aria-label="Remover prato ${index + 1}" title="Remover prato ${index + 1}">${uiIcon("x")}</button></div>
                 <select id="amaro-prato-${index + 1}" name="prato_${index + 1}" required>
                   <option value="">Selecione</option>
                   ${activeExecutives
                     .map(
                       (option) =>
-                        `<option value="${escapeAttr(option)}">${option}</option>`
+                        `<option value="${escapeAttr(option)}">${escapeHtml(option)}</option>`
                     )
                     .join("")}
                 </select>
@@ -2205,6 +2205,7 @@ function renderAmaroOriginalForm(restaurant) {
           })
           .join("")}
       </div>
+      <div class="actions"><button type="button" class="secondary" data-add-amaro-dish>${uiIcon("plus")}Adicionar prato</button><span data-amaro-dish-count role="status">${fields.length} pratos</span></div>
     </div>
   `;
 }
@@ -2283,6 +2284,7 @@ function renderCatalogManager(restaurant) {
 function attachClientHandlers(restaurant, menu) {
   const menuForm = document.getElementById("menu-form");
   if (restaurant.slug === "amaro") {
+    attachAmaroDishControls(menuForm);
     syncUniqueMenuSelections(menuForm);
     menuForm.addEventListener("change", (event) => {
       if (event.target.matches('select[name^="prato_"]')) syncUniqueMenuSelections(menuForm);
@@ -2492,6 +2494,44 @@ function syncUniqueMenuSelections(form) {
       option.disabled = Boolean(option.value && option.value !== select.value && selected.has(option.value));
     });
   });
+}
+
+function attachAmaroDishControls(form) {
+  const grid = form.querySelector('[data-amaro-dishes]');
+  const add = form.querySelector('[data-add-amaro-dish]');
+  if (!grid || !add) return;
+  const refresh = () => {
+    const rows = [...grid.querySelectorAll('[data-amaro-dish]')];
+    rows.forEach((row, index) => {
+      const number = index + 1;
+      const select = row.querySelector('select');
+      select.name = `prato_${number}`;
+      select.id = `amaro-prato-${number}`;
+      const label = row.querySelector('label');
+      label.htmlFor = select.id; label.textContent = `Prato ${number}`;
+      const remove = row.querySelector('[data-remove-amaro-dish]');
+      remove.disabled = rows.length === 1;
+      remove.title = `Remover prato ${number}`;
+      remove.setAttribute('aria-label', remove.title);
+    });
+    add.disabled = rows.length >= 30;
+    form.querySelector('[data-amaro-dish-count]').textContent = `${rows.length} ${rows.length === 1 ? 'prato' : 'pratos'}${rows.length === 30 ? ' (limite por envio)' : ''}`;
+    syncUniqueMenuSelections(form);
+  };
+  add.addEventListener('click', () => {
+    if (grid.children.length >= 30 || form.dataset.submitting === 'true') return;
+    const row = grid.firstElementChild.cloneNode(true);
+    row.querySelector('select').value = '';
+    grid.append(row); refresh(); row.querySelector('select').focus();
+  });
+  grid.addEventListener('click', event => {
+    const remove = event.target.closest('[data-remove-amaro-dish]');
+    if (!remove || grid.children.length <= 1 || form.dataset.submitting === 'true') return;
+    const row = remove.closest('[data-amaro-dish]');
+    const next = row.nextElementSibling || row.previousElementSibling;
+    row.remove(); refresh(); next.querySelector('select').focus();
+  });
+  refresh();
 }
 
 function hasRepeatedMenuSelections(form) {
@@ -2736,7 +2776,10 @@ function selectedAmaroRows(restaurant, formData) {
     acc[normalizeKey(catalogItem.name)] = catalogItem;
     return acc;
   }, {});
-  return Array.from({ length: 7 }, (_, index) => formData.get(`prato_${index + 1}`)?.toString().trim())
+  return [...formData.entries()]
+    .filter(([key]) => /^prato_\d+$/.test(key))
+    .sort(([a], [b]) => Number(a.slice(6)) - Number(b.slice(6)))
+    .map(([, value]) => String(value || '').trim())
     .filter(Boolean)
     .map((name, index) => {
       const catalogItem = catalog[normalizeKey(name)];
