@@ -39,3 +39,17 @@ test('spoken introductions and isolated C are noise, not dishes',()=>{
  const html=fs.readFileSync(path.join(base,'index.html'),'utf8');
  assert.doesNotMatch(html,/id="(?:stop|analyze)"/);
 });
+
+test('screen recording: natural four-dish sentence produces exactly four suggestions',()=>{
+ const result=identify('Hoje vai ter Bobó parmegiana aquele franguinho da moeda e vai ter maminha piamontese também',catalog);
+ assert.deepEqual(result.groups.map(g=>catalog.find(i=>i.id===g.selected)?.name),['Bobó de Camarão','Frango à Parmegiana','Franguinho da Moeda','Maminha Grelhada e Arroz à Piamontese']);
+ assert.equal(result.groups.length,4);
+});
+
+test('shorthand remains unresolved when there are multiple catalog matches',()=>{
+ const expanded=[...catalog,{id:'other-parmegiana',name:'Carne à Parmegiana'}];
+ const result=identify('parmegiana',expanded);
+ assert.equal(result.groups[0].selected,'');assert.equal(result.groups[0].candidates.length,2);
+ assert.equal(identify('maminha',catalog).groups[0].selected,'');
+ assert.equal(identify('bobó e sushi também',catalog).groups[1].phrase,'sushi');
+});
