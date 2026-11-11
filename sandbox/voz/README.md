@@ -18,6 +18,10 @@ automatic interpretation. All results remain editable; simulation never writes.
 Run: `node --test tests/voice-sandbox.test.cjs` from repository root.
 Browser callback lifecycle was tested with a mocked recognition provider, not
 human audio. Real-device acceptance: grant microphone access, dictate names,
-stop, check transcript, identify, confirm suggestions, simulate. Also test denied
+pause for automatic stop, confirm the live suggestions, simulate. Also test denied
 permission, silence, backgrounding, ambiguous names and a second recording.
 No claims of kitchen-noise accuracy or cross-device voice reliability are made.
+Speech results update suggestions immediately; manual text edits debounce 250ms.
+Speech-end or result inactivity starts a 3.5-second stop timer, cancelled by new
+speech/results. Recognition-provider end can occur sooner. A new start appends
+to the current transcript. Clear aborts recognition and resets manual choices.

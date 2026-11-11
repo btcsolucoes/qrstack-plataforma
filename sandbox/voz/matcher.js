@@ -10,8 +10,8 @@
     for(const alias of aliases.sort((a,b)=>b.name.length-a.name.length)) {
       source=source.replace(new RegExp('(^|\\s|[,;])'+alias.name+'(?=$|\\s|[,;])','g'),(_,prefix)=>prefix+' dishmarker'+alias.index+' ');
     }
-    source=source.replace(/\b(hoje|vai|vamos|ter|tem|coloca|colocar|quero|servir|pratos|prato|cardapio|sera|serao|por favor)\b/g,' ');
-    const chunks=source.split(/[,;\n]+|\be\b/).flatMap(part=>part.split(/(dishmarker\d+)/)).map(s=>s.trim()).filter(s=>s && !/^(o|a|os|as|de|do|da|e)$/.test(s));
+    source=source.replace(/\b(hoje|vai|vamos|ser|ter|tem|coloca|colocar|quero|servir|pratos|prato|cardapio|sera|serao|por favor|tal|hum|aham)\b/g,' ');
+    const chunks=source.split(/[,;\n]+|\be\b/).flatMap(part=>part.split(/(dishmarker\d+)/)).map(s=>s.trim()).filter(s=>s && !/^(?:[a-z]|os|as|de|do|da)$/.test(s));
     const groups=chunks.map(chunk=>{
       const marker=/^dishmarker(\d+)$/.exec(chunk);
       if(marker) {const item=catalog[Number(marker[1])];return {phrase:item.name,candidates:[item.id],selected:item.id};}
