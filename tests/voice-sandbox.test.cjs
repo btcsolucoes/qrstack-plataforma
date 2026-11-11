@@ -30,3 +30,12 @@ test('duplicates collapse and sandbox contains no production transport or persis
  assert.match(html,/connect-src 'none'/);assert.match(html,/form-action 'none'/);
  assert.doesNotMatch(html,/src=".*(?:workspace|script)\.js/);
 });
+
+test('spoken introductions and isolated C are noise, not dishes',()=>{
+ for(const text of ['hoje vai ser bobó de camarão, c, cupim da guia','hoje vai C bobó de camarão e cupim da guia','hoje vai ser bobó de camarão, tal, tal, cupim da guia']) {
+  const result=identify(text,catalog);assert.equal(result.groups.length,2,text);assert.ok(result.groups.every(g=>g.selected));
+ }
+ assert.equal(identify('sushi',catalog).groups[0].selected,'');
+ const html=fs.readFileSync(path.join(base,'index.html'),'utf8');
+ assert.doesNotMatch(html,/id="(?:stop|analyze)"/);
+});
