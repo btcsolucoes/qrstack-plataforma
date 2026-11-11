@@ -131,6 +131,25 @@ test('restaurant form starts blank and contains the executive catalog', () => {
   assert.doesNotMatch(html, /selected/);
   assert.match(html, /Cupim da Guia/);
   assert.match(html, /Bobó de Camarão/);
+  assert.match(html, /data-add-amaro-dish/);
+  assert.equal((html.match(/data-remove-amaro-dish/g) || []).length, 7);
+});
+
+test('Amaro submission accepts fewer or more than seven dishes without losing prices or order', () => {
+  const run = runtime();
+  for (const count of [1, 3, 7, 8, 12, 30]) {
+    const pairs = Array.from({ length: count }, (_, i) => [`prato_${i + 1}`, `Prato teste ${i + 1}`]).reverse();
+    pairs.push(['date', '2026-11-11'], ['prato_99', '']);
+    const rows = JSON.parse(run(`JSON.stringify(selectedAmaroRows(getRestaurant('amaro'), new URLSearchParams(${JSON.stringify(pairs)})))`));
+    assert.equal(rows.length, count);
+    assert.equal(rows[0].name, 'Prato teste 1');
+    assert.equal(rows[count - 1].name, `Prato teste ${count}`);
+    assert.equal(rows[count - 1].sortOrder, count);
+  }
+  const item = JSON.parse(run(`JSON.stringify(getCatalogForRestaurant(getRestaurant('amaro')).find(item => item.section_id === 'executivos' && item.price))`));
+  const result = JSON.parse(run(`JSON.stringify(selectedAmaroRows(getRestaurant('amaro'), new URLSearchParams(${JSON.stringify([['prato_8', item.name]])})))`));
+  assert.equal(result[0].price, item.price);
+  assert.equal(result[0].description, item.description || '');
 });
 
 test('catalog preserves item information and produces valid photo URLs', () => {

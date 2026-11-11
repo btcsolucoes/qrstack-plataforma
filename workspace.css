@@ -594,3 +594,7 @@ body:not(.public-mode) .password-input input[aria-invalid="true"] { border-color
 .session-health--compact { padding: 16px 0; border-top: 1px solid var(--line); }
 .session-health--compact .session-health__bar { max-width: 320px; }
 @media (max-width: 560px) { .session-health__heading { align-items: flex-start; flex-direction: column; } }
+.amaro-dish-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.amaro-dish-heading label { margin: 0; }
+.amaro-dish-heading .icon-button { flex: 0 0 44px; min-height: 44px; }
+[data-amaro-dishes] { margin-bottom: 16px; }
